@@ -55,6 +55,14 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
         bindless_resources_used_(bindless_resources_used) {}
   ~D3D12RenderTargetCache() override;
 
+  // Shader code for resolve copy operations.
+  struct ResolveCopyShaderCode {
+    const void* unscaled;
+    size_t unscaled_size;
+    const void* scaled;
+    size_t scaled_size;
+  };
+
   bool Initialize();
   void Shutdown(bool from_destructor = false);
 
@@ -208,14 +216,6 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   // Parameter 1 - destination (shared memory or a part of it).
   // Parameter 2 - source (EDRAM).
   ID3D12RootSignature* resolve_copy_root_signature_ = nullptr;
-  struct ResolveCopyShaderCode {
-    const void* unscaled;
-    size_t unscaled_size;
-    const void* scaled;
-    size_t scaled_size;
-  };
-  static const ResolveCopyShaderCode
-      kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
   ID3D12PipelineState* resolve_copy_pipelines_[size_t(
       draw_util::ResolveCopyShaderIndex::kCount)] = {};
 
@@ -796,6 +796,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   // Temporary storage for DXBC building.
   std::vector<uint32_t> built_shader_;
+  // Converts the hand-built DXBC transfer pixel shaders to DXIL so they can
+  // pair with the DXIL passthrough vertex shader in a single pipeline.
+  IDxbcConverter* dxbc_to_dxil_converter_ = nullptr;
 
   // For rasterizer-ordered view (pixel shader interlock).
 

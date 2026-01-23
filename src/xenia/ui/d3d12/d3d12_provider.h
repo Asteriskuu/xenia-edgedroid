@@ -126,6 +126,11 @@ class D3D12Provider : public GraphicsProvider {
   uint32_t GetVirtualAddressBitsPerResource() const {
     return virtual_address_bits_per_resource_;
   }
+  // Returns true if Shader Model 6.6 is supported (required for SM 6.6 DXIL).
+  bool IsShaderModel66Supported() const {
+    return highest_shader_model_ >= 0x66;
+  }
+  uint16_t GetHighestShaderModel() const { return highest_shader_model_; }
 
   // Proxies for DirectX functions since they are loaded dynamically.
   HRESULT SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC* desc,
@@ -211,6 +216,7 @@ class D3D12Provider : public GraphicsProvider {
   bool ps_specified_stencil_reference_supported_;
   bool rasterizer_ordered_views_supported_;
   bool unaligned_block_textures_supported_;
+  uint16_t highest_shader_model_;
 };
 
 }  // namespace d3d12

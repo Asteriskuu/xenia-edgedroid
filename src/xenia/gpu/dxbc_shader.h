@@ -79,6 +79,7 @@ class DxbcShader : public Shader {
 
  private:
   friend class DxbcShaderTranslator;
+  friend class HlslShaderTranslator;
 
   std::atomic_flag bindings_setup_entered_ = ATOMIC_FLAG_INIT;
   std::vector<TextureBinding> texture_bindings_;

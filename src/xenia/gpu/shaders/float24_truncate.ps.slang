@@ -1,3 +1,4 @@
+// XE_DXIL_ONLY
 #include "pixel_formats.xesli"
 #include "xenos_draw.hlsli"
 

@@ -44,13 +44,16 @@ namespace gpu {
 namespace d3d12 {
 
 // Generated with `xb buildshaders`.
+// Internal shaders always use DXBC (SM 5.1) because the transfer pixel shaders
+// are dynamically generated as DXBC and can't be mixed with DXIL vertex
+// shaders.
 namespace shaders {
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/passthrough_position_xy_vs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/clear_uint2_ps.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/fullscreen_cw_vs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/host_depth_store_1xmsaa_cs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/host_depth_store_2xmsaa_cs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/host_depth_store_4xmsaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/passthrough_position_xy_vs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_clear_32bpp_cs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_clear_32bpp_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_clear_64bpp_cs.h"
@@ -75,9 +78,8 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_full_8bpp_scaled_cs.h"
 }  // namespace shaders
 
-constexpr D3D12RenderTargetCache::ResolveCopyShaderCode
-    D3D12RenderTargetCache::kResolveCopyShaders[size_t(
-        draw_util::ResolveCopyShaderIndex::kCount)] = {
+static constexpr D3D12RenderTargetCache::ResolveCopyShaderCode
+    kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)] = {
         {shaders::resolve_fast_32bpp_1x2xmsaa_cs,
          sizeof(shaders::resolve_fast_32bpp_1x2xmsaa_cs),
          shaders::resolve_fast_32bpp_1x2xmsaa_scaled_cs,
@@ -186,6 +188,17 @@ bool D3D12RenderTargetCache::Initialize() {
   const ui::d3d12::D3D12Provider& provider =
       command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
+
+  // The transfer pixel shaders are hand-built as DXBC but must share a pipeline
+  // with the DXIL passthrough vertex shader, so they need to be converted to
+  // DXIL with dxilconv. Without it host render target transfers will fail (but
+  // the pixel shader interlock path doesn't use them).
+  if (FAILED(provider.DxbcConverterCreateInstance(
+          CLSID_DxbcConverter, IID_PPV_ARGS(&dxbc_to_dxil_converter_)))) {
+    XELOGE(
+        "Failed to create the DXBC to DXIL converter for transfer pixel "
+        "shaders. Place dxilconv.dll next to the executable.");
+  }
 
   if (cvars::render_target_path == "performance") {
     path_ = Path::kHostRenderTargets;
@@ -1017,12 +1030,15 @@ bool D3D12RenderTargetCache::Initialize() {
     }
 
     // Create the resolve EDRAM buffer clearing pipelines.
-    resolve_rov_clear_32bpp_pipeline_ = ui::d3d12::util::CreateComputePipeline(
-        device,
-        draw_resolution_scaled ? shaders::resolve_clear_32bpp_scaled_cs
-                               : shaders::resolve_clear_32bpp_cs,
+    const void* resolve_clear_32bpp_cs =
+        draw_resolution_scaled
+            ? static_cast<const void*>(shaders::resolve_clear_32bpp_scaled_cs)
+            : static_cast<const void*>(shaders::resolve_clear_32bpp_cs);
+    size_t resolve_clear_32bpp_cs_size =
         draw_resolution_scaled ? sizeof(shaders::resolve_clear_32bpp_scaled_cs)
-                               : sizeof(shaders::resolve_clear_32bpp_cs),
+                               : sizeof(shaders::resolve_clear_32bpp_cs);
+    resolve_rov_clear_32bpp_pipeline_ = ui::d3d12::util::CreateComputePipeline(
+        device, resolve_clear_32bpp_cs, resolve_clear_32bpp_cs_size,
         resolve_rov_clear_root_signature_);
     if (resolve_rov_clear_32bpp_pipeline_ == nullptr) {
       XELOGE(
@@ -1032,12 +1048,15 @@ bool D3D12RenderTargetCache::Initialize() {
       return false;
     }
     resolve_rov_clear_32bpp_pipeline_->SetName(L"Resolve Clear 32bpp");
-    resolve_rov_clear_64bpp_pipeline_ = ui::d3d12::util::CreateComputePipeline(
-        device,
-        draw_resolution_scaled ? shaders::resolve_clear_64bpp_scaled_cs
-                               : shaders::resolve_clear_64bpp_cs,
+    const void* resolve_clear_64bpp_cs =
+        draw_resolution_scaled
+            ? static_cast<const void*>(shaders::resolve_clear_64bpp_scaled_cs)
+            : static_cast<const void*>(shaders::resolve_clear_64bpp_cs);
+    size_t resolve_clear_64bpp_cs_size =
         draw_resolution_scaled ? sizeof(shaders::resolve_clear_64bpp_scaled_cs)
-                               : sizeof(shaders::resolve_clear_64bpp_cs),
+                               : sizeof(shaders::resolve_clear_64bpp_cs);
+    resolve_rov_clear_64bpp_pipeline_ = ui::d3d12::util::CreateComputePipeline(
+        device, resolve_clear_64bpp_cs, resolve_clear_64bpp_cs_size,
         resolve_rov_clear_root_signature_);
     if (resolve_rov_clear_64bpp_pipeline_ == nullptr) {
       XELOGE(
@@ -1059,6 +1078,7 @@ bool D3D12RenderTargetCache::Initialize() {
 }
 
 void D3D12RenderTargetCache::Shutdown(bool from_destructor) {
+  ui::d3d12::util::ReleaseAndNull(dxbc_to_dxil_converter_);
   ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_64bpp_pipeline_);
   ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_32bpp_pipeline_);
   ui::d3d12::util::ReleaseAndNull(resolve_rov_clear_root_signature_);
@@ -4342,10 +4362,28 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
   pipeline_desc.pRootSignature = transfer_root_signatures_[size_t(
       use_stencil_reference_output_ ? mode.root_signature_with_stencil_ref
                                     : mode.root_signature_no_stencil_ref)];
+  // Convert the hand-built DXBC pixel shader to DXIL so it can pair with the
+  // DXIL passthrough vertex shader in a single pipeline.
+  std::vector<uint8_t> built_shader_dxil;
+  {
+    void* dxil = nullptr;
+    UINT32 dxil_size = 0;
+    if (!dxbc_to_dxil_converter_ ||
+        FAILED(dxbc_to_dxil_converter_->Convert(
+            built_shader_.data(), built_shader_size_bytes, nullptr, &dxil,
+            &dxil_size, nullptr)) ||
+        dxil == nullptr) {
+      XELOGE("Failed to convert a transfer pixel shader from DXBC to DXIL");
+      return nullptr;
+    }
+    built_shader_dxil.assign(static_cast<const uint8_t*>(dxil),
+                             static_cast<const uint8_t*>(dxil) + dxil_size);
+    CoTaskMemFree(dxil);
+  }
   pipeline_desc.VS.pShaderBytecode = shaders::passthrough_position_xy_vs;
   pipeline_desc.VS.BytecodeLength = sizeof(shaders::passthrough_position_xy_vs);
-  pipeline_desc.PS.pShaderBytecode = built_shader_.data();
-  pipeline_desc.PS.BytecodeLength = built_shader_size_bytes;
+  pipeline_desc.PS.pShaderBytecode = built_shader_dxil.data();
+  pipeline_desc.PS.BytecodeLength = UINT(built_shader_dxil.size());
   if (key.dest_msaa_samples == xenos::MsaaSamples::k2X && !msaa_2x_supported_) {
     // Using sample 0 as 0 and 3 as 1 for 2x instead.
     pipeline_desc.SampleMask = 0b1001;

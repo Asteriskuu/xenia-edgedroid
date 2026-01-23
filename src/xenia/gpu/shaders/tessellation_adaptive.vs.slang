@@ -1,3 +1,4 @@
+// XE_NO_MSL
 #include "endian.xesli"
 #include "xenos_draw.hlsli"
 

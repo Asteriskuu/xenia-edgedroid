@@ -1,3 +1,4 @@
+// XE_NO_MSL
 #include "xenos_draw.hlsli"
 
 struct XeHSConstantDataOutput {

@@ -1043,10 +1043,10 @@ float4_xe float_x4_xe(float x) { return float4_xe(x, x, x, x); }
   #define select_xe(condition, true_result, false_result) \
       mix(false_result, true_result, condition)
 #elif SHADING_LANGUAGE_HLSL_XE
-  #if XE_SLANG
-    // Slang deprecates the non-short-circuiting `?:` form on vector
-    // conditionals and exposes the same operation as the select() intrinsic.
-    // fxc on legacy SM 5.1 has no select(), so the plain-HLSL branch keeps `?:`.
+  #if XE_SLANG || XE_DXIL
+    // Slang and DXC / SM 6.x deprecate `?:` on vector conditionals and expose
+    // the same operation as the select() intrinsic. fxc on legacy SM 5.1 has
+    // no select(), so the plain-HLSL branch keeps `?:`.
     #define select_xe(condition, true_result, false_result) \
         select((condition), (true_result), (false_result))
   #else

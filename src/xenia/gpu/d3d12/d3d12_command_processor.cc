@@ -36,6 +36,7 @@ DEFINE_bool(d3d12_bindless, true,
             "D3D12");
 
 DECLARE_bool(clear_memory_page_state);
+DECLARE_bool(d3d12_dxil);
 DECLARE_bool(gpu_debug_markers);
 DECLARE_bool(submit_on_primary_buffer_end);
 DECLARE_bool(readback_memexport_fast);
@@ -975,7 +976,14 @@ bool D3D12CommandProcessor::SetupContext() {
     root_signature_bindless_desc.pParameters = root_parameters_bindless;
     root_signature_bindless_desc.NumStaticSamplers = 0;
     root_signature_bindless_desc.pStaticSamplers = nullptr;
-    root_signature_bindless_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+    // For SM 6.6 DXIL with ResourceDescriptorHeap/SamplerDescriptorHeap.
+    if (cvars::d3d12_dxil) {
+      root_signature_bindless_desc.Flags =
+          D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+          D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
+    } else {
+      root_signature_bindless_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+    }
     // Fetch constants.
     {
       auto& parameter =
@@ -5406,9 +5414,10 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
       }
       for (size_t i = 0; i < texture_count_pixel; ++i) {
         const D3D12Shader::TextureBinding& texture = (*textures_pixel)[i];
-        descriptor_indices[texture.bindless_descriptor_index] =
+        uint32_t tex_srv_idx =
             texture_cache_->GetActiveTextureBindlessSRVIndex(texture) -
             uint32_t(SystemBindlessView::kUnboundedSRVsStart);
+        descriptor_indices[texture.bindless_descriptor_index] = tex_srv_idx;
       }
       current_texture_layout_uid_pixel_ = texture_layout_uid_pixel;
       if (texture_count_pixel) {
@@ -5421,8 +5430,10 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
       }
       // Current samplers have already been updated.
       for (size_t i = 0; i < sampler_count_pixel; ++i) {
-        descriptor_indices[(*samplers_pixel)[i].bindless_descriptor_index] =
-            current_sampler_bindless_indices_pixel_[i];
+        uint32_t smp_bindless_idx =
+            (*samplers_pixel)[i].bindless_descriptor_index;
+        uint32_t smp_heap_idx = current_sampler_bindless_indices_pixel_[i];
+        descriptor_indices[smp_bindless_idx] = smp_heap_idx;
       }
       cbuffer_binding_descriptor_indices_pixel_.up_to_date = true;
       current_graphics_root_up_to_date_ &=

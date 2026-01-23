@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <thread>
 
 #include "third_party/dxbc/DXBCChecksum.h"
@@ -57,6 +58,10 @@ DEFINE_int32(
 DEFINE_bool(d3d12_tessellation_wireframe, false,
             "Display tessellated surfaces as wireframe for debugging.",
             "D3D12");
+DEFINE_bool(d3d12_dxil, true,
+            "Use DXIL shaders via HLSL generation and DXC compilation. "
+            "Enables SM 6.x features. Requires Windows 10 1709+.",
+            "D3D12");
 
 namespace xe {
 namespace gpu {
@@ -64,20 +69,21 @@ namespace d3d12 {
 
 // Generated with `xb buildshaders`.
 namespace shaders {
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/adaptive_quad_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/adaptive_triangle_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_quad_1cp_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_quad_4cp_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_triangle_1cp_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/continuous_triangle_3cp_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_quad_1cp_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_quad_4cp_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_triangle_1cp_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/discrete_triangle_3cp_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/float24_round_ps.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/float24_truncate_ps.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/tessellation_adaptive_vs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/tessellation_indexed_vs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/adaptive_quad_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/adaptive_triangle_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/continuous_quad_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/continuous_quad_4cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/continuous_triangle_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/continuous_triangle_3cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/depth_only_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/discrete_quad_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/discrete_quad_4cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/discrete_triangle_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/discrete_triangle_3cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/float24_round_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/float24_truncate_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/tessellation_adaptive_vs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/tessellation_indexed_vs.h"
 }  // namespace shaders
 
 PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
@@ -102,11 +108,6 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
       render_target_cache_.draw_resolution_scale_x(),
       render_target_cache_.draw_resolution_scale_y(),
       provider.GetGraphicsAnalysis() != nullptr);
-
-  if (edram_rov_used) {
-    depth_only_pixel_shader_ =
-        std::move(shader_translator_->CreateDepthOnlyPixelShader());
-  }
 }
 
 PipelineCache::~PipelineCache() { Shutdown(); }
@@ -137,6 +138,27 @@ bool PipelineCache::Initialize() {
       XELOGE(
           "Failed to create DxcCompiler, converted DXIL disassembly for "
           "debugging will be unavailable");
+    }
+  }
+
+  // Initialize DXIL shader compilation infrastructure.
+  dxil_shaders_enabled_ = false;
+  if (cvars::d3d12_dxil) {
+    dxc_shader_compiler_ = std::make_unique<DxcCompiler>(provider);
+    if (dxc_shader_compiler_->Initialize()) {
+      bool edram_rov_used = render_target_cache_.GetPath() ==
+                            RenderTargetCache::Path::kPixelShaderInterlock;
+      hlsl_shader_translator_ = std::make_unique<HlslShaderTranslator>(
+          provider.GetAdapterVendorID(), bindless_resources_used_,
+          edram_rov_used);
+      hlsl_shader_translator_->SetDxcCompiler(dxc_shader_compiler_.get());
+      dxil_shaders_enabled_ = true;
+      XELOGI(
+          "DXIL shader compilation enabled (SM 6.6 with "
+          "ResourceDescriptorHeap)");
+    } else {
+      XELOGW("Failed to initialize DXC compiler, falling back to DXBC shaders");
+      dxc_shader_compiler_.reset();
     }
   }
 
@@ -218,6 +240,11 @@ void PipelineCache::Shutdown() {
     delete it.second;
   }
   shaders_.clear();
+
+  // Shut down DXIL shader compilation.
+  hlsl_shader_translator_.reset();
+  dxc_shader_compiler_.reset();
+  dxil_shaders_enabled_ = false;
 
   // Shut down shader translation.
   ui::d3d12::util::ReleaseAndNull(dxc_compiler_);
@@ -786,8 +813,16 @@ bool PipelineCache::ConfigurePipeline(
   // For async mode, defer VS translation to background thread.
   // For sync mode, translate VS now on main thread.
   if (!vertex_shader->is_translated() && !use_async) {
-    if (!TranslateAnalyzedShader(*shader_translator_, *vertex_shader,
-                                 dxbc_converter_, dxc_utils_, dxc_compiler_)) {
+    bool translation_ok;
+    if (dxil_shaders_enabled_) {
+      translation_ok = TranslateAnalyzedShader(
+          *hlsl_shader_translator_, *vertex_shader, nullptr, nullptr, nullptr);
+    } else {
+      translation_ok =
+          TranslateAnalyzedShader(*shader_translator_, *vertex_shader,
+                                  dxbc_converter_, dxc_utils_, dxc_compiler_);
+    }
+    if (!translation_ok) {
       XELOGE("Failed to translate the vertex shader!");
       return false;
     }
@@ -811,9 +846,16 @@ bool PipelineCache::ConfigurePipeline(
       if (!pixel_shader->shader().is_ucode_analyzed()) {
         pixel_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
       }
-      if (!TranslateAnalyzedShader(*shader_translator_, *pixel_shader,
-                                   dxbc_converter_, dxc_utils_,
-                                   dxc_compiler_)) {
+      bool translation_ok;
+      if (dxil_shaders_enabled_) {
+        translation_ok = TranslateAnalyzedShader(
+            *hlsl_shader_translator_, *pixel_shader, nullptr, nullptr, nullptr);
+      } else {
+        translation_ok =
+            TranslateAnalyzedShader(*shader_translator_, *pixel_shader,
+                                    dxbc_converter_, dxc_utils_, dxc_compiler_);
+      }
+      if (!translation_ok) {
         XELOGE("Failed to translate the pixel shader!");
         return false;
       }
@@ -907,9 +949,9 @@ bool PipelineCache::ConfigurePipeline(
 }
 
 bool PipelineCache::TranslateAnalyzedShader(
-    DxbcShaderTranslator& translator,
-    D3D12Shader::D3D12Translation& translation, IDxbcConverter* dxbc_converter,
-    IDxcUtils* dxc_utils, IDxcCompiler* dxc_compiler) {
+    ShaderTranslator& translator, D3D12Shader::D3D12Translation& translation,
+    IDxbcConverter* dxbc_converter, IDxcUtils* dxc_utils,
+    IDxcCompiler* dxc_compiler) {
   D3D12Shader& shader = static_cast<D3D12Shader&>(translation.shader());
 
   // Perform translation.
@@ -1133,7 +1175,7 @@ void PipelineCache::TranslateShadersForStorage(
     const ui::d3d12::D3D12Provider& provider =
         command_processor_.GetD3D12Provider();
     StringBuffer ucode_disasm_buffer;
-    DxbcShaderTranslator translator(
+    DxbcShaderTranslator dxbc_translator(
         provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
         !(edram_rov_used ||
           render_target_cache_.gamma_render_target_as_unorm16()),
@@ -1141,7 +1183,15 @@ void PipelineCache::TranslateShadersForStorage(
         render_target_cache_.draw_resolution_scale_x(),
         render_target_cache_.draw_resolution_scale_y(),
         provider.GetGraphicsAnalysis() != nullptr);
-    // DXIL conversion objects.
+    // HLSL translator for DXIL compilation (one per thread).
+    std::unique_ptr<HlslShaderTranslator> hlsl_translator;
+    if (dxil_shaders_enabled_) {
+      hlsl_translator = std::make_unique<HlslShaderTranslator>(
+          provider.GetAdapterVendorID(), bindless_resources_used_,
+          edram_rov_used);
+      hlsl_translator->SetDxcCompiler(dxc_shader_compiler_.get());
+    }
+    // DXIL conversion objects (for DXBC disassembly only).
     IDxbcConverter* dxbc_converter = nullptr;
     IDxcUtils* dxc_utils = nullptr;
     IDxcCompiler* dxc_compiler = nullptr;
@@ -1172,11 +1222,20 @@ void PipelineCache::TranslateShadersForStorage(
         D3D12Shader::D3D12Translation* translation =
             static_cast<D3D12Shader::D3D12Translation*>(
                 shader->GetOrCreateTranslation(modification_it->second));
-        if (!translation->is_translated() &&
-            !TranslateAnalyzedShader(translator, *translation, dxbc_converter,
-                                     dxc_utils, dxc_compiler)) {
-          std::lock_guard<std::mutex> lock(shaders_failed_to_translate_mutex);
-          shaders_failed_to_translate.push_back(translation);
+        if (!translation->is_translated()) {
+          bool translation_ok;
+          if (dxil_shaders_enabled_ && hlsl_translator) {
+            translation_ok = TranslateAnalyzedShader(
+                *hlsl_translator, *translation, nullptr, nullptr, nullptr);
+          } else {
+            translation_ok = TranslateAnalyzedShader(
+                dxbc_translator, *translation, dxbc_converter, dxc_utils,
+                dxc_compiler);
+          }
+          if (!translation_ok) {
+            std::lock_guard<std::mutex> lock(shaders_failed_to_translate_mutex);
+            shaders_failed_to_translate.push_back(translation);
+          }
         }
       }
     }
@@ -2737,8 +2796,341 @@ const std::vector<uint32_t>& PipelineCache::GetGeometryShader(
   return geometry_shaders_.emplace(key, std::move(shader)).first->second;
 }
 
+std::string PipelineCache::CreateHlslGeometryShaderSource(
+    GeometryShaderKey key) {
+  std::ostringstream source;
+
+  // System constants for point sprites.
+  source << "// Generated HLSL geometry shader - Xenia Xbox 360 Emulator\n";
+  source << "// Shader Model 6.6\n\n";
+
+  if (key.type == PipelineGeometryShader::kPointList) {
+    source << "cbuffer xe_system_cbuffer : register(b0) {\n";
+    source << "  uint xe_flags;\n";
+    source << "  float2 xe_tessellation_factor_range;\n";
+    source << "  uint xe_line_loop_closing_index;\n";
+    source << "  uint xe_vertex_index_endian;\n";
+    source << "  uint xe_vertex_index_offset;\n";
+    source << "  uint2 xe_vertex_index_min_max;\n";
+    source << "  float4 xe_user_clip_planes[6];\n";
+    source << "  float3 xe_ndc_scale;\n";
+    source << "  float xe_point_vertex_diameter_min;\n";
+    source << "  float3 xe_ndc_offset;\n";
+    source << "  float xe_point_vertex_diameter_max;\n";
+    source << "  float2 xe_point_constant_diameter;\n";
+    source << "  float2 xe_point_screen_diameter_to_ndc_radius;\n";
+    source << "};\n\n";
+  }
+
+  // Input/output structures.
+  // GSInput must match the vertex shader output structure exactly.
+  source << "struct GSInput {\n";
+  for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+    source << "  float4 interpolator_" << i << " : TEXCOORD" << i << ";\n";
+  }
+  uint32_t texcoord_after_interpolators = key.interpolator_count;
+  // point_parameters only present when VS outputs point size.
+  if (key.has_point_size) {
+    source << "  float3 point_parameters : TEXCOORD"
+           << texcoord_after_interpolators << ";\n";
+    ++texcoord_after_interpolators;
+  }
+  source << "  float4 position : SV_Position;\n";
+  if (key.user_clip_plane_count > 0) {
+    source << "  float" << key.user_clip_plane_count
+           << " clip_distance : SV_ClipDistance;\n";
+  }
+  source << "};\n\n";
+
+  // GSOutput must match the pixel shader input structure.
+  source << "struct GSOutput {\n";
+  for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+    source << "  float4 interpolator_" << i << " : TEXCOORD" << i << ";\n";
+  }
+  texcoord_after_interpolators = key.interpolator_count;
+  // point_parameters only present when PS expects point coordinates.
+  if (key.has_point_coordinates) {
+    source << "  float3 point_parameters : TEXCOORD"
+           << texcoord_after_interpolators << ";\n";
+    ++texcoord_after_interpolators;
+  }
+  source << "  float4 position : SV_Position;\n";
+  if (key.user_clip_plane_count > 0) {
+    source << "  float" << key.user_clip_plane_count
+           << " clip_distance : SV_ClipDistance;\n";
+  }
+  source << "};\n\n";
+
+  // Main function based on primitive type.
+  switch (key.type) {
+    case PipelineGeometryShader::kPointList: {
+      // Point list: expand single point to quad (4 vertices, triangle strip).
+      source << "[maxvertexcount(4)]\n";
+      source << "void main(point GSInput input[1], inout "
+                "TriangleStream<GSOutput> output) {\n";
+      source << "  GSOutput vertex;\n\n";
+
+      // Copy interpolators.
+      for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+        source << "  vertex.interpolator_" << i << " = input[0].interpolator_"
+               << i << ";\n";
+      }
+      if (key.user_clip_plane_count > 0) {
+        source << "  vertex.clip_distance = input[0].clip_distance;\n";
+      }
+      source << "\n";
+
+      // Calculate point size in NDC.
+      source << "  // Calculate point radius in NDC.\n";
+      source << "  float point_size = ";
+      if (key.has_point_size) {
+        source << "input[0].point_parameters.x;\n";
+      } else {
+        source << "xe_point_constant_diameter.x;\n";
+      }
+      source
+          << "  point_size = clamp(point_size, xe_point_vertex_diameter_min, "
+             "xe_point_vertex_diameter_max);\n";
+      source << "  float2 point_radius = point_size * "
+                "xe_point_screen_diameter_to_ndc_radius;\n\n";
+
+      // Emit 4 vertices (triangle strip: TL, TR, BL, BR).
+      const char* offsets[4][2] = {
+          {"-1.0", "-1.0"}, {"1.0", "-1.0"}, {"-1.0", "1.0"}, {"1.0", "1.0"}};
+      const char* coords[4][2] = {
+          {"0.0", "0.0"}, {"1.0", "0.0"}, {"0.0", "1.0"}, {"1.0", "1.0"}};
+      for (int i = 0; i < 4; ++i) {
+        source << "  vertex.position = input[0].position;\n";
+        source << "  vertex.position.xy += float2(" << offsets[i][0] << ", "
+               << offsets[i][1] << ") * point_radius * input[0].position.w;\n";
+        // Write generated sprite coordinates to point_parameters.xy for PS.
+        if (key.has_point_coordinates) {
+          if (key.has_point_size) {
+            // point_parameters.z is preserved from input (may contain point
+            // size).
+            source << "  vertex.point_parameters = float3(" << coords[i][0]
+                   << ", " << coords[i][1]
+                   << ", input[0].point_parameters.z);\n";
+          } else {
+            source << "  vertex.point_parameters = float3(" << coords[i][0]
+                   << ", " << coords[i][1] << ", 0.0);\n";
+          }
+        }
+        source << "  output.Append(vertex);\n\n";
+      }
+      source << "  output.RestartStrip();\n";
+      source << "}\n";
+    } break;
+
+    case PipelineGeometryShader::kRectangleList: {
+      // Rectangle list: 3 vertices define a rectangle, expand to 4 vertices.
+      // The longest edge is the diagonal. Find it and construct the 4th vertex.
+      // Based on DXBC implementation which handles all 3 possible diagonal
+      // cases.
+      source << "[maxvertexcount(4)]\n";
+      source << "void main(triangle GSInput input[3], inout "
+                "TriangleStream<GSOutput> output) {\n";
+      source << "  GSOutput vertex;\n\n";
+
+      // Find the longest edge (the diagonal) by comparing squared lengths.
+      source << "  // Find longest edge (diagonal) by comparing squared "
+                "lengths.\n";
+      source
+          << "  float2 edge12 = input[2].position.xy - input[1].position.xy;\n";
+      source
+          << "  float2 edge20 = input[0].position.xy - input[2].position.xy;\n";
+      source
+          << "  float2 edge01 = input[1].position.xy - input[0].position.xy;\n";
+      source << "  float len12sq = dot(edge12, edge12);\n";
+      source << "  float len20sq = dot(edge20, edge20);\n";
+      source << "  float len01sq = dot(edge01, edge01);\n\n";
+
+      // Select vertex order based on which edge is longest.
+      // If 12 is longest: strip order 0,1,2,3 where 3 = -0+1+2
+      // If 20 is longest: strip order 1,2,0,3 where 3 = -1+2+0
+      // If 01 is longest: strip order 2,0,1,3 where 3 = -2+0+1
+      source << "  // Select vertex indices based on longest edge.\n";
+      source << "  int3 idx;\n";
+      source << "  if (len12sq > len20sq && len12sq > len01sq) {\n";
+      source << "    idx = int3(0, 1, 2); // 12 is diagonal\n";
+      source << "  } else if (len20sq > len01sq) {\n";
+      source << "    idx = int3(1, 2, 0); // 20 is diagonal\n";
+      source << "  } else {\n";
+      source << "    idx = int3(2, 0, 1); // 01 is diagonal\n";
+      source << "  }\n\n";
+
+      // Helper arrays for indexed access.
+      source << "  float4 positions[3] = { input[0].position, "
+                "input[1].position, input[2].position };\n";
+      if (key.has_point_size) {
+        source << "  float3 point_params[3] = { input[0].point_parameters, "
+                  "input[1].point_parameters, input[2].point_parameters };\n";
+      }
+      for (uint32_t j = 0; j < key.interpolator_count; ++j) {
+        source << "  float4 interp" << j << "[3] = { input[0].interpolator_"
+               << j << ", input[1].interpolator_" << j
+               << ", input[2].interpolator_" << j << " };\n";
+      }
+      if (key.user_clip_plane_count > 0) {
+        source << "  float" << key.user_clip_plane_count
+               << " clip_dists[3] = { input[0].clip_distance, "
+                  "input[1].clip_distance, input[2].clip_distance };\n";
+      }
+      source << "\n";
+
+      // Calculate 4th vertex position: v3 = -v[idx.x] + v[idx.y] + v[idx.z]
+      source << "  float4 pos3 = -positions[idx.x] + positions[idx.y] + "
+                "positions[idx.z];\n\n";
+
+      // Emit first 3 vertices in selected order.
+      for (int i = 0; i < 3; ++i) {
+        source << "  // Vertex " << i << "\n";
+        for (uint32_t j = 0; j < key.interpolator_count; ++j) {
+          source << "  vertex.interpolator_" << j << " = interp" << j << "[idx["
+                 << i << "]];\n";
+        }
+        if (key.user_clip_plane_count > 0) {
+          source << "  vertex.clip_distance = clip_dists[idx[" << i << "]];\n";
+        }
+        if (key.has_point_coordinates) {
+          if (key.has_point_size) {
+            source << "  vertex.point_parameters = point_params[idx[" << i
+                   << "]];\n";
+          } else {
+            source << "  vertex.point_parameters = float3(0.0, 0.0, 0.0);\n";
+          }
+        }
+        source << "  vertex.position = positions[idx[" << i << "]];\n";
+        source << "  output.Append(vertex);\n\n";
+      }
+
+      // Emit 4th vertex (generated).
+      source << "  // Vertex 3 (generated)\n";
+      for (uint32_t j = 0; j < key.interpolator_count; ++j) {
+        source << "  vertex.interpolator_" << j << " = -interp" << j
+               << "[idx.x] + interp" << j << "[idx.y] + interp" << j
+               << "[idx.z];\n";
+      }
+      if (key.user_clip_plane_count > 0) {
+        source << "  vertex.clip_distance = -clip_dists[idx.x] + "
+                  "clip_dists[idx.y] + clip_dists[idx.z];\n";
+      }
+      if (key.has_point_coordinates) {
+        if (key.has_point_size) {
+          source << "  vertex.point_parameters = -point_params[idx.x] + "
+                    "point_params[idx.y] + point_params[idx.z];\n";
+        } else {
+          source << "  vertex.point_parameters = float3(0.0, 0.0, 0.0);\n";
+        }
+      }
+      source << "  vertex.position = pos3;\n";
+      source << "  output.Append(vertex);\n\n";
+
+      source << "  output.RestartStrip();\n";
+      source << "}\n";
+    } break;
+
+    case PipelineGeometryShader::kQuadList: {
+      // Quad list: 4 vertices per quad, emit as triangle strip.
+      source << "[maxvertexcount(4)]\n";
+      source << "void main(lineadj GSInput input[4], inout "
+                "TriangleStream<GSOutput> output) {\n";
+      source << "  GSOutput vertex;\n\n";
+
+      // Emit vertices in order: 0, 1, 3, 2 for correct triangle strip winding.
+      const int order[4] = {0, 1, 3, 2};
+      for (int i = 0; i < 4; ++i) {
+        int idx = order[i];
+        for (uint32_t j = 0; j < key.interpolator_count; ++j) {
+          source << "  vertex.interpolator_" << j << " = input[" << idx
+                 << "].interpolator_" << j << ";\n";
+        }
+        if (key.user_clip_plane_count > 0) {
+          source << "  vertex.clip_distance = input[" << idx
+                 << "].clip_distance;\n";
+        }
+        if (key.has_point_coordinates) {
+          if (key.has_point_size) {
+            source << "  vertex.point_parameters = input[" << idx
+                   << "].point_parameters;\n";
+          } else {
+            source << "  vertex.point_parameters = float3(0.0, 0.0, 0.0);\n";
+          }
+        }
+        source << "  vertex.position = input[" << idx << "].position;\n";
+        source << "  output.Append(vertex);\n\n";
+      }
+      source << "  output.RestartStrip();\n";
+      source << "}\n";
+    } break;
+
+    default:
+      source << "// Unknown geometry shader type\n";
+      source << "[maxvertexcount(1)]\n";
+      source << "void main(point GSInput input[1], inout PointStream<GSOutput> "
+                "output) {}\n";
+      break;
+  }
+
+  return source.str();
+}
+
+const std::vector<uint8_t>* PipelineCache::GetDxilGeometryShader(
+    GeometryShaderKey key) {
+  auto it = dxil_geometry_shaders_.find(key);
+  if (it != dxil_geometry_shaders_.end()) {
+    return it->second.empty() ? nullptr : &it->second;
+  }
+
+  // Generate HLSL source.
+  std::string hlsl_source = CreateHlslGeometryShaderSource(key);
+
+  // Debug: dump the HLSL source for investigation
+  XELOGI(
+      "HLSL GS Source (type={}, interp={}, has_point_size={}, "
+      "has_point_coords={}, clip_planes={}):\n{}",
+      static_cast<int>(key.type), key.interpolator_count, key.has_point_size,
+      key.has_point_coordinates, key.user_clip_plane_count, hlsl_source);
+
+  // Compile with DXC.
+  std::vector<uint8_t> dxil_bytecode;
+  if (dxc_shader_compiler_) {
+    std::string error_output;
+    if (!dxc_shader_compiler_->Compile(hlsl_source, "main", "gs_6_6",
+                                       dxil_bytecode, &error_output)) {
+      XELOGE("Failed to compile DXIL geometry shader: {}", error_output);
+      // Cache empty vector to avoid repeated compilation attempts.
+      dxil_geometry_shaders_.emplace(key, std::vector<uint8_t>());
+      return nullptr;
+    }
+    XELOGI("Compiled DXIL geometry shader (type={}, interpolators={})",
+           static_cast<int>(key.type), key.interpolator_count);
+
+    // Dump DXIL disassembly for debugging
+    std::string disasm;
+    if (dxc_shader_compiler_->Disassemble(dxil_bytecode, disasm)) {
+      std::string dxil_filename =
+          "shaders/gs_type" + std::to_string(static_cast<int>(key.type)) +
+          "_interp" + std::to_string(key.interpolator_count) + ".hlsl.dxil";
+      FILE* df = fopen(dxil_filename.c_str(), "w");
+      if (df) {
+        fwrite(disasm.c_str(), 1, disasm.size(), df);
+        fclose(df);
+        XELOGI("GS DXIL disassembly written to {}", dxil_filename);
+      }
+    }
+  } else {
+    XELOGE("DXC compiler not available for geometry shader compilation");
+    dxil_geometry_shaders_.emplace(key, std::vector<uint8_t>());
+    return nullptr;
+  }
+
+  auto result = dxil_geometry_shaders_.emplace(key, std::move(dxil_bytecode));
+  return result.first->second.empty() ? nullptr : &result.first->second;
+}
+
 void PipelineCache::EnsurePipelineShadersTranslated(
-    Pipeline* pipeline, DxbcShaderTranslator& translator,
+    Pipeline* pipeline, ShaderTranslator& translator,
     StringBuffer& ucode_disasm_buffer, IDxbcConverter* dxbc_converter,
     IDxcUtils* dxc_utils, IDxcCompiler* dxc_compiler, bool use_try_claim,
     bool handle_non_placeholder) {
@@ -2991,8 +3383,8 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
     state_desc.PS.BytecodeLength =
         runtime_description.pixel_shader->translated_binary().size();
   } else if (edram_rov_used) {
-    state_desc.PS.pShaderBytecode = depth_only_pixel_shader_.data();
-    state_desc.PS.BytecodeLength = depth_only_pixel_shader_.size();
+    state_desc.PS.pShaderBytecode = shaders::depth_only_ps;
+    state_desc.PS.BytecodeLength = sizeof(shaders::depth_only_ps);
   } else {
     if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
         (description.depth_func != xenos::CompareFunction::kAlways ||
@@ -3010,10 +3402,32 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
 
   // Geometry shader.
   if (runtime_description.geometry_shader != nullptr) {
-    state_desc.GS.pShaderBytecode = runtime_description.geometry_shader->data();
-    state_desc.GS.BytecodeLength =
-        sizeof(*runtime_description.geometry_shader->data()) *
-        runtime_description.geometry_shader->size();
+    if (cvars::d3d12_dxil) {
+      // DXIL mode: use HLSL-compiled geometry shaders.
+      GeometryShaderKey gs_key;
+      if (GetGeometryShaderKey(
+              description.geometry_shader,
+              DxbcShaderTranslator::Modification(
+                  runtime_description.vertex_shader->modification()),
+              DxbcShaderTranslator::Modification(
+                  runtime_description.pixel_shader
+                      ? runtime_description.pixel_shader->modification()
+                      : 0),
+              gs_key)) {
+        const std::vector<uint8_t>* dxil_gs = GetDxilGeometryShader(gs_key);
+        if (dxil_gs && !dxil_gs->empty()) {
+          state_desc.GS.pShaderBytecode = dxil_gs->data();
+          state_desc.GS.BytecodeLength = dxil_gs->size();
+        }
+      }
+    } else {
+      // DXBC mode: use dynamically generated DXBC geometry shaders.
+      state_desc.GS.pShaderBytecode =
+          runtime_description.geometry_shader->data();
+      state_desc.GS.BytecodeLength =
+          sizeof(*runtime_description.geometry_shader->data()) *
+          runtime_description.geometry_shader->size();
+    }
   }
 
   // Rasterizer state.
@@ -3259,7 +3673,7 @@ void PipelineCache::CreationThread(size_t thread_index) {
   bool edram_rov_used = render_target_cache_.GetPath() ==
                         RenderTargetCache::Path::kPixelShaderInterlock;
   StringBuffer ucode_disasm_buffer;
-  DxbcShaderTranslator translator(
+  DxbcShaderTranslator dxbc_translator(
       provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
       !(edram_rov_used ||
         render_target_cache_.gamma_render_target_as_unorm16()),
@@ -3267,7 +3681,24 @@ void PipelineCache::CreationThread(size_t thread_index) {
       render_target_cache_.draw_resolution_scale_x(),
       render_target_cache_.draw_resolution_scale_y(),
       provider.GetGraphicsAnalysis() != nullptr);
-  // Create thread-local DXIL conversion objects if needed.
+  // HLSL translator for DXIL compilation (one per thread).
+  std::unique_ptr<HlslShaderTranslator> hlsl_translator;
+  if (dxil_shaders_enabled_) {
+    hlsl_translator = std::make_unique<HlslShaderTranslator>(
+        provider.GetAdapterVendorID(), bindless_resources_used_,
+        edram_rov_used);
+    hlsl_translator->SetDxcCompiler(dxc_shader_compiler_.get());
+  }
+  // Select the appropriate translator.
+  ShaderTranslator* translator_ptr;
+  if (dxil_shaders_enabled_ && hlsl_translator) {
+    translator_ptr = hlsl_translator.get();
+  } else {
+    translator_ptr = &dxbc_translator;
+  }
+  ShaderTranslator& translator = *translator_ptr;
+  // Create thread-local DXIL conversion objects if needed (for DXBC
+  // disassembly).
   IDxbcConverter* dxbc_converter = nullptr;
   IDxcUtils* dxc_utils = nullptr;
   IDxcCompiler* dxc_compiler = nullptr;
@@ -3380,7 +3811,13 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
     }
 
     // Translate pending shaders and update root signature.
-    EnsurePipelineShadersTranslated(pipeline_to_create, *shader_translator_,
+    ShaderTranslator* translator_ptr;
+    if (dxil_shaders_enabled_ && hlsl_shader_translator_) {
+      translator_ptr = hlsl_shader_translator_.get();
+    } else {
+      translator_ptr = shader_translator_.get();
+    }
+    EnsurePipelineShadersTranslated(pipeline_to_create, *translator_ptr,
                                     ucode_disasm_buffer_, dxbc_converter_,
                                     dxc_utils_, dxc_compiler_,
                                     /*use_try_claim=*/true,
