@@ -6,5 +6,6 @@
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
+// XE_NO_MSL
 
 #include "guest_output_ffx_fsr_rcas.xesli"

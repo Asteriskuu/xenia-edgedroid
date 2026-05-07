@@ -46,13 +46,13 @@ namespace d3d12 {
 
 // Generated with `xb buildshaders`.
 namespace shaders {
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/apply_gamma_pwl_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/apply_gamma_pwl_fxaa_luma_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/apply_gamma_table_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/apply_gamma_table_fxaa_luma_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/fxaa_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/fxaa_extreme_cs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/resolve_downscale_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/apply_gamma_pwl_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/apply_gamma_pwl_fxaa_luma_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/apply_gamma_table_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/apply_gamma_table_fxaa_luma_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/fxaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/fxaa_extreme_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/resolve_downscale_cs.h"
 }  // namespace shaders
 
 D3D12CommandProcessor::D3D12CommandProcessor(

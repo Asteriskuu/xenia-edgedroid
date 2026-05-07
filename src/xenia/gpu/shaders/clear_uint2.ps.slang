@@ -1,3 +1,4 @@
+// XE_DXIL_ONLY
 cbuffer XeClearConstants : register(b0) {
   uint2 xe_clear_value;
 };

@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+// XE_DXIL_ONLY
 #include "../../ui/shaders/xesl.xesli"
 
 // A clockwise triangle covering the whole viewport.

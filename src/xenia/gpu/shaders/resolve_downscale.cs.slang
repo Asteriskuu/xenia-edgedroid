@@ -1,3 +1,4 @@
+// XE_NO_MSL
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -83,8 +84,8 @@ push_const_begin_xe(b0, space0)
   uint xe_downscale_half_pixel_offset;
 push_const_end_xe
 
-byte_buffer_align4_declare_xe(xe_resolve_source, set=0, binding=0, t0, space0)
-byte_buffer_align4_wo_declare_xe(xe_resolve_dest, set=0, binding=1, u0, space0)
+byte_buffer_align4_declare_xe(xe_resolve_source, 0, 0, t0, space0, 1)
+byte_buffer_align4_wo_declare_xe(xe_resolve_dest, 0, 1, u0, space0, 2)
 
 // 128 threads per group - the recommended size and the Vulkan minimum for
 // maxComputeWorkGroupInvocations. A tile has 256..2048 output dwords depending

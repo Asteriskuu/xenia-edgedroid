@@ -35,16 +35,16 @@ namespace d3d12 {
 
 // Generated with `xb buildshaders`.
 namespace shaders {
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_bilinear_dither_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_bilinear_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_ffx_cas_resample_dither_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_ffx_cas_resample_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_ffx_cas_sharpen_dither_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_ffx_cas_sharpen_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_ffx_fsr_easu_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_ffx_fsr_rcas_dither_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_ffx_fsr_rcas_ps.h"
-#include "xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_triangle_strip_rect_vs.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_bilinear_dither_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_bilinear_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_ffx_cas_resample_dither_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_ffx_cas_resample_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_ffx_cas_sharpen_dither_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_ffx_cas_sharpen_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_ffx_fsr_easu_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_ffx_fsr_rcas_dither_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_ffx_fsr_rcas_ps.h"
+#include "xenia/ui/shaders/bytecode/d3d12_dxil/guest_output_triangle_strip_rect_vs.h"
 }  // namespace shaders
 
 D3D12Presenter::~D3D12Presenter() {

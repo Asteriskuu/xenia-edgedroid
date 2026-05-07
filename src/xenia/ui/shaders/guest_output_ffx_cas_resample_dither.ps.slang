@@ -6,6 +6,7 @@
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
+// XE_NO_MSL
 
-#define XE_APPLY_GAMMA_COMPUTE
-#include "apply_gamma_pwl.xesli"
+#define XE_GUEST_OUTPUT_DITHER 1
+#include "guest_output_ffx_cas_resample.xesli"

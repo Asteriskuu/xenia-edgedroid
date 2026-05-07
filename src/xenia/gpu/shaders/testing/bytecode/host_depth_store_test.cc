@@ -23,7 +23,7 @@ typedef uint8_t BYTE;
 
 // Include DXBC bytecode
 #define host_depth_store_1xmsaa_cs host_depth_store_1xmsaa_cs_dxbc
-#include "xenia/gpu/shaders/bytecode/d3d12_5_1/host_depth_store_1xmsaa_cs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/host_depth_store_1xmsaa_cs.h"
 #undef host_depth_store_1xmsaa_cs
 
 // Include SPIR-V bytecode

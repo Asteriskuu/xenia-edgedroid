@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+// XE_DXIL_ONLY
 // Mip generation compute shader for scaled resolve textures.
 // Generates a single mip level by downsampling from the previous level using
 // bilinear filtering. Supports texture arrays via SV_DispatchThreadID.z.

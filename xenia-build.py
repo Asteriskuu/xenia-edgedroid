@@ -17,6 +17,9 @@ from shutil import rmtree, which as shutil_which
 import subprocess
 import sys
 import stat
+import tarfile
+import urllib.request
+import zipfile
 import enum
 
 __author__ = "ben.vanik@gmail.com (Ben Vanik)"
@@ -454,10 +457,6 @@ def fetch_data_repos():
     """
     print("- fetching data repositories...")
 
-    def remove_readonly(func, path, _):
-        os.chmod(path, stat.S_IWRITE)
-        func(path)
-
     # Clean up the legacy in-source location if it's still around.
     legacy_dir = ".data_repos"
     if os.path.exists(legacy_dir):
@@ -574,6 +573,100 @@ def get_build_dir(target_arch=None):
     if target_arch == "x64" and is_native_arm64:
         return "build-x64"
     return "build"
+
+
+def remove_readonly(func, path, _):
+    """rmtree onerror handler: clear the read-only bit and retry (Windows)."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+# The Slang shader compiler is a build-time dependency. Pinned so local builds
+# and the CI cache key agree.
+SLANG_VERSION = "2026.8"
+SLANG_RELEASE_URL = "https://github.com/shader-slang/slang/releases/download"
+
+
+def get_slang_host_asset():
+    """Returns (archive_name, slangc_relpath) for the host, or (None, None).
+
+    slangc runs on the build host, so the asset tracks the host arch even
+    when cross-compiling guest binaries for another target.
+    """
+    is_arm64 = platform.machine().lower() in ("arm64", "aarch64")
+    if sys.platform == "win32":
+        return (f"slang-{SLANG_VERSION}-windows-x86_64.zip", "bin/slangc.exe")
+    if sys.platform == "darwin":
+        arch = "aarch64" if is_arm64 else "x86_64"
+        return (f"slang-{SLANG_VERSION}-macos-{arch}.zip", "bin/slangc")
+    if sys.platform == "linux":
+        arch = "aarch64" if is_arm64 else "x86_64"
+        return (f"slang-{SLANG_VERSION}-linux-{arch}.tar.gz", "bin/slangc")
+    return (None, None)
+
+
+def find_slangc(slang_dir, slangc_relpath):
+    """Locates slangc under slang_dir, tolerating a nested top-level folder."""
+    direct = os.path.join(slang_dir, *slangc_relpath.split("/"))
+    if os.path.exists(direct):
+        return direct
+    name = os.path.basename(slangc_relpath)
+    for cand in glob(os.path.join(slang_dir, "**", name), recursive=True):
+        if os.path.basename(os.path.dirname(cand)) == "bin":
+            return cand
+    return direct
+
+
+def download_slang():
+    """Downloads the pinned Slang release into .slang/<version>/.
+
+    Skips the download if the pinned version is already present. Any other
+    (stale) version is removed so the tree holds only the pinned one (cmake
+    globs .slang/*/bin/slangc to find it). Sets nothing in the environment -
+    run this once locally, or from CI on a cache miss.
+    """
+    archive_name, slangc_relpath = get_slang_host_asset()
+    if not archive_name:
+        print_error(f"No prebuilt Slang for {sys.platform}/"
+                    f"{platform.machine()}.")
+        sys.exit(1)
+
+    root = os.path.abspath(".slang")
+    slang_dir = os.path.join(root, SLANG_VERSION)
+    slangc_path = find_slangc(slang_dir, slangc_relpath)
+    if os.path.exists(slangc_path):
+        print(f"- Slang {SLANG_VERSION} already present: {slangc_path}")
+        return slangc_path
+
+    # Drop any previously downloaded Slang (e.g. an older version) so the
+    # cmake glob resolves to exactly one slangc.
+    if os.path.isdir(root):
+        rmtree(root, onerror=remove_readonly)
+    os.makedirs(slang_dir)
+
+    url = f"{SLANG_RELEASE_URL}/v{SLANG_VERSION}/{archive_name}"
+    print(f"- downloading Slang {SLANG_VERSION} ({archive_name})...")
+    archive_path = os.path.join(slang_dir, archive_name)
+    try:
+        urllib.request.urlretrieve(url, archive_path)
+        if archive_name.endswith(".zip"):
+            with zipfile.ZipFile(archive_path) as zf:
+                zf.extractall(slang_dir)
+        else:
+            with tarfile.open(archive_path) as tf:
+                tf.extractall(slang_dir)
+    finally:
+        if os.path.exists(archive_path):
+            os.remove(archive_path)
+
+    slangc_path = find_slangc(slang_dir, slangc_relpath)
+    if not os.path.exists(slangc_path):
+        print_error(f"Slang download did not produce slangc under {slang_dir}.")
+        sys.exit(1)
+    if sys.platform != "win32":
+        os.chmod(slangc_path, os.stat(slangc_path).st_mode | stat.S_IEXEC)
+    print(f"- slangc: {slangc_path}")
+    return slangc_path
 
 
 def run_cmake_configure(cc=None, generator=None, build_tests=False,
@@ -762,6 +855,7 @@ def discover_commands(subparsers):
     commands = {
         "setup": SetupCommand(subparsers),
         "fetchdata": FetchDataCommand(subparsers),
+        "slang": SlangCommand(subparsers),
         "build": BuildCommand(subparsers),
         "devenv": DevenvCommand(subparsers),
         "gentests": GenTestsCommand(subparsers),
@@ -863,6 +957,24 @@ class FetchDataCommand(Command):
             print_warning("Git not available or not a repository.")
             return 1
 
+        print("\nSuccess!")
+        return 0
+
+
+class SlangCommand(Command):
+    """'slang' command.
+    """
+
+    def __init__(self, subparsers, *args, **kwargs):
+        super(SlangCommand, self).__init__(
+            subparsers,
+            name="slang",
+            help_short="Downloads the Slang shader compiler (build dependency).",
+            *args, **kwargs)
+
+    def execute(self, args, pass_args, cwd):
+        print("Downloading the Slang shader compiler...\n")
+        download_slang()
         print("\nSuccess!")
         return 0
 

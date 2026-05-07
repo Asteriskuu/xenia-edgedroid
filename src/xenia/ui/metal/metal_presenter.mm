@@ -1049,10 +1049,17 @@ bool MetalPresenter::EnsureApplyGammaPipelines() {
              label, error ? error.localizedDescription.UTF8String : "unknown");
       return nil;
     }
+    // Slang's MSL emitter renames `main` to `main_0`; xcrun metal preserves
+    // the source function name (`entry_xe` for our xesl-derived sources).
+    // Try both so this site works regardless of which path produced the
+    // metallib.
     id<MTLFunction> function = [library newFunctionWithName:@"entry_xe"];
     if (!function) {
-      XELOGE("MetalPresenter::EnsureApplyGammaPipelines: missing entry_xe for "
-             "{}",
+      function = [library newFunctionWithName:@"main_0"];
+    }
+    if (!function) {
+      XELOGE("MetalPresenter::EnsureApplyGammaPipelines: missing entry_xe / "
+             "main_0 for {}",
              label);
       [library release];
       return nil;

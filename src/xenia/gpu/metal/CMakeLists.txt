@@ -34,4 +34,6 @@ target_link_libraries(xenia-gpu-metal PUBLIC
 )
 target_link_libraries(xenia-gpu-metal PRIVATE glslang-spirv)
 xe_shader_rules_metal(xenia-gpu-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
+xe_shader_rules_slang(xenia-gpu-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
+                      TARGET msl)
 xe_target_defaults(xenia-gpu-metal)

@@ -365,6 +365,131 @@ function(xe_shader_rules_metal target shader_dir)
   target_sources(${target} PRIVATE ${_sources})
 endfunction()
 
+# xe_shader_rules_slang(target shader_dir TARGET dxil|spirv|msl)
+#
+# Compiles *.slang files via xenia-shader-cc, which drives slangc. slangc is
+# taken from SLANGC_PATH, or the .slang/ tree populated by
+# `./xenia-build.py slang`. One call per backend; per-backend CMakeLists invokes it with
+# the appropriate TARGET option to populate its bytecode tree:
+#   dxil  -> bytecode/d3d12_dxil/<id>.h     (const uint8_t)
+#   spirv -> bytecode/vulkan_spirv/<id>.h   (const uint32_t)
+#   msl   -> bytecode/metal/<id>.h          (const uint8_t, _metallib suffix)
+function(xe_shader_rules_slang target shader_dir)
+  cmake_parse_arguments(ARG "" "TARGET" "" ${ARGN})
+  if(NOT ARG_TARGET)
+    message(FATAL_ERROR "xe_shader_rules_slang: TARGET is required")
+  endif()
+  if(ARG_TARGET STREQUAL "dxil")
+    set(_subdir "d3d12_dxil")
+    set(_flag "--slang-dxil")
+    set(_label "DXIL")
+  elseif(ARG_TARGET STREQUAL "spirv")
+    set(_subdir "vulkan_spirv")
+    set(_flag "--slang-spirv")
+    set(_label "SPIR-V")
+  elseif(ARG_TARGET STREQUAL "msl")
+    if(NOT APPLE)
+      return()
+    endif()
+    set(_subdir "metal")
+    set(_flag "--slang-msl")
+    set(_label "Metal")
+  else()
+    message(FATAL_ERROR
+            "xe_shader_rules_slang: TARGET must be dxil|spirv|msl")
+  endif()
+
+  get_filename_component(shader_dir "${shader_dir}" ABSOLUTE)
+  file(GLOB _sources "${shader_dir}/*.slang")
+  file(RELATIVE_PATH _rel_dir "${PROJECT_SOURCE_DIR}/src" "${shader_dir}")
+  set(_generated_root "${PROJECT_BINARY_DIR}/generated")
+  set(_bytecode_dir "${_generated_root}/${_rel_dir}/bytecode/${_subdir}")
+  set(_valid_stages vs hs ds gs ps cs)
+  set(_outputs)
+  file(MAKE_DIRECTORY "${_bytecode_dir}")
+
+  # Locate slangc: an explicit SLANGC_PATH wins, otherwise use the copy
+  # downloaded by `./xenia-build.py slang` under .slang/<version>/.
+  if(DEFINED ENV{SLANGC_PATH} AND NOT "$ENV{SLANGC_PATH}" STREQUAL "")
+    set(_slangc "$ENV{SLANGC_PATH}")
+  else()
+    file(GLOB _slangc_found
+         "${PROJECT_SOURCE_DIR}/.slang/*/bin/slangc"
+         "${PROJECT_SOURCE_DIR}/.slang/*/bin/slangc.exe")
+    if(_slangc_found)
+      list(GET _slangc_found 0 _slangc)
+    else()
+      set(_slangc "")
+    endif()
+  endif()
+
+  foreach(src ${_sources})
+    get_filename_component(_name ${src} NAME)
+    string(REGEX REPLACE "\\.[^.]+$" "" _basename "${_name}")
+    string(REPLACE "." "_" _id "${_basename}")
+    string(LENGTH "${_id}" _len)
+    if(_len LESS 3)
+      continue()
+    endif()
+    math(EXPR _s "${_len} - 2")
+    string(SUBSTRING "${_id}" ${_s} 2 _stage)
+    if(NOT _stage IN_LIST _valid_stages)
+      continue()
+    endif()
+    # For spirv/msl: defer to the legacy spirv/metal rules when a hand-tuned
+    # .glsl/.xesl twin still exists at the same id, so we don't double-generate
+    # the same output header. Once the .slang version is proven for those
+    # backends and the twin is deleted, this skip stops kicking in.
+    if(ARG_TARGET STREQUAL "spirv" OR ARG_TARGET STREQUAL "msl")
+      if(EXISTS "${shader_dir}/${_basename}.glsl"
+         OR EXISTS "${shader_dir}/${_basename}.xesl")
+        continue()
+      endif()
+      # Source-level opt-outs:
+      #   `// XE_DXIL_ONLY` — skip both spirv and msl (D3D12-only shader).
+      #   `// XE_NO_MSL`    — skip only msl (cross-target sans Metal).
+      file(STRINGS "${src}" _xe_dxil_only LIMIT_COUNT 1
+           REGEX "^[ \t]*//[ \t]*XE_DXIL_ONLY")
+      if(_xe_dxil_only)
+        continue()
+      endif()
+      if(ARG_TARGET STREQUAL "msl")
+        file(STRINGS "${src}" _xe_no_msl LIMIT_COUNT 1
+             REGEX "^[ \t]*//[ \t]*XE_NO_MSL")
+        if(_xe_no_msl)
+          continue()
+        endif()
+      endif()
+    endif()
+    if(NOT _slangc)
+      message(FATAL_ERROR
+        "slangc not found. Run `./xenia-build.py slang` to download it, or "
+        "set SLANGC_PATH to an existing slangc.")
+    endif()
+    set(_out "${_bytecode_dir}/${_id}.h")
+    set(_dep "${_out}.d")
+    list(APPEND _outputs "${_out}")
+    add_custom_command(
+      OUTPUT "${_out}"
+      COMMAND ${CMAKE_COMMAND} -E env "SLANGC_PATH=${_slangc}"
+              $<TARGET_FILE:xenia-shader-cc> ${_flag} --depfile "${_dep}"
+              "${src}" "${_out}"
+      DEPENDS "${src}" xenia-shader-cc
+      DEPFILE "${_dep}"
+      COMMENT "Slang/${_label}: ${_name}"
+      VERBATIM
+    )
+  endforeach()
+  if(NOT _outputs)
+    return()
+  endif()
+  add_custom_target(${target}-slang-${ARG_TARGET}-shaders DEPENDS ${_outputs})
+  add_dependencies(${target} ${target}-slang-${ARG_TARGET}-shaders)
+  target_include_directories(${target} BEFORE PRIVATE "${_generated_root}")
+  set_source_files_properties(${_sources} PROPERTIES HEADER_FILE_ONLY TRUE)
+  target_sources(${target} PRIVATE ${_sources})
+endfunction()
+
 # xe_force_c(files...) — compile the given sources as C.
 function(xe_force_c)
   set_source_files_properties(${ARGN} PROPERTIES LANGUAGE C)

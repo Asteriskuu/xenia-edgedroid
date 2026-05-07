@@ -39,6 +39,18 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-linuxdeploy-
 
+      - name: Cache Slang
+        id: cache-slang
+        uses: actions/cache@v3
+        with:
+          path: .slang
+          # Keep in sync with SLANG_VERSION in xenia-build.py.
+          key: ${{ runner.os }}-${{ runner.arch }}-slang-2026.8
+
+      - name: Download Slang
+        if: steps.cache-slang.outputs.cache-hit != 'true'
+        run: ./xenia-build.py slang
+
       - name: Setup
         run: |
           UBUNTU_BASE=$(lsb_release -cs)
@@ -152,6 +164,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Cache Slang
+        id: cache-slang
+        uses: actions/cache@v3
+        with:
+          path: .slang
+          # Keep in sync with SLANG_VERSION in xenia-build.py.
+          key: ${{ runner.os }}-${{ runner.arch }}-slang-2026.8
+
+      - name: Download Slang
+        if: steps.cache-slang.outputs.cache-hit != 'true'
+        run: ./xenia-build.py slang
+
       - name: Setup
         run: |
           # Update submodules. Skip DirectXShaderCompiler (we don't use the
@@ -242,6 +266,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Cache Slang
+        id: cache-slang
+        uses: actions/cache@v3
+        with:
+          path: .slang
+          # Keep in sync with SLANG_VERSION in xenia-build.py.
+          key: ${{ runner.os }}-${{ runner.arch }}-slang-2026.8
+
+      - name: Download Slang
+        if: steps.cache-slang.outputs.cache-hit != 'true'
+        run: ./xenia-build.py slang
+
       - name: Setup
         run: |
           git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) \
@@ -322,6 +358,18 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
+
+      - name: Cache Slang
+        id: cache-slang
+        uses: actions/cache@v3
+        with:
+          path: .slang
+          # Keep in sync with SLANG_VERSION in xenia-build.py.
+          key: ${{ runner.os }}-${{ runner.arch }}-slang-2026.8
+
+      - name: Download Slang
+        if: steps.cache-slang.outputs.cache-hit != 'true'
+        run: python xenia-build.py slang
 
       - name: Disable Defender scanning for build paths
         run: |

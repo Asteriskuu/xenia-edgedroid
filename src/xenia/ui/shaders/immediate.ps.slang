@@ -15,14 +15,16 @@ entry_outputs_end_stage_inputs_begin_xe
   entry_in_stage_xe(float2_xe, xe_in_texcoord, 0, TEXCOORD)
   entry_in_stage_xe(float4_xe, xe_in_color, 1, COLOR)
 entry_stage_inputs_end_bindings_begin_pixel_xe
-  sampler_xe(sampler_2d_xe, xe_immediate_texture, set=0, binding=0, t0, space0,
-             s0, space0, texture(0), sampler(0))
+  texture_xe(texture_2d_xe, xe_immediate_texture, 0, 0, t0, space0, texture(0))
+  entry_binding_next_xe
+  sampler_state_xe(xe_immediate_sampler, 0, 1, s0, space0, sampler(0))
 entry_bindings_end_inputs_begin_xe
   entry_in_stage_inputs_xe
 entry_inputs_end_code_begin_xe
 {
   out_xe(xe_out_color) =
       in_xe(xe_in_color) *
-      sample_comb_lod_2d_xe(xe_immediate_texture, in_xe(xe_in_texcoord), 0.0f);
+      sample_sep_lod_2d_xe(xe_immediate_texture, xe_immediate_sampler,
+                           in_xe(xe_in_texcoord), 0.0f);
 }
 entry_code_end_xe

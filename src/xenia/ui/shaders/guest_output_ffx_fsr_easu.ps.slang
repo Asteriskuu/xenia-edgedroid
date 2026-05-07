@@ -6,6 +6,7 @@
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
+// XE_NO_MSL
 
 #include "xesl.xesli"
 
@@ -34,10 +35,10 @@ entry_outputs_end_stage_inputs_begin_xe
 entry_stage_inputs_end_bindings_begin_pixel_xe
   push_const_binding_xe(buffer(0))
   entry_binding_next_xe
-  texture_xe(texture_2d_xe, xe_fsr_easu_source, set=0, binding=0, t0, space0,
+  texture_xe(texture_2d_xe, xe_fsr_easu_source, 0, 0, t0, space0,
              texture(0))
   entry_binding_next_xe
-  sampler_state_xe(xe_fsr_easu_sampler, set=0, binding=1, s0, space0,
+  sampler_state_xe(xe_fsr_easu_sampler, 0, 1, s0, space0,
                    sampler(0))
 entry_bindings_end_inputs_begin_xe
   entry_in_pixel_coord_xe

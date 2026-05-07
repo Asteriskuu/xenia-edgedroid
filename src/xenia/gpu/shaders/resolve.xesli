@@ -55,8 +55,8 @@ push_const_end_xe
         byte_buffer_align16_declare_xe
   #endif
   #ifdef XE_RESOLVE_COPY_EDRAM_BYTE_BUFFER_DECLARE_MACRO
-    XE_RESOLVE_COPY_EDRAM_BYTE_BUFFER_DECLARE_MACRO(xe_resolve_edram, set=0,
-                                                    binding=0, t0, space0)
+    XE_RESOLVE_COPY_EDRAM_BYTE_BUFFER_DECLARE_MACRO(xe_resolve_edram, 0, 0,
+                                                    t0, space0, 2)
   #endif
   #define XE_RESOLVE_COPY_EDRAM_BINDING \
       byte_buffer_binding_xe(xe_resolve_edram, buffer(2))
@@ -212,14 +212,6 @@ uint XeResolveEdramPixelStrideBytes(XeResolveInfo resolve_info) {
                                                       bytes_per_block_log2));
     #endif
   }
-
-  #define kXenosCopySampleSelect_0 0u
-  #define kXenosCopySampleSelect_1 1u
-  #define kXenosCopySampleSelect_2 2u
-  #define kXenosCopySampleSelect_3 3u
-  #define kXenosCopySampleSelect_01 4u
-  #define kXenosCopySampleSelect_23 5u
-  #define kXenosCopySampleSelect_0123 6u
 
   uint XeResolveFirstSampleIndex(uint sample_select) {
     uint sample_index;

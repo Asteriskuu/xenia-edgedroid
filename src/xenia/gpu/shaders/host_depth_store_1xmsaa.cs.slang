@@ -10,8 +10,8 @@
 #include "edram.xesli"
 #include "host_depth_store.xesli"
 
-byte_buffer_align16_wo_declare_xe(xe_host_depth_store_dest, set=0, binding=0,
-                                  u0, space0)
+byte_buffer_align16_wo_declare_xe(xe_host_depth_store_dest, 0, 0,
+                                  u0, space0, 1)
 #define LOCAL_SIZE_X_XE 8
 #define LOCAL_SIZE_Y_XE 8
 #define LOCAL_SIZE_Z_XE 1
@@ -20,7 +20,7 @@ entry_bindings_begin_compute_xe
   entry_binding_next_xe
   byte_buffer_wo_binding_xe(xe_host_depth_store_dest, buffer(1))
   entry_binding_next_xe
-  texture_xe(texture_2d_xe, xe_host_depth_store_source, set=1, binding=0, t0,
+  texture_xe(texture_2d_xe, xe_host_depth_store_source, 1, 0, t0,
              space0, texture(0))
 entry_bindings_end_inputs_begin_compute_xe
   entry_in_global_thread_id_xe

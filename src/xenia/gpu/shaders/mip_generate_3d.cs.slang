@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+// XE_DXIL_ONLY
 // Mip generation compute shader for scaled resolve 3D textures.
 // Generates a single mip level by downsampling from the previous level using
 // trilinear filtering.

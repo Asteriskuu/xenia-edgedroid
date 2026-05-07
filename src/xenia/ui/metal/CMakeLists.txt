@@ -21,4 +21,6 @@ target_link_libraries(xenia-ui-metal PUBLIC
   "-framework AppKit"
 )
 xe_shader_rules_metal(xenia-ui-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
+xe_shader_rules_slang(xenia-ui-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
+                      TARGET msl)
 xe_target_defaults(xenia-ui-metal)
