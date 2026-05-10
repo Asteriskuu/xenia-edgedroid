@@ -429,7 +429,7 @@ SpirvShaderTranslator::Modification
 VulkanPipelineCache::GetCurrentPixelShaderModification(
     const Shader& shader, uint32_t interpolator_mask, uint32_t param_gen_pos,
     reg::RB_DEPTHCONTROL normalized_depth_control,
-    uint32_t normalized_color_mask) const {
+    uint32_t normalized_color_mask, bool apply_polygon_offset_in_shader) const {
   assert_true(shader.type() == xenos::ShaderType::kPixel);
   assert_true(shader.is_ucode_analyzed());
   const auto& regs = register_file_;
@@ -468,13 +468,22 @@ VulkanPipelineCache::GetCurrentPixelShaderModification(
         regs.Get<reg::RB_DEPTH_INFO>().depth_format ==
             xenos::DepthRenderTargetFormat::kD24FS8) {
       modification.pixel.depth_stencil_mode =
-          render_target_cache_.depth_float24_round()
-              ? DepthStencilMode::kFloat24Rounding
-              : DepthStencilMode::kFloat24Truncating;
+          apply_polygon_offset_in_shader
+              ? (render_target_cache_.depth_float24_round()
+                     ? DepthStencilMode::kFloat24RoundingPolygonOffset
+                     : DepthStencilMode::kFloat24TruncatingPolygonOffset)
+              : (render_target_cache_.depth_float24_round()
+                     ? DepthStencilMode::kFloat24Rounding
+                     : DepthStencilMode::kFloat24Truncating);
     } else {
-      // kEarlyHint was tried here but it seems to trigger GPU fault on nvidia
-      // (entering gameplay in Alan Wake), so going with the safe alternative.
-      modification.pixel.depth_stencil_mode = DepthStencilMode::kNoModifiers;
+      if (apply_polygon_offset_in_shader) {
+        modification.pixel.depth_stencil_mode =
+            DepthStencilMode::kPolygonOffset;
+      } else {
+        // kEarlyHint was tried here but it seems to trigger GPU fault on nvidia
+        // (entering gameplay in Alan Wake), so going with the safe alternative.
+        modification.pixel.depth_stencil_mode = DepthStencilMode::kNoModifiers;
+      }
     }
 
     // Check if MIN/MAX blend is used with non-trivial source factors.

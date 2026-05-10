@@ -32,6 +32,7 @@ DECLARE_int32(anisotropic_override);
 DECLARE_bool(gpu_allow_invalid_fetch_constants);
 DECLARE_bool(gpu_3d_to_2d_texture);
 DECLARE_bool(half_pixel_offset);
+DECLARE_bool(depth_bias_shader_offset);
 DECLARE_bool(submit_on_primary_buffer_end);
 DECLARE_int32(occlusion_query_fake_lower_threshold);
 DECLARE_int32(occlusion_query_fake_upper_threshold);
@@ -284,6 +285,7 @@ void ImGuiDebugDialog::LoadCurrentSettings() {
   gpu_allow_invalid_fetch_constants_ = cvars::gpu_allow_invalid_fetch_constants;
   gpu_3d_to_2d_texture_ = cvars::gpu_3d_to_2d_texture;
   half_pixel_offset_ = cvars::half_pixel_offset;
+  depth_bias_shader_offset_ = cvars::depth_bias_shader_offset;
   submit_on_primary_buffer_end_ = cvars::submit_on_primary_buffer_end;
   occlusion_query_fake_lower_threshold_ =
       cvars::occlusion_query_fake_lower_threshold;
@@ -636,9 +638,9 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
       "mrt_edram_used_range_clamp_to_min",
   });
   bool show_memory = AnyMatchesFilter({"scribble_heap", "scribble_heap_value"});
-  bool show_depth = AnyMatchesFilter({"depth_float24_convert_in_pixel_shader",
-                                      "depth_float24_round",
-                                      "depth_transfer_not_equal_test"});
+  bool show_depth = AnyMatchesFilter(
+      {"depth_bias_shader_offset", "depth_float24_convert_in_pixel_shader",
+       "depth_float24_round", "depth_transfer_not_equal_test"});
 
   bool show_conversion =
       AnyMatchesFilter({"force_convert_triangle_strips_to_lists",
@@ -1028,6 +1030,19 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
       if (show_depth &&
           BeginSection("Depth / Precision", false, filter_active)) {
         if (BeginSettingsTable("##debug_depth_precision")) {
+          if (MatchesFilter("depth_bias_shader_offset")) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            DrawLabelCell("depth_bias_shader_offset");
+
+            ImGui::TableSetColumnIndex(1);
+            if (RightAlignedCheckbox("##depth_bias_shader_offset",
+                                     &depth_bias_shader_offset_)) {
+              ApplyBoolSetting("GPU", "depth_bias_shader_offset",
+                               depth_bias_shader_offset_, true);
+            }
+          }
+
           if (MatchesFilter("depth_float24_convert_in_pixel_shader")) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
