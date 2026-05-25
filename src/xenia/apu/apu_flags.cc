@@ -13,3 +13,13 @@ DEFINE_uint32(volume, 100,
               "Master volume for all audio output, from 0 (silent) to 100 "
               "(full volume).",
               "APU")
+
+    namespace xe {
+  namespace apu {
+
+  void SetVolumePersistent(uint32_t percent) {
+    OVERRIDE_PERSIST_uint32(volume, percent);
+  }
+
+  }  // namespace apu
+}  // namespace xe

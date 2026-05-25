@@ -17,8 +17,8 @@
 namespace xe {
 namespace ui {
 
-// In-game master volume slider. Adjusts the live "volume" cvar; changes apply
-// immediately and are not persisted.
+// In-game master volume slider. Adjusts the live "volume" cvar; the new value
+// is written back to the config on slider release.
 class ImGuiAudioDialog : public ImGuiGamepadDialog {
  public:
   ImGuiAudioDialog(ImGuiDrawer* drawer, hid::InputSystem* input_system);

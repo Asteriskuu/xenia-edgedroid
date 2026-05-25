@@ -13,6 +13,7 @@
 
 #include "third_party/imgui/imgui.h"
 #include "xenia/apu/apu_flags.h"
+#include "xenia/config.h"
 
 namespace xe {
 namespace ui {
@@ -78,8 +79,12 @@ void ImGuiAudioDialog::OnDraw(ImGuiIO& io) {
     ImGui::SetNextItemWidth(-1);  // Use full available width
     if (ImGui::SliderInt("##volume", &volume_percent_, 0, 100, "%d%%",
                          ImGuiSliderFlags_None)) {
-      cvars::volume = volume_percent_;
+      apu::SetVolumePersistent(static_cast<uint32_t>(volume_percent_));
       changed = true;
+    }
+    // Save on slider release; saving every drag tick would spam disk writes.
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+      config::SaveConfig();
     }
     // Reflect external changes when the user isn't dragging the slider.
     if (!ImGui::IsItemActive()) {
