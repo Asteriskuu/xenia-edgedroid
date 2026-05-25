@@ -12,13 +12,16 @@
 
 #include <array>
 #include <atomic>
+#include <future>
 #include <iosfwd>
 #include <mutex>
 #include <optional>
+#include <thread>
 
 #include "SDL.h"
 #include "third_party/rapidcsv/src/rapidcsv.h"
 #include "xenia/hid/input_driver.h"
+#include "xenia/xbox.h"
 
 #define HID_SDL_USER_COUNT 4
 #define HID_SDL_THUMB_THRES 0x4E00
@@ -83,12 +86,16 @@ class SDLInputDriver final : public InputDriver {
   ControllerState* GetControllerState(uint32_t user_index);
   bool TestSDLVersion() const;
   void UpdateXCapabilities(ControllerState& state);
-  void QueueControllerUpdate();
+
+  // Owns SDL init, the event pump, and teardown so the UI thread's modal
+  // loops (wx menus/dialogs) can't stall controller hotplug.
+  void SDLEventThread(std::promise<X_STATUS> init_result);
 
   bool sdl_events_initialized_;
   bool sdl_gamecontroller_initialized_;
   int sdl_events_unflushed_;
-  std::atomic<bool> sdl_pumpevents_queued_;
+  std::thread sdl_thread_;
+  std::atomic<bool> sdl_thread_should_exit_;
   std::array<ControllerState, HID_SDL_USER_COUNT> controllers_;
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
 };

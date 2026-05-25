@@ -20,11 +20,11 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/embedded_bundle.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/threading.h"
 #include "xenia/helper/sdl/sdl_helper.h"
 #include "xenia/hid/hid_flags.h"
 #include "xenia/ui/virtual_key.h"
 #include "xenia/ui/window.h"
-#include "xenia/ui/windowed_app_context.h"
 
 #include "embedded_bundle_gamecontrollerdb.h"
 
@@ -44,30 +44,14 @@ SDLInputDriver::SDLInputDriver(xe::ui::Window* window, size_t window_z_order)
       sdl_events_initialized_(false),
       sdl_gamecontroller_initialized_(false),
       sdl_events_unflushed_(0),
-      sdl_pumpevents_queued_(false),
+      sdl_thread_should_exit_(false),
       controllers_(),
       keystroke_states_() {}
 
 SDLInputDriver::~SDLInputDriver() {
-  // Make sure the CallInUIThread is executed before destroying the references.
-  if (sdl_pumpevents_queued_) {
-    window()->app_context().CallInUIThreadSynchronous([this]() {
-      window()->app_context().ExecutePendingFunctionsFromUIThread();
-    });
-  }
-  for (size_t i = 0; i < controllers_.size(); i++) {
-    if (controllers_.at(i).sdl) {
-      SDL_GameControllerClose(controllers_.at(i).sdl);
-      controllers_.at(i) = {};
-    }
-  }
-  if (sdl_events_initialized_) {
-    SDL_QuitSubSystem(SDL_INIT_EVENTS);
-    sdl_events_initialized_ = false;
-  }
-  if (sdl_gamecontroller_initialized_) {
-    SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
-    sdl_gamecontroller_initialized_ = false;
+  if (sdl_thread_.joinable()) {
+    sdl_thread_should_exit_.store(true, std::memory_order_release);
+    sdl_thread_.join();
   }
 }
 
@@ -76,56 +60,89 @@ X_STATUS SDLInputDriver::Setup() {
     return X_STATUS_UNSUCCESSFUL;
   }
 
-  // SDL_PumpEvents should only be run in the thread that initialized SDL - we
-  // are hijacking the UI thread for that. If this function fails to be queued,
-  // the "initialized" variables will be false - that's handled safely.
-  window()->app_context().CallInUIThreadSynchronous([this]() {
-    if (!xe::helper::sdl::SDLHelper::Prepare()) {
-      return;
-    }
-    // Initialize the event system early, so we catch device events for already
-    // connected controllers.
-    if (SDL_InitSubSystem(SDL_INIT_EVENTS) < 0) {
-      return;
-    }
-    sdl_events_initialized_ = true;
+  std::promise<X_STATUS> init_promise;
+  auto init_future = init_promise.get_future();
+  sdl_thread_ = std::thread(&SDLInputDriver::SDLEventThread, this,
+                            std::move(init_promise));
+  const X_STATUS result = init_future.get();
+  if (result != X_STATUS_SUCCESS && sdl_thread_.joinable()) {
+    sdl_thread_.join();
+  }
+  return result;
+}
 
-    // With an event watch we will always get notified, even if the event queue
-    // is full, which can happen if another subsystem does not clear its events.
-    SDL_AddEventWatch(
-        [](void* userdata, SDL_Event* event) -> int {
-          if (!userdata || !event) {
-            assert_always();
-            return 0;
-          }
+void SDLInputDriver::SDLEventThread(std::promise<X_STATUS> init_result) {
+  xe::threading::set_name("SDL Input");
 
-          const auto type = event->type;
-          if (type < SDL_JOYAXISMOTION || type >= SDL_FINGERDOWN) {
-            return 0;
-          }
+  // SDL_PumpEvents (and the Win32 hidden window SDL uses for hotplug
+  // notifications) is bound to whichever thread initialized SDL_INIT_EVENTS.
+  // We own that here so a wx menu/dialog modal loop on the UI thread can't
+  // stall controller hotplug.
+  if (!xe::helper::sdl::SDLHelper::Prepare()) {
+    init_result.set_value(X_STATUS_UNSUCCESSFUL);
+    return;
+  }
 
-          // If another part of xenia uses another SDL subsystem that generates
-          // events, this may seem like a bad idea. They will however not
-          // subscribe to controller events so we get away with that.
-          const auto driver = static_cast<SDLInputDriver*>(userdata);
-          driver->HandleEvent(*event);
+  // Initialize the event system early, so we catch device events for already
+  // connected controllers.
+  if (SDL_InitSubSystem(SDL_INIT_EVENTS) < 0) {
+    init_result.set_value(X_STATUS_UNSUCCESSFUL);
+    return;
+  }
+  sdl_events_initialized_ = true;
 
+  // With an event watch we will always get notified, even if the event queue
+  // is full, which can happen if another subsystem does not clear its events.
+  SDL_AddEventWatch(
+      [](void* userdata, SDL_Event* event) -> int {
+        if (!userdata || !event) {
+          assert_always();
           return 0;
-        },
-        this);
+        }
 
-    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
-      return;
+        const auto type = event->type;
+        if (type < SDL_JOYAXISMOTION || type >= SDL_FINGERDOWN) {
+          return 0;
+        }
+
+        // If another part of xenia uses another SDL subsystem that generates
+        // events, this may seem like a bad idea. They will however not
+        // subscribe to controller events so we get away with that.
+        const auto driver = static_cast<SDLInputDriver*>(userdata);
+        driver->HandleEvent(*event);
+
+        return 0;
+      },
+      this);
+
+  if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
+    SDL_QuitSubSystem(SDL_INIT_EVENTS);
+    sdl_events_initialized_ = false;
+    init_result.set_value(X_STATUS_UNSUCCESSFUL);
+    return;
+  }
+  sdl_gamecontroller_initialized_ = true;
+
+  LoadGameControllerDB();
+
+  init_result.set_value(X_STATUS_SUCCESS);
+
+  while (!sdl_thread_should_exit_.load(std::memory_order_acquire)) {
+    SDL_PumpEvents();
+    xe::threading::Sleep(std::chrono::milliseconds(8));
+  }
+
+  // Tear down on the same thread that initialized SDL.
+  for (size_t i = 0; i < controllers_.size(); i++) {
+    if (controllers_.at(i).sdl) {
+      SDL_GameControllerClose(controllers_.at(i).sdl);
+      controllers_.at(i) = {};
     }
-
-    sdl_gamecontroller_initialized_ = true;
-
-    LoadGameControllerDB();
-  });
-
-  return (sdl_events_initialized_ && sdl_gamecontroller_initialized_)
-             ? X_STATUS_SUCCESS
-             : X_STATUS_UNSUCCESSFUL;
+  }
+  SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+  sdl_gamecontroller_initialized_ = false;
+  SDL_QuitSubSystem(SDL_INIT_EVENTS);
+  sdl_events_initialized_ = false;
 }
 
 void SDLInputDriver::LoadGameControllerDB() {
@@ -228,8 +245,6 @@ X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
     return X_ERROR_BAD_ARGUMENTS;
   }
 
-  QueueControllerUpdate();
-
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -251,8 +266,6 @@ X_RESULT SDLInputDriver::GetState(uint32_t user_index,
     return X_ERROR_BAD_ARGUMENTS;
   }
 
-  QueueControllerUpdate();
-
   auto controller = GetControllerState(user_index);
   if (!controller) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
@@ -272,8 +285,6 @@ X_RESULT SDLInputDriver::SetState(uint32_t user_index,
   if (user_index >= HID_SDL_USER_COUNT) {
     return X_ERROR_BAD_ARGUMENTS;
   }
-
-  QueueControllerUpdate();
 
   auto controller = GetControllerState(user_index);
   if (!controller) {
@@ -349,8 +360,6 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
       ui::VirtualKey::kXInputPadRThumbDownRight,
       ui::VirtualKey::kXInputPadRThumbDownLeft,
   };
-
-  QueueControllerUpdate();
 
   for (uint32_t user_index = (user_any ? 0 : users);
        user_index < (user_any ? HID_SDL_USER_COUNT : users + 1); user_index++) {
@@ -898,19 +907,6 @@ std::vector<InputDeviceInfo> SDLInputDriver::EnumerateDevices() {
     out.push_back(std::move(info));
   }
   return out;
-}
-
-void SDLInputDriver::QueueControllerUpdate() {
-  // To minimize consecutive event pumps do not queue before previous pump is
-  // finished.
-  bool is_queued = false;
-  sdl_pumpevents_queued_.compare_exchange_strong(is_queued, true);
-  if (!is_queued) {
-    window()->app_context().CallInUIThread([this]() {
-      SDL_PumpEvents();
-      sdl_pumpevents_queued_ = false;
-    });
-  }
 }
 
 // Check if the analog inputs exceed their thresholds to become a button press

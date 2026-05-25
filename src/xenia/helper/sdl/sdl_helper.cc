@@ -72,6 +72,15 @@ bool SDLHelper::SetHints() {
 
   suc &= setHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "xenia emulator");
 
+  // On Windows, SDL's joystick subsystem creates a hidden device-notification
+  // window (WM_DEVICECHANGE + raw-input dispatch) on whichever thread inits
+  // it. Without this hint that window lives on our SDL worker thread, which
+  // doesn't pump Win32 messages — leaving the queue and STA apartment state
+  // in a broken state that destabilises the UI thread via cross-apartment
+  // marshaling. With it, SDL spawns its own thread that owns and pumps the
+  // window. No-op on non-Windows platforms.
+  suc &= setHint(SDL_HINT_JOYSTICK_THREAD, "1", true);
+
   return suc;
 }
 
