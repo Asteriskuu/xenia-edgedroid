@@ -89,8 +89,8 @@ class GameListPanel : public wxPanel {
   CompatState GetEntryCompatState(const Entry& e) const;
   void SortEntries();
 
-  int sort_column_ = -1;
-  bool sort_descending_ = false;
+  int sort_column_ = 5;  // Last Played
+  bool sort_descending_ = true;
   // Cached so we only call SetToolTip on change, avoiding flicker.
   wxString last_tooltip_text_;
   void OnItemContextMenu(wxDataViewEvent& event);
