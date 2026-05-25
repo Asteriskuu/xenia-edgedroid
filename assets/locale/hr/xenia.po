@@ -71,6 +71,10 @@ msgstr "Zvuk(&A)"
 msgid "&Configuration"
 msgstr "Konfiguracija(&C)"
 
+#: src/xenia/app/emulator_window.cc:898
+msgid "&Controllers"
+msgstr "Kontroleri(&C)"
+
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
 msgstr "Datoteka(&F)"
@@ -172,6 +176,14 @@ msgstr "Sve datoteke"
 msgid "All cvars are already overridden."
 msgstr "Sve cvar varijable već imaju zamjenu."
 
+#: src/xenia/app/emulator_window.cc:343
+msgid "Arcade Pad"
+msgstr "Arcade pad"
+
+#: src/xenia/app/emulator_window.cc:331
+msgid "Arcade Stick"
+msgstr "Arcade stick"
+
 #: src/xenia/ui/profile_editor_dialog_wx.cc:69
 msgid "Argentina"
 msgstr "Argentina"
@@ -187,6 +199,10 @@ msgstr "Zvuk"
 #: src/xenia/ui/quick_settings_dialog_wx.cc:258
 msgid "Audio Backend:"
 msgstr "Zvučni backend:"
+
+#: src/xenia/app/emulator_window.cc:2402
+msgid "Auto (%s)"
+msgstr "Automatski (%s)"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:71
 msgid "Australia"
@@ -353,6 +369,10 @@ msgstr "Češka"
 msgid "DLC"
 msgstr "DLC"
 
+#: src/xenia/app/emulator_window.cc:335
+msgid "Dance Pad"
+msgstr "Plesna podloga"
+
 #: src/xenia/ui/game_list_panel_wx.cc:690
 #: src/xenia/ui/game_list_panel_wx.cc:693
 msgid "Default"
@@ -380,6 +400,10 @@ msgstr "Odbaci promjene"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:534
 msgid "Discard all unsaved changes?"
 msgstr "Odbaciti sve nespremljene promjene?"
+
+#: src/xenia/app/emulator_window.cc:2317
+msgid "Disconnect"
+msgstr "Odspoji"
 
 #: src/xenia/ui/quick_settings_dialog_wx.cc:297
 msgid "Discord Rich Presence:"
@@ -496,6 +520,10 @@ msgstr "Family"
 msgid "Faroe Islands"
 msgstr "Farski otoci"
 
+#: src/xenia/app/emulator_window.cc:341
+msgid "Drum Kit"
+msgstr "Bubnjevi"
+
 #: src/xenia/ui/game_list_panel_wx.cc:1236
 msgid "File Corrupted"
 msgstr "Oštećena datoteka"
@@ -536,6 +564,10 @@ msgstr "Puno"
 msgid "Full Screen:"
 msgstr "Cijeli zaslon:"
 
+#: src/xenia/app/emulator_window.cc:333
+msgid "Flight Stick"
+msgstr "Letački joystick"
+
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
 msgstr "Kompatibilnost igara(&C)…"
@@ -543,6 +575,10 @@ msgstr "Kompatibilnost igara(&C)…"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
 msgstr "GameMode nije u PATH-u; instalirajte ga za omogućavanje."
+
+#: src/xenia/app/emulator_window.cc:345
+msgid "Gamepad"
+msgstr "Gamepad"
 
 #: src/xenia/ui/game_list_panel_wx.cc:96
 msgid "Gameplay"
@@ -619,6 +655,10 @@ msgstr "Gvatemala"
 #: src/xenia/app/emulator_window.cc:1722
 msgid "Guide"
 msgstr "Vodič"
+
+#: src/xenia/app/emulator_window.cc:339
+msgid "Guitar"
+msgstr "Gitara"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:105
 msgid "Honduras"
@@ -1431,6 +1471,10 @@ msgid ""
 msgstr ""
 "Xenia još nije potpuno pokrenuta. Pokušajte ponovno nakon što aplikacija "
 "završi pokretanje."
+
+#: src/xenia/app/emulator_window.cc:329
+msgid "Wheel"
+msgstr "Volan"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:173
 msgid "Yemen"

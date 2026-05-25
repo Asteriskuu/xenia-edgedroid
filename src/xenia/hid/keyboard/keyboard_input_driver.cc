@@ -26,17 +26,12 @@
 #include "keyboard_binding_table.inc"
 #undef XE_HID_KEYBOARD_BINDING
 
-DEFINE_int32(keyboard_mode, 0,
-             "Allows user do specify keyboard working mode. Possible values: 0 "
-             "- Disabled, 1 - Enabled, 2 - Passthrough. Passthrough requires "
-             "controller being connected!",
-             "HID");
-
-DEFINE_int32(
-    keyboard_user_index, 0,
-    "Controller port that keyboard emulates. [0, 3] - Keyboard is assigned to "
-    "selected slot. Passthrough does not require assigning slot.",
-    "HID");
+DEFINE_bool(keyboard_passthrough, false,
+            "When true, the keyboard surfaces raw keystrokes to the running "
+            "title alongside any connected controller. When false (default), "
+            "the keyboard is bindable to a guest slot via the Controllers "
+            "menu and emulates a gamepad.",
+            "HID");
 
 namespace xe {
 namespace hid {
@@ -162,18 +157,7 @@ static uint8_t VirtualKeyToHIDUsage(ui::VirtualKey vk_enum) {
   }
 }
 
-static bool IsPassthroughEnabled() {
-  return static_cast<KeyboardMode>(cvars::keyboard_mode) ==
-         KeyboardMode::Passthrough;
-}
-
-static bool IsKeyboardForUserEnabled(uint32_t user_index) {
-  if (static_cast<KeyboardMode>(cvars::keyboard_mode) !=
-      KeyboardMode::Enabled) {
-    return false;
-  }
-  return cvars::keyboard_user_index == static_cast<int32_t>(user_index);
-}
+static bool IsPassthroughEnabled() { return cvars::keyboard_passthrough; }
 
 // No prefix (both flags false) matches either caps state.
 static bool MatchesCaps(bool lowercase, bool uppercase, bool is_capital) {
@@ -249,10 +233,6 @@ X_STATUS KeyboardInputDriver::Setup() { return X_STATUS_SUCCESS; }
 X_RESULT KeyboardInputDriver::GetCapabilities(uint32_t user_index,
                                               uint32_t flags,
                                               X_INPUT_CAPABILITIES* out_caps) {
-  if (!IsKeyboardForUserEnabled(user_index) && !IsPassthroughEnabled()) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-
   if (IsPassthroughEnabled()) {
     out_caps->type = X_INPUT_DEVTYPE::XINPUT_DEVTYPE_KEYBOARD;
     out_caps->sub_type = X_INPUT_DEVSUBTYPE::XINPUT_DEVSUBTYPE_USB_KEYBOARD;
@@ -276,7 +256,7 @@ X_RESULT KeyboardInputDriver::GetCapabilities(uint32_t user_index,
 
 X_RESULT KeyboardInputDriver::GetState(uint32_t user_index,
                                        X_INPUT_STATE* out_state) {
-  if (!IsKeyboardForUserEnabled(user_index)) {
+  if (IsPassthroughEnabled()) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -394,19 +374,11 @@ X_RESULT KeyboardInputDriver::GetState(uint32_t user_index,
 
 X_RESULT KeyboardInputDriver::SetState(uint32_t user_index,
                                        X_INPUT_VIBRATION* vibration) {
-  if (!IsKeyboardForUserEnabled(user_index) && !IsPassthroughEnabled()) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-
   return X_ERROR_SUCCESS;
 }
 
 X_RESULT KeyboardInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
                                            X_INPUT_KEYSTROKE* out_keystroke) {
-  if (!IsKeyboardForUserEnabled(user_index) && !IsPassthroughEnabled()) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-
   X_RESULT result = X_ERROR_EMPTY;
 
   ui::VirtualKey xinput_virtual_key = ui::VirtualKey::kNone;
@@ -427,12 +399,10 @@ X_RESULT KeyboardInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   }
 
   if (!IsPassthroughEnabled()) {
-    if (IsKeyboardForUserEnabled(user_index)) {
-      for (const KeyBinding& b : key_bindings_) {
-        if (b.input_key == evt.virtual_key &&
-            MatchesCaps(b.lowercase, b.uppercase, evt.is_capital)) {
-          xinput_virtual_key = b.output_key;
-        }
+    for (const KeyBinding& b : key_bindings_) {
+      if (b.input_key == evt.virtual_key &&
+          MatchesCaps(b.lowercase, b.uppercase, evt.is_capital)) {
+        xinput_virtual_key = b.output_key;
       }
     }
   } else {
@@ -510,11 +480,6 @@ void KeyboardInputDriver::ClearPressedKeys() {
 }
 
 void KeyboardInputDriver::OnKey(ui::KeyEvent& e, bool is_down) {
-  if (static_cast<KeyboardMode>(cvars::keyboard_mode) ==
-      KeyboardMode::Disabled) {
-    return;
-  }
-
   auto global_lock = global_critical_region_.Acquire();
 
   const bool is_capital = e.is_shift_pressed();
@@ -547,8 +512,7 @@ void KeyboardInputDriver::OnKey(ui::KeyEvent& e, bool is_down) {
 }
 
 void KeyboardInputDriver::OnChar(ui::KeyEvent& e) {
-  if (static_cast<KeyboardMode>(cvars::keyboard_mode) !=
-      KeyboardMode::Passthrough) {
+  if (!IsPassthroughEnabled()) {
     return;
   }
   // WM_CHAR convention: OnKeyChar's virtual_key carries the unicode codepoint.
@@ -563,17 +527,23 @@ void KeyboardInputDriver::OnChar(ui::KeyEvent& e) {
 }
 
 InputType KeyboardInputDriver::GetInputType() const {
-  switch (static_cast<KeyboardMode>(cvars::keyboard_mode)) {
-    case KeyboardMode::Disabled:
-      return InputType::None;
-    case KeyboardMode::Enabled:
-      return InputType::Controller;
-    case KeyboardMode::Passthrough:
-      return InputType::Keyboard;
-    default:
-      break;
+  return cvars::keyboard_passthrough ? InputType::Keyboard
+                                     : InputType::Controller;
+}
+
+std::vector<InputDeviceInfo> KeyboardInputDriver::EnumerateDevices() {
+  // Passthrough surfaces keystrokes via GetKeystroke directly; it doesn't
+  // route through the slot binding table.
+  if (IsPassthroughEnabled()) {
+    return {};
   }
-  return InputType::Controller;
+  InputDeviceInfo info{};
+  info.driver_slot = 0;
+  info.stable_id = "keyboard";
+  info.display_name = "Keyboard";
+  // User must explicitly bind the keyboard via the menu.
+  info.auto_bind = false;
+  return {info};
 }
 
 }  // namespace keyboard

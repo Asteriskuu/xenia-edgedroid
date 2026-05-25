@@ -71,6 +71,10 @@ msgstr "Audio(&A)"
 msgid "&Configuration"
 msgstr "Configuración(&C)"
 
+#: src/xenia/app/emulator_window.cc:898
+msgid "&Controllers"
+msgstr "Controles(&C)"
+
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
 msgstr "Archivo(&F)"
@@ -172,6 +176,14 @@ msgstr "Todos los archivos"
 msgid "All cvars are already overridden."
 msgstr "Todos los cvars ya están anulados."
 
+#: src/xenia/app/emulator_window.cc:343
+msgid "Arcade Pad"
+msgstr "Pad Arcade"
+
+#: src/xenia/app/emulator_window.cc:331
+msgid "Arcade Stick"
+msgstr "Stick Arcade"
+
 #: src/xenia/ui/profile_editor_dialog_wx.cc:69
 msgid "Argentina"
 msgstr "Argentina"
@@ -187,6 +199,10 @@ msgstr "Audio"
 #: src/xenia/ui/quick_settings_dialog_wx.cc:258
 msgid "Audio Backend:"
 msgstr "Backend de audio:"
+
+#: src/xenia/app/emulator_window.cc:2402
+msgid "Auto (%s)"
+msgstr "Automático (%s)"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:71
 msgid "Australia"
@@ -353,6 +369,10 @@ msgstr "República Checa"
 msgid "DLC"
 msgstr "DLC"
 
+#: src/xenia/app/emulator_window.cc:335
+msgid "Dance Pad"
+msgstr "Alfombra de Baile"
+
 #: src/xenia/ui/game_list_panel_wx.cc:690
 #: src/xenia/ui/game_list_panel_wx.cc:693
 msgid "Default"
@@ -380,6 +400,10 @@ msgstr "Descartar cambios"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:534
 msgid "Discard all unsaved changes?"
 msgstr "¿Descartar todos los cambios no guardados?"
+
+#: src/xenia/app/emulator_window.cc:2317
+msgid "Disconnect"
+msgstr "Desconectar"
 
 #: src/xenia/ui/quick_settings_dialog_wx.cc:297
 msgid "Discord Rich Presence:"
@@ -496,6 +520,10 @@ msgstr "Family"
 msgid "Faroe Islands"
 msgstr "Islas Feroe"
 
+#: src/xenia/app/emulator_window.cc:341
+msgid "Drum Kit"
+msgstr "Batería"
+
 #: src/xenia/ui/game_list_panel_wx.cc:1236
 msgid "File Corrupted"
 msgstr "Archivo dañado"
@@ -536,6 +564,10 @@ msgstr "Completo"
 msgid "Full Screen:"
 msgstr "Pantalla completa:"
 
+#: src/xenia/app/emulator_window.cc:333
+msgid "Flight Stick"
+msgstr "Joystick de Vuelo"
+
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
 msgstr "Compatibilidad de juegos(&C)…"
@@ -543,6 +575,10 @@ msgstr "Compatibilidad de juegos(&C)…"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
 msgstr "GameMode no está en el PATH; instálalo para habilitarlo."
+
+#: src/xenia/app/emulator_window.cc:345
+msgid "Gamepad"
+msgstr "Gamepad"
 
 #: src/xenia/ui/game_list_panel_wx.cc:96
 msgid "Gameplay"
@@ -619,6 +655,10 @@ msgstr "Guatemala"
 #: src/xenia/app/emulator_window.cc:1722
 msgid "Guide"
 msgstr "Guía"
+
+#: src/xenia/app/emulator_window.cc:339
+msgid "Guitar"
+msgstr "Guitarra"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:105
 msgid "Honduras"
@@ -1436,6 +1476,10 @@ msgid ""
 msgstr ""
 "Xenia aún no está totalmente inicializado. Inténtalo de nuevo cuando la "
 "aplicación termine de iniciarse."
+
+#: src/xenia/app/emulator_window.cc:329
+msgid "Wheel"
+msgstr "Volante"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:173
 msgid "Yemen"

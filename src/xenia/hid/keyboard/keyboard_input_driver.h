@@ -20,8 +20,6 @@ namespace xe {
 namespace hid {
 namespace keyboard {
 
-enum class KeyboardMode { Disabled, Enabled, Passthrough };
-
 class KeyboardInputDriver final : public InputDriver {
  public:
   explicit KeyboardInputDriver(xe::ui::Window* window, size_t window_z_order);
@@ -36,6 +34,7 @@ class KeyboardInputDriver final : public InputDriver {
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                         X_INPUT_KEYSTROKE* out_keystroke) override;
   virtual InputType GetInputType() const override;
+  std::vector<InputDeviceInfo> EnumerateDevices() override;
 
  protected:
   class KeyboardWindowInputListener final : public ui::WindowInputListener,

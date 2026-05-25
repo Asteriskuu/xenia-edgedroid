@@ -441,6 +441,84 @@ X_RESULT SDLInputDriver::GetKeystroke(uint32_t users, uint32_t flags,
 
 InputType SDLInputDriver::GetInputType() const { return InputType::Controller; }
 
+static const char* JoystickTypeName(SDL_JoystickType t) {
+  switch (t) {
+    case SDL_JOYSTICK_TYPE_UNKNOWN:
+      return "Unknown";
+    case SDL_JOYSTICK_TYPE_GAMECONTROLLER:
+      return "GameController";
+    case SDL_JOYSTICK_TYPE_WHEEL:
+      return "Wheel";
+    case SDL_JOYSTICK_TYPE_ARCADE_STICK:
+      return "ArcadeStick";
+    case SDL_JOYSTICK_TYPE_FLIGHT_STICK:
+      return "FlightStick";
+    case SDL_JOYSTICK_TYPE_DANCE_PAD:
+      return "DancePad";
+    case SDL_JOYSTICK_TYPE_GUITAR:
+      return "Guitar";
+    case SDL_JOYSTICK_TYPE_DRUM_KIT:
+      return "DrumKit";
+    case SDL_JOYSTICK_TYPE_ARCADE_PAD:
+      return "ArcadePad";
+    case SDL_JOYSTICK_TYPE_THROTTLE:
+      return "Throttle";
+    default:
+      return "?";
+  }
+}
+
+static const char* XInputSubTypeName(uint8_t s) {
+  switch (s) {
+    case 0x01:
+      return "GAMEPAD";
+    case 0x02:
+      return "WHEEL";
+    case 0x03:
+      return "ARCADE_STICK";
+    case 0x04:
+      return "FLIGHT_STICK";
+    case 0x05:
+      return "DANCE_PAD";
+    case 0x06:
+      return "GUITAR";
+    case 0x07:
+      return "GUITAR_ALTERNATE";
+    case 0x08:
+      return "DRUM_KIT";
+    case 0x0B:
+      return "GUITAR_BASS";
+    case 0x13:
+      return "ARCADE_PAD";
+    default:
+      return "?";
+  }
+}
+
+// SDL_JoystickType numbering diverges from XINPUT_DEVSUBTYPE_* past value 6.
+static uint8_t SdlTypeToXInputSubType(SDL_JoystickType t) {
+  switch (t) {
+    case SDL_JOYSTICK_TYPE_GAMECONTROLLER:
+      return 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
+    case SDL_JOYSTICK_TYPE_WHEEL:
+      return 0x02;  // XINPUT_DEVSUBTYPE_WHEEL
+    case SDL_JOYSTICK_TYPE_ARCADE_STICK:
+      return 0x03;  // XINPUT_DEVSUBTYPE_ARCADE_STICK
+    case SDL_JOYSTICK_TYPE_FLIGHT_STICK:
+      return 0x04;  // XINPUT_DEVSUBTYPE_FLIGHT_STICK
+    case SDL_JOYSTICK_TYPE_DANCE_PAD:
+      return 0x05;  // XINPUT_DEVSUBTYPE_DANCE_PAD
+    case SDL_JOYSTICK_TYPE_GUITAR:
+      return 0x06;  // XINPUT_DEVSUBTYPE_GUITAR
+    case SDL_JOYSTICK_TYPE_DRUM_KIT:
+      return 0x08;  // XINPUT_DEVSUBTYPE_DRUM_KIT
+    case SDL_JOYSTICK_TYPE_ARCADE_PAD:
+      return 0x13;  // XINPUT_DEVSUBTYPE_ARCADE_PAD
+    default:
+      return 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
+  }
+}
+
 void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   // This callback will likely run on the thread that posts the event, which
   // may be a dedicated thread SDL has created for the joystick subsystem.
@@ -455,6 +533,34 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
     sdl_events_unflushed_ = 0;
   }
   switch (event.type) {
+    case SDL_JOYDEVICEADDED: {
+      // Logged before the controller event (if any) so unmapped devices
+      // (some guitars/drums) leave a paper trail even when SDL can't promote
+      // them to a game controller.
+      const int idx = event.jdevice.which;
+      const char* name = SDL_JoystickNameForIndex(idx);
+      char guid_str[33] = {};
+      SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(idx), guid_str,
+                                sizeof(guid_str));
+      const bool is_controller = SDL_IsGameController(idx) == SDL_TRUE;
+#if SDL_VERSION_ATLEAST(2, 0, 6)
+      XELOGI(
+          "SDL JoystickAdded: \"{}\", VendorID(0x{:04X}), "
+          "ProductID(0x{:04X}), GUID({}), HasControllerMapping({})",
+          name ? name : "?", SDL_JoystickGetDeviceVendor(idx),
+          SDL_JoystickGetDeviceProduct(idx), guid_str, is_controller);
+#else
+      XELOGI("SDL JoystickAdded: \"{}\", GUID({}), HasControllerMapping({})",
+             name ? name : "?", guid_str, is_controller);
+#endif
+      if (!is_controller) {
+        XELOGW(
+            "SDL JoystickAdded: \"{}\" has no game controller mapping; "
+            "device will not be usable. Add a mapping to gamecontrollerdb.txt.",
+            name ? name : "?");
+      }
+      break;
+    }
     case SDL_CONTROLLERDEVICEADDED:
       OnControllerDeviceAdded(event);
       break;
@@ -488,21 +594,24 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
       SDL_JoystickGetGUID(SDL_GameControllerGetJoystick(controller)), guid_str,
       33);
 
+  const SDL_JoystickType joy_type =
+      SDL_JoystickGetType(SDL_GameControllerGetJoystick(controller));
+  const uint8_t xinput_subtype = SdlTypeToXInputSubType(joy_type);
   XELOGI(
       "SDL OnControllerDeviceAdded: \"{}\", "
       "JoystickType({}), "
       "GameControllerType({}), "
+      "XInputSubType({} = 0x{:02X}), "
       "VendorID(0x{:04X}), "
       "ProductID(0x{:04X}), "
       "GUID({})",
-      SDL_GameControllerName(controller),
-      static_cast<uint32_t>(
-          SDL_JoystickGetType(SDL_GameControllerGetJoystick(controller))),
+      SDL_GameControllerName(controller), JoystickTypeName(joy_type),
 #if SDL_VERSION_ATLEAST(2, 0, 12)
       static_cast<uint32_t>(SDL_GameControllerGetType(controller)),
 #else
       "?",
 #endif
+      XInputSubTypeName(xinput_subtype), xinput_subtype,
 #if SDL_VERSION_ATLEAST(2, 0, 6)
       SDL_GameControllerGetVendor(controller),
       SDL_GameControllerGetProduct(controller),
@@ -542,6 +651,7 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
     XELOGI("SDL OnControllerDeviceAdded: Added at index {}.", user_id);
     XELOGI("SDL Controller {}: {}", user_id,
            SDL_GameControllerMapping(controller));
+    NotifyDevicesChanged();
   } else {
     // No more controllers needed, close it.
     SDL_GameControllerClose(controller);
@@ -553,13 +663,23 @@ void SDLInputDriver::OnControllerDeviceRemoved(const SDL_Event& event) {
   // Find the disconnected gamecontroller and close it.
   auto idx = GetControllerIndexFromInstanceID(event.cdevice.which);
   if (idx) {
-    SDL_GameControllerClose(controllers_.at(*idx).sdl);
+    auto* sdl = controllers_.at(*idx).sdl;
+    const char* name = SDL_GameControllerName(sdl);
+    char guid_str[33] = {};
+    SDL_JoystickGetGUIDString(
+        SDL_JoystickGetGUID(SDL_GameControllerGetJoystick(sdl)), guid_str,
+        sizeof(guid_str));
+    XELOGI("SDL OnControllerDeviceRemoved: \"{}\", GUID({}), driver_slot({}).",
+           name ? name : "?", guid_str, *idx);
+    SDL_GameControllerClose(sdl);
     controllers_.at(*idx) = {};
     keystroke_states_.at(*idx) = {};
-    XELOGI("SDL OnControllerDeviceRemoved: Removed at player index {}.", *idx);
+    NotifyDevicesChanged();
   } else {
     // Can happen in case all slots where full previously.
-    XELOGW("SDL OnControllerDeviceRemoved: Ignored. Unused device.");
+    XELOGW(
+        "SDL OnControllerDeviceRemoved: Ignored, instance_id({}) not in use.",
+        event.cdevice.which);
   }
 }
 
@@ -706,30 +826,6 @@ bool SDLInputDriver::TestSDLVersion() const {
   return true;
 }
 
-// SDL_JoystickType numbering diverges from XINPUT_DEVSUBTYPE_* past value 6.
-static uint8_t SdlTypeToXInputSubType(SDL_JoystickType t) {
-  switch (t) {
-    case SDL_JOYSTICK_TYPE_GAMECONTROLLER:
-      return 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
-    case SDL_JOYSTICK_TYPE_WHEEL:
-      return 0x02;  // XINPUT_DEVSUBTYPE_WHEEL
-    case SDL_JOYSTICK_TYPE_ARCADE_STICK:
-      return 0x03;  // XINPUT_DEVSUBTYPE_ARCADE_STICK
-    case SDL_JOYSTICK_TYPE_FLIGHT_STICK:
-      return 0x04;  // XINPUT_DEVSUBTYPE_FLIGHT_STICK
-    case SDL_JOYSTICK_TYPE_DANCE_PAD:
-      return 0x05;  // XINPUT_DEVSUBTYPE_DANCE_PAD
-    case SDL_JOYSTICK_TYPE_GUITAR:
-      return 0x06;  // XINPUT_DEVSUBTYPE_GUITAR
-    case SDL_JOYSTICK_TYPE_DRUM_KIT:
-      return 0x08;  // XINPUT_DEVSUBTYPE_DRUM_KIT
-    case SDL_JOYSTICK_TYPE_ARCADE_PAD:
-      return 0x13;  // XINPUT_DEVSUBTYPE_ARCADE_PAD
-    default:
-      return 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
-  }
-}
-
 void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
   assert(state.sdl);
   uint16_t cap_flags = 0x0;
@@ -778,6 +874,30 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
   c.gamepad.thumb_ry = static_cast<int16_t>(0xFFFFu);
   c.vibration.left_motor_speed = 0xFFFFu;
   c.vibration.right_motor_speed = 0xFFFFu;
+}
+
+std::vector<InputDeviceInfo> SDLInputDriver::EnumerateDevices() {
+  std::vector<InputDeviceInfo> out;
+  for (size_t i = 0; i < controllers_.size(); ++i) {
+    auto* sdl = controllers_.at(i).sdl;
+    if (!sdl) {
+      continue;
+    }
+    InputDeviceInfo info{};
+    info.driver_slot = static_cast<uint8_t>(i);
+    auto* joystick = SDL_GameControllerGetJoystick(sdl);
+    if (joystick) {
+      char guid_buf[33] = {};
+      SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joystick), guid_buf,
+                                sizeof(guid_buf));
+      info.stable_id = guid_buf;
+      info.subtype = SdlTypeToXInputSubType(SDL_JoystickGetType(joystick));
+    }
+    const char* name = SDL_GameControllerName(sdl);
+    info.display_name = name ? name : "Controller";
+    out.push_back(std::move(info));
+  }
+  return out;
 }
 
 void SDLInputDriver::QueueControllerUpdate() {

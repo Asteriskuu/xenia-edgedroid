@@ -45,7 +45,31 @@ InputSystem::~InputSystem() = default;
 X_STATUS InputSystem::Setup() { return X_STATUS_SUCCESS; }
 
 void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
+  driver->set_devices_changed_callback([this]() { NotifyDevicesChanged(); });
   drivers_.push_back(std::move(driver));
+}
+
+void InputSystem::NotifyDevicesChanged() {
+  if (reconcile_pending_.exchange(true)) {
+    return;
+  }
+  if (!window_) {
+    reconcile_pending_.store(false);
+    return;
+  }
+  window_->app_context().CallInUIThreadDeferred([this]() {
+    reconcile_pending_.store(false);
+    {
+      auto lock = this->lock();
+      ReconcileBindings();
+    }
+    // The device list has changed; menu/toolbar must refresh even if
+    // ReconcileBindings didn't alter any bindings (e.g. a dismissed device
+    // replugged is visible again but stays unbound).
+    if (bindings_changed_cb_) {
+      bindings_changed_cb_();
+    }
+  });
 }
 
 void InputSystem::UpdateUsedSlot(InputDriver* driver, uint8_t slot,
@@ -85,33 +109,23 @@ void InputSystem::UpdateUsedSlot(InputDriver* driver, uint8_t slot,
   }
 }
 
-std::vector<InputDriver*> InputSystem::FilterDrivers(uint32_t flags) {
-  std::vector<InputDriver*> filtered_drivers;
-  for (auto& driver : drivers_) {
-    if (driver->GetInputType() == InputType::None) {
-      continue;
-    }
-
-    if ((flags & driver->GetInputType()) != 0) {
-      filtered_drivers.push_back(driver.get());
-    }
-  }
-  return filtered_drivers;
-}
-
 X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
                                       X_INPUT_CAPABILITIES* out_caps) {
   SCOPE_profile_cpu_f("hid");
 
-  std::vector<InputDriver*> filtered_drivers = FilterDrivers(flags);
-
-  for (auto& driver : filtered_drivers) {
-    X_RESULT result = driver->GetCapabilities(user_index, flags, out_caps);
-    if (result == X_ERROR_SUCCESS) {
-      return result;
-    }
+  if (user_index >= XUserMaxUserCount) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
   }
-  return X_ERROR_DEVICE_NOT_CONNECTED;
+  auto& binding = slot_bindings_[user_index];
+  if (!binding.driver || (flags & binding.driver->GetInputType()) == 0) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  X_RESULT result =
+      binding.driver->GetCapabilities(binding.driver_slot, flags, out_caps);
+  if (result == X_ERROR_SUCCESS && binding.subtype_override != 0) {
+    out_caps->sub_type = binding.subtype_override;
+  }
+  return result;
 }
 
 X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
@@ -126,14 +140,12 @@ X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
 
   X_RESULT result = GetStateForUI(user_index, flags, out_state);
 
-  // Handle consumed buttons - these are buttons that were held when a UI dialog
-  // closed. We mask them from the game until they are released.
+  // Mask buttons that were held when a UI dialog closed until they're
+  // released, so the close-press doesn't carry through into the game.
   if (result == X_ERROR_SUCCESS && user_index < XUserMaxUserCount &&
       consumed_buttons_[user_index] != 0) {
     uint16_t buttons = out_state->gamepad.buttons;
-    // Update consumed_buttons_ to only include buttons still being held
     consumed_buttons_[user_index] &= buttons;
-    // Mask consumed buttons from the output
     out_state->gamepad.buttons = buttons & ~consumed_buttons_[user_index];
   }
 
@@ -144,21 +156,19 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, uint32_t flags,
                                     X_INPUT_STATE* out_state) {
   SCOPE_profile_cpu_f("hid");
 
-  std::vector<InputDriver*> filtered_drivers = FilterDrivers(flags);
-  if (filtered_drivers.empty()) {
+  if (user_index >= XUserMaxUserCount) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
-
-  for (auto& driver : filtered_drivers) {
-    X_RESULT result = driver->GetState(user_index, out_state);
-    if (result == X_ERROR_SUCCESS) {
-      UpdateUsedSlot(driver, user_index, true);
+  auto& binding = slot_bindings_[user_index];
+  if (binding.driver && (flags & binding.driver->GetInputType()) != 0) {
+    X_RESULT r = binding.driver->GetState(binding.driver_slot, out_state);
+    if (r == X_ERROR_SUCCESS) {
+      UpdateUsedSlot(binding.driver, user_index, true);
       AdjustDeadzoneLevels(user_index, &out_state->gamepad);
-
       if (out_state->gamepad.buttons != 0) {
         last_used_slot = user_index;
       }
-      return result;
+      return r;
     }
   }
   UpdateUsedSlot(nullptr, user_index, false);
@@ -185,47 +195,65 @@ X_RESULT InputSystem::SetState(uint32_t user_index,
                                X_INPUT_VIBRATION* vibration) {
   SCOPE_profile_cpu_f("hid");
   X_INPUT_VIBRATION modified_vibration = ModifyVibrationLevel(vibration);
-  for (auto& driver : drivers_) {
-    X_RESULT result = driver->SetState(user_index, &modified_vibration);
-    if (result == X_ERROR_SUCCESS) {
-      return result;
-    }
+  if (user_index >= XUserMaxUserCount) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
   }
-  return X_ERROR_DEVICE_NOT_CONNECTED;
+  auto& binding = slot_bindings_[user_index];
+  if (!binding.driver) {
+    return X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  return binding.driver->SetState(binding.driver_slot, &modified_vibration);
 }
 
 X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
                                    X_INPUT_KEYSTROKE* out_keystroke) {
   SCOPE_profile_cpu_f("hid");
 
-  // If UI is blocking input, return empty keystroke to the game
+  // If UI is blocking input, return empty keystroke to the game.
   if (ui_input_blockers_.load() > 0) {
     std::memset(out_keystroke, 0, sizeof(X_INPUT_KEYSTROKE));
     return X_ERROR_EMPTY;
   }
 
-  std::vector<InputDriver*> filtered_drivers = FilterDrivers(flags);
-
   bool any_connected = false;
-  for (auto& driver : filtered_drivers) {
-    // connected_slots
-    X_RESULT result = driver->GetKeystroke(user_index, flags, out_keystroke);
-    if (result == X_ERROR_INVALID_PARAMETER ||
-        result == X_ERROR_DEVICE_NOT_CONNECTED) {
-      continue;
-    }
 
+  auto try_driver = [&](InputDriver* driver, uint8_t driver_slot) -> X_RESULT {
+    X_RESULT r = driver->GetKeystroke(driver_slot, flags, out_keystroke);
+    if (r == X_ERROR_INVALID_PARAMETER || r == X_ERROR_DEVICE_NOT_CONNECTED) {
+      return r;
+    }
     any_connected = true;
-
-    if (result == X_ERROR_SUCCESS) {
+    if (r == X_ERROR_SUCCESS) {
       last_used_slot = user_index;
-      return result;
     }
+    return r;
+  };
 
-    if (result == X_ERROR_EMPTY) {
-      continue;
+  // Bound device for this slot.
+  if (user_index < XUserMaxUserCount) {
+    auto& binding = slot_bindings_[user_index];
+    if (binding.driver && (flags & binding.driver->GetInputType()) != 0) {
+      X_RESULT r = try_driver(binding.driver, binding.driver_slot);
+      if (r == X_ERROR_SUCCESS) {
+        return r;
+      }
     }
   }
+
+  // Passthrough fallback: Keyboard-type drivers feed all slots in parallel
+  // and don't participate in the binding table.
+  if (flags & InputType::Keyboard) {
+    for (auto& driver : drivers_) {
+      if (driver->GetInputType() != InputType::Keyboard) {
+        continue;
+      }
+      X_RESULT r = try_driver(driver.get(), static_cast<uint8_t>(user_index));
+      if (r == X_ERROR_SUCCESS) {
+        return r;
+      }
+    }
+  }
+
   return any_connected ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
 }
 
@@ -243,7 +271,7 @@ void InputSystem::ToggleVibration() {
 
 void InputSystem::AdjustDeadzoneLevels(const uint8_t slot,
                                        X_INPUT_GAMEPAD* gamepad) {
-  if (slot > XUserMaxUserCount) {
+  if (slot >= XUserMaxUserCount) {
     return;
   }
 
@@ -317,5 +345,216 @@ X_INPUT_VIBRATION InputSystem::ModifyVibrationLevel(
 std::unique_lock<xe_unlikely_mutex> InputSystem::lock() {
   return std::unique_lock<xe_unlikely_mutex>{lock_};
 }
+
+void InputSystem::ReconcileBindings() {
+  struct LiveDevice {
+    InputDriver* driver;
+    InputDeviceInfo info;
+  };
+  std::vector<LiveDevice> live;
+  for (auto& d : drivers_) {
+    for (auto& info : d->EnumerateDevices()) {
+      live.push_back({d.get(), std::move(info)});
+    }
+  }
+
+  // Pass 1: demote bindings whose device has gone away.
+  for (auto& b : slot_bindings_) {
+    if (!b.driver) {
+      continue;
+    }
+    bool found = false;
+    for (auto& l : live) {
+      if (l.driver == b.driver && l.info.driver_slot == b.driver_slot) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      b.driver = nullptr;
+      b.driver_slot = 0;
+    }
+  }
+
+  // Pass 2: place devices that aren't currently bound.
+  for (auto& l : live) {
+    bool already_bound = false;
+    for (auto& b : slot_bindings_) {
+      if (b.driver == l.driver && b.driver_slot == l.info.driver_slot) {
+        already_bound = true;
+        break;
+      }
+    }
+    if (already_bound) {
+      continue;
+    }
+
+    // Reattach by stable_id (matches detached bindings).
+    bool placed = false;
+    if (!l.info.stable_id.empty()) {
+      for (auto& b : slot_bindings_) {
+        if (!b.driver && b.stable_id == l.info.stable_id) {
+          b.driver = l.driver;
+          b.driver_slot = l.info.driver_slot;
+          b.display_name = l.info.display_name;
+          placed = true;
+          break;
+        }
+      }
+    }
+    if (placed) {
+      continue;
+    }
+
+    // No reattach available — auto-bind only if the device opts in and the
+    // user hasn't dismissed it this session.
+    if (!l.info.auto_bind) {
+      continue;
+    }
+    if (!l.info.stable_id.empty() && dismissed_ids_.count(l.info.stable_id)) {
+      continue;
+    }
+
+    // Try preferred slot if it's not currently active.
+    if (l.info.preferred_slot >= 0 &&
+        l.info.preferred_slot < XUserMaxUserCount) {
+      auto& b = slot_bindings_[l.info.preferred_slot];
+      if (!b.driver) {
+        b.driver = l.driver;
+        b.driver_slot = l.info.driver_slot;
+        b.stable_id = l.info.stable_id;
+        b.display_name = l.info.display_name;
+        continue;
+      }
+    }
+
+    // Place in the first slot with no active driver. A detached binding
+    // (driver==null but stable_id set) gets its identity overwritten — the
+    // original device, if it returns, will auto-bind to the next free slot.
+    for (auto& b : slot_bindings_) {
+      if (b.driver) {
+        continue;
+      }
+      const bool was_detached_other = b.stable_id != l.info.stable_id;
+      b.driver = l.driver;
+      b.driver_slot = l.info.driver_slot;
+      b.stable_id = l.info.stable_id;
+      b.display_name = l.info.display_name;
+      if (was_detached_other) {
+        b.subtype_override = 0;
+      }
+      break;
+    }
+  }
+}
+
+std::vector<InputSystem::EnumeratedDevice> InputSystem::EnumerateDevices() {
+  ReconcileBindings();
+  std::vector<EnumeratedDevice> out;
+  for (auto& d : drivers_) {
+    for (auto& info : d->EnumerateDevices()) {
+      int bound_slot = -1;
+      for (uint32_t s = 0; s < XUserMaxUserCount; ++s) {
+        if (slot_bindings_[s].driver == d.get() &&
+            slot_bindings_[s].driver_slot == info.driver_slot) {
+          bound_slot = static_cast<int>(s);
+          break;
+        }
+      }
+      out.push_back({d.get(), std::move(info), bound_slot});
+    }
+  }
+  return out;
+}
+
+void InputSystem::BindSlot(uint32_t guest_slot, InputDriver* driver,
+                           uint8_t driver_slot, std::string stable_id,
+                           std::string display_name) {
+  if (guest_slot >= XUserMaxUserCount || !driver) {
+    return;
+  }
+
+  // If this device is already bound elsewhere, vacate that slot so it moves.
+  for (uint32_t s = 0; s < XUserMaxUserCount; ++s) {
+    if (s == guest_slot) {
+      continue;
+    }
+    auto& b = slot_bindings_[s];
+    if (b.driver == driver && b.driver_slot == driver_slot) {
+      b = {};
+    } else if (!stable_id.empty() && b.stable_id == stable_id) {
+      b = {};
+    }
+  }
+
+  if (!stable_id.empty()) {
+    dismissed_ids_.erase(stable_id);
+  }
+
+  // Whether the slot was empty or held a different device, the override (if
+  // any) belonged to the previous device and must not carry to the new one.
+  const bool different_device =
+      slot_bindings_[guest_slot].stable_id != stable_id ||
+      slot_bindings_[guest_slot].driver != driver ||
+      slot_bindings_[guest_slot].driver_slot != driver_slot;
+  auto& target = slot_bindings_[guest_slot];
+  target.driver = driver;
+  target.driver_slot = driver_slot;
+  target.stable_id = std::move(stable_id);
+  target.display_name = std::move(display_name);
+  if (different_device) {
+    target.subtype_override = 0;
+  }
+
+  driver->OnBoundToSlot(driver_slot, guest_slot);
+
+  if (kernel::kernel_state()) {
+    kernel::kernel_state()->BroadcastNotification(
+        kXNotificationSystemInputDevicesChanged, 0);
+  }
+  if (bindings_changed_cb_) {
+    bindings_changed_cb_();
+  }
+}
+
+void InputSystem::SetSlotSubtypeOverride(uint32_t guest_slot, uint8_t subtype) {
+  if (guest_slot >= XUserMaxUserCount) {
+    return;
+  }
+  auto& binding = slot_bindings_[guest_slot];
+  if (binding.subtype_override == subtype) {
+    return;
+  }
+  binding.subtype_override = subtype;
+  if (kernel::kernel_state()) {
+    kernel::kernel_state()->BroadcastNotification(
+        kXNotificationSystemInputDevicesChanged, 0);
+  }
+  if (bindings_changed_cb_) {
+    bindings_changed_cb_();
+  }
+}
+
+void InputSystem::UnbindSlot(uint32_t guest_slot) {
+  if (guest_slot >= XUserMaxUserCount) {
+    return;
+  }
+  auto previous = slot_bindings_[guest_slot];
+  slot_bindings_[guest_slot] = {};
+  if (!previous.stable_id.empty()) {
+    dismissed_ids_.insert(previous.stable_id);
+  }
+  if (previous.driver) {
+    previous.driver->OnUnboundFromSlot(previous.driver_slot);
+  }
+  if (kernel::kernel_state()) {
+    kernel::kernel_state()->BroadcastNotification(
+        kXNotificationSystemInputDevicesChanged, 0);
+  }
+  if (bindings_changed_cb_) {
+    bindings_changed_cb_();
+  }
+}
+
 }  // namespace hid
 }  // namespace xe

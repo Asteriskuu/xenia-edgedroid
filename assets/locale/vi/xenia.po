@@ -69,6 +69,10 @@ msgstr "Âm thanh(&A)"
 msgid "&Configuration"
 msgstr "Cấu hình(&C)"
 
+#: src/xenia/app/emulator_window.cc:898
+msgid "&Controllers"
+msgstr "Tay cầm(&C)"
+
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
 msgstr "Tệp(&F)"
@@ -170,6 +174,14 @@ msgstr "Tất cả tệp"
 msgid "All cvars are already overridden."
 msgstr "Tất cả cvar đã được ghi đè."
 
+#: src/xenia/app/emulator_window.cc:343
+msgid "Arcade Pad"
+msgstr "Pad Arcade"
+
+#: src/xenia/app/emulator_window.cc:331
+msgid "Arcade Stick"
+msgstr "Cần Arcade"
+
 #: src/xenia/ui/profile_editor_dialog_wx.cc:69
 msgid "Argentina"
 msgstr "Argentina"
@@ -185,6 +197,10 @@ msgstr "Âm thanh"
 #: src/xenia/ui/quick_settings_dialog_wx.cc:258
 msgid "Audio Backend:"
 msgstr "Backend âm thanh:"
+
+#: src/xenia/app/emulator_window.cc:2402
+msgid "Auto (%s)"
+msgstr "Tự động (%s)"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:71
 msgid "Australia"
@@ -351,6 +367,10 @@ msgstr "Cộng hòa Séc"
 msgid "DLC"
 msgstr "DLC"
 
+#: src/xenia/app/emulator_window.cc:335
+msgid "Dance Pad"
+msgstr "Thảm Nhảy"
+
 #: src/xenia/ui/game_list_panel_wx.cc:690
 #: src/xenia/ui/game_list_panel_wx.cc:693
 msgid "Default"
@@ -378,6 +398,10 @@ msgstr "Loại bỏ thay đổi"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:534
 msgid "Discard all unsaved changes?"
 msgstr "Loại bỏ tất cả thay đổi chưa lưu?"
+
+#: src/xenia/app/emulator_window.cc:2317
+msgid "Disconnect"
+msgstr "Ngắt kết nối"
 
 #: src/xenia/ui/quick_settings_dialog_wx.cc:297
 msgid "Discord Rich Presence:"
@@ -494,6 +518,10 @@ msgstr "Family"
 msgid "Faroe Islands"
 msgstr "Quần đảo Faroe"
 
+#: src/xenia/app/emulator_window.cc:341
+msgid "Drum Kit"
+msgstr "Bộ Trống"
+
 #: src/xenia/ui/game_list_panel_wx.cc:1236
 msgid "File Corrupted"
 msgstr "Tệp bị hỏng"
@@ -534,6 +562,10 @@ msgstr "Đầy đủ"
 msgid "Full Screen:"
 msgstr "Toàn màn hình:"
 
+#: src/xenia/app/emulator_window.cc:333
+msgid "Flight Stick"
+msgstr "Cần Lái Máy Bay"
+
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
 msgstr "Tương thích trò chơi(&C)…"
@@ -541,6 +573,10 @@ msgstr "Tương thích trò chơi(&C)…"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
 msgstr "GameMode không có trong PATH; cài đặt để kích hoạt."
+
+#: src/xenia/app/emulator_window.cc:345
+msgid "Gamepad"
+msgstr "Gamepad"
 
 #: src/xenia/ui/game_list_panel_wx.cc:96
 msgid "Gameplay"
@@ -617,6 +653,10 @@ msgstr "Guatemala"
 #: src/xenia/app/emulator_window.cc:1722
 msgid "Guide"
 msgstr "Hướng dẫn"
+
+#: src/xenia/app/emulator_window.cc:339
+msgid "Guitar"
+msgstr "Guitar"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:105
 msgid "Honduras"
@@ -1429,6 +1469,10 @@ msgid ""
 "Xenia is not fully initialized yet. Try again after the app finishes "
 "starting up."
 msgstr "Xenia chưa khởi tạo xong. Hãy thử lại sau khi ứng dụng khởi động xong."
+
+#: src/xenia/app/emulator_window.cc:329
+msgid "Wheel"
+msgstr "Vô lăng"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:173
 msgid "Yemen"

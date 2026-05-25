@@ -47,6 +47,7 @@ class SDLInputDriver final : public InputDriver {
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                         X_INPUT_KEYSTROKE* out_keystroke) override;
   virtual InputType GetInputType() const override;
+  std::vector<InputDeviceInfo> EnumerateDevices() override;
 
  private:
   struct ControllerState {

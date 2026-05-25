@@ -282,6 +282,7 @@ class EmulatorWindow {
   ui::MenuItem* file_add_games_menu_item_ = nullptr;
   ui::MenuItem* file_stop_menu_item_ = nullptr;
   ui::MenuItem* profile_menu_ = nullptr;
+  ui::MenuItem* controllers_menu_ = nullptr;
   ui::MenuItem* config_menu_ = nullptr;
   ui::MenuItem* tools_menu_ = nullptr;
   ui::MenuItem* audio_menu_ = nullptr;
@@ -291,6 +292,10 @@ class EmulatorWindow {
   bool show_toolbar_ = true;
   void RefreshProfileMenu();
   void PopulateProfileMenu(ui::MenuItem* parent);
+  void RefreshControllersMenu();
+  void PopulateControllersMenu(ui::MenuItem* parent);
+  void RefreshControllerToolbar();
+  void ShowControllersPopupMenu();
   // Native wx prompt for first-run (no profiles); shown before any render
   // surface.
   void ShowNoProfilePrompt();

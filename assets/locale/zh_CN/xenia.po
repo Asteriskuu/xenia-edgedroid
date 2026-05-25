@@ -69,6 +69,10 @@ msgstr "音频(&A)"
 msgid "&Configuration"
 msgstr "配置(&C)"
 
+#: src/xenia/app/emulator_window.cc:898
+msgid "&Controllers"
+msgstr "控制器(&C)"
+
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
 msgstr "文件(&F)"
@@ -170,6 +174,14 @@ msgstr "所有文件"
 msgid "All cvars are already overridden."
 msgstr "所有 cvar 均已覆盖。"
 
+#: src/xenia/app/emulator_window.cc:343
+msgid "Arcade Pad"
+msgstr "街机控制板"
+
+#: src/xenia/app/emulator_window.cc:331
+msgid "Arcade Stick"
+msgstr "街机摇杆"
+
 #: src/xenia/ui/profile_editor_dialog_wx.cc:69
 msgid "Argentina"
 msgstr "阿根廷"
@@ -185,6 +197,10 @@ msgstr "音频"
 #: src/xenia/ui/quick_settings_dialog_wx.cc:258
 msgid "Audio Backend:"
 msgstr "音频后端:"
+
+#: src/xenia/app/emulator_window.cc:2402
+msgid "Auto (%s)"
+msgstr "自动 (%s)"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:71
 msgid "Australia"
@@ -351,6 +367,10 @@ msgstr "捷克"
 msgid "DLC"
 msgstr "DLC"
 
+#: src/xenia/app/emulator_window.cc:335
+msgid "Dance Pad"
+msgstr "跳舞毯"
+
 #: src/xenia/ui/game_list_panel_wx.cc:690
 #: src/xenia/ui/game_list_panel_wx.cc:693
 msgid "Default"
@@ -378,6 +398,10 @@ msgstr "放弃更改"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:534
 msgid "Discard all unsaved changes?"
 msgstr "放弃所有未保存的更改？"
+
+#: src/xenia/app/emulator_window.cc:2317
+msgid "Disconnect"
+msgstr "断开连接"
 
 #: src/xenia/ui/quick_settings_dialog_wx.cc:297
 msgid "Discord Rich Presence:"
@@ -494,6 +518,10 @@ msgstr "Family"
 msgid "Faroe Islands"
 msgstr "法罗群岛"
 
+#: src/xenia/app/emulator_window.cc:341
+msgid "Drum Kit"
+msgstr "架子鼓"
+
 #: src/xenia/ui/game_list_panel_wx.cc:1236
 msgid "File Corrupted"
 msgstr "文件已损坏"
@@ -534,6 +562,10 @@ msgstr "完整"
 msgid "Full Screen:"
 msgstr "全屏:"
 
+#: src/xenia/app/emulator_window.cc:333
+msgid "Flight Stick"
+msgstr "飞行摇杆"
+
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
 msgstr "游戏兼容性(&C)…"
@@ -541,6 +573,10 @@ msgstr "游戏兼容性(&C)…"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
 msgstr "GameMode 不在 PATH 中；请安装以启用。"
+
+#: src/xenia/app/emulator_window.cc:345
+msgid "Gamepad"
+msgstr "游戏手柄"
 
 #: src/xenia/ui/game_list_panel_wx.cc:96
 msgid "Gameplay"
@@ -617,6 +653,10 @@ msgstr "危地马拉"
 #: src/xenia/app/emulator_window.cc:1722
 msgid "Guide"
 msgstr "指南"
+
+#: src/xenia/app/emulator_window.cc:339
+msgid "Guitar"
+msgstr "吉他"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:105
 msgid "Honduras"
@@ -1425,6 +1465,10 @@ msgid ""
 "Xenia is not fully initialized yet. Try again after the app finishes "
 "starting up."
 msgstr "Xenia 尚未完全初始化。请在应用启动完成后重试。"
+
+#: src/xenia/app/emulator_window.cc:329
+msgid "Wheel"
+msgstr "方向盘"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:173
 msgid "Yemen"

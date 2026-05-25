@@ -69,6 +69,10 @@ msgstr "Hang(&A)"
 msgid "&Configuration"
 msgstr "Konfiguráció(&C)"
 
+#: src/xenia/app/emulator_window.cc:898
+msgid "&Controllers"
+msgstr "Vezérlők(&C)"
+
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
 msgstr "Fájl(&F)"
@@ -170,6 +174,14 @@ msgstr "Minden fájl"
 msgid "All cvars are already overridden."
 msgstr "Minden cvar már felül van bírálva."
 
+#: src/xenia/app/emulator_window.cc:343
+msgid "Arcade Pad"
+msgstr "Arcade pad"
+
+#: src/xenia/app/emulator_window.cc:331
+msgid "Arcade Stick"
+msgstr "Arcade kar"
+
 #: src/xenia/ui/profile_editor_dialog_wx.cc:69
 msgid "Argentina"
 msgstr "Argentína"
@@ -185,6 +197,10 @@ msgstr "Hang"
 #: src/xenia/ui/quick_settings_dialog_wx.cc:258
 msgid "Audio Backend:"
 msgstr "Hangrendszer:"
+
+#: src/xenia/app/emulator_window.cc:2402
+msgid "Auto (%s)"
+msgstr "Automatikus (%s)"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:71
 msgid "Australia"
@@ -351,6 +367,10 @@ msgstr "Csehország"
 msgid "DLC"
 msgstr "DLC"
 
+#: src/xenia/app/emulator_window.cc:335
+msgid "Dance Pad"
+msgstr "Táncszőnyeg"
+
 #: src/xenia/ui/game_list_panel_wx.cc:690
 #: src/xenia/ui/game_list_panel_wx.cc:693
 msgid "Default"
@@ -378,6 +398,10 @@ msgstr "Módosítások elvetése"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:534
 msgid "Discard all unsaved changes?"
 msgstr "Elveti az összes mentetlen módosítást?"
+
+#: src/xenia/app/emulator_window.cc:2317
+msgid "Disconnect"
+msgstr "Leválasztás"
 
 #: src/xenia/ui/quick_settings_dialog_wx.cc:297
 msgid "Discord Rich Presence:"
@@ -494,6 +518,10 @@ msgstr "Family"
 msgid "Faroe Islands"
 msgstr "Feröer-szigetek"
 
+#: src/xenia/app/emulator_window.cc:341
+msgid "Drum Kit"
+msgstr "Dobszerelés"
+
 #: src/xenia/ui/game_list_panel_wx.cc:1236
 msgid "File Corrupted"
 msgstr "A fájl sérült"
@@ -534,6 +562,10 @@ msgstr "Teljes"
 msgid "Full Screen:"
 msgstr "Teljes képernyő:"
 
+#: src/xenia/app/emulator_window.cc:333
+msgid "Flight Stick"
+msgstr "Repülő kar"
+
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
 msgstr "Játékkompatibilitás(&C)…"
@@ -541,6 +573,10 @@ msgstr "Játékkompatibilitás(&C)…"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
 msgstr "A GameMode nincs a PATH-ban; telepítse az engedélyezéshez."
+
+#: src/xenia/app/emulator_window.cc:345
+msgid "Gamepad"
+msgstr "Gamepad"
 
 #: src/xenia/ui/game_list_panel_wx.cc:96
 msgid "Gameplay"
@@ -617,6 +653,10 @@ msgstr "Guatemala"
 #: src/xenia/app/emulator_window.cc:1722
 msgid "Guide"
 msgstr "Útmutató"
+
+#: src/xenia/app/emulator_window.cc:339
+msgid "Guitar"
+msgstr "Gitár"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:105
 msgid "Honduras"
@@ -1433,6 +1473,10 @@ msgid ""
 msgstr ""
 "A Xenia még nem inicializálódott teljesen. Próbálja újra, miután az "
 "alkalmazás befejezte az indulást."
+
+#: src/xenia/app/emulator_window.cc:329
+msgid "Wheel"
+msgstr "Kormány"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:173
 msgid "Yemen"

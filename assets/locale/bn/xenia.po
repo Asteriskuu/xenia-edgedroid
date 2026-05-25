@@ -70,6 +70,10 @@ msgstr "অডিও(&A)"
 msgid "&Configuration"
 msgstr "কনফিগারেশন(&C)"
 
+#: src/xenia/app/emulator_window.cc:898
+msgid "&Controllers"
+msgstr "নিয়ন্ত্রক(&C)"
+
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
 msgstr "ফাইল(&F)"
@@ -171,6 +175,14 @@ msgstr "সব ফাইল"
 msgid "All cvars are already overridden."
 msgstr "সব cvar ইতিমধ্যে ওভাররাইড করা হয়েছে।"
 
+#: src/xenia/app/emulator_window.cc:343
+msgid "Arcade Pad"
+msgstr "আর্কেড প্যাড"
+
+#: src/xenia/app/emulator_window.cc:331
+msgid "Arcade Stick"
+msgstr "আর্কেড স্টিক"
+
 #: src/xenia/ui/profile_editor_dialog_wx.cc:69
 msgid "Argentina"
 msgstr "আর্জেন্টিনা"
@@ -186,6 +198,10 @@ msgstr "অডিও"
 #: src/xenia/ui/quick_settings_dialog_wx.cc:258
 msgid "Audio Backend:"
 msgstr "অডিও ব্যাকএন্ড:"
+
+#: src/xenia/app/emulator_window.cc:2402
+msgid "Auto (%s)"
+msgstr "স্বয়ংক্রিয় (%s)"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:71
 msgid "Australia"
@@ -352,6 +368,10 @@ msgstr "চেক প্রজাতন্ত্র"
 msgid "DLC"
 msgstr "DLC"
 
+#: src/xenia/app/emulator_window.cc:335
+msgid "Dance Pad"
+msgstr "ডান্স প্যাড"
+
 #: src/xenia/ui/game_list_panel_wx.cc:690
 #: src/xenia/ui/game_list_panel_wx.cc:693
 msgid "Default"
@@ -379,6 +399,10 @@ msgstr "পরিবর্তন বাতিল করুন"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:534
 msgid "Discard all unsaved changes?"
 msgstr "সংরক্ষণ না করা সব পরিবর্তন বাতিল করবেন?"
+
+#: src/xenia/app/emulator_window.cc:2317
+msgid "Disconnect"
+msgstr "সংযোগ বিচ্ছিন্ন করুন"
 
 #: src/xenia/ui/quick_settings_dialog_wx.cc:297
 msgid "Discord Rich Presence:"
@@ -495,6 +519,10 @@ msgstr "Family"
 msgid "Faroe Islands"
 msgstr "ফারো দ্বীপপুঞ্জ"
 
+#: src/xenia/app/emulator_window.cc:341
+msgid "Drum Kit"
+msgstr "ড্রাম কিট"
+
 #: src/xenia/ui/game_list_panel_wx.cc:1236
 msgid "File Corrupted"
 msgstr "ফাইল ক্ষতিগ্রস্ত"
@@ -535,6 +563,10 @@ msgstr "পূর্ণ"
 msgid "Full Screen:"
 msgstr "ফুল স্ক্রিন:"
 
+#: src/xenia/app/emulator_window.cc:333
+msgid "Flight Stick"
+msgstr "ফ্লাইট স্টিক"
+
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
 msgstr "গেম সামঞ্জস্যতা(&C)…"
@@ -542,6 +574,10 @@ msgstr "গেম সামঞ্জস্যতা(&C)…"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
 msgstr "GameMode PATH-এ নেই; সক্রিয় করতে ইনস্টল করুন।"
+
+#: src/xenia/app/emulator_window.cc:345
+msgid "Gamepad"
+msgstr "গেমপ্যাড"
 
 #: src/xenia/ui/game_list_panel_wx.cc:96
 msgid "Gameplay"
@@ -618,6 +654,10 @@ msgstr "গুয়াতেমালা"
 #: src/xenia/app/emulator_window.cc:1722
 msgid "Guide"
 msgstr "গাইড"
+
+#: src/xenia/app/emulator_window.cc:339
+msgid "Guitar"
+msgstr "গিটার"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:105
 msgid "Honduras"
@@ -1430,6 +1470,10 @@ msgid ""
 "Xenia is not fully initialized yet. Try again after the app finishes "
 "starting up."
 msgstr "Xenia এখনও পুরোপুরি চালু হয়নি। অ্যাপ চালু হওয়া শেষ হলে আবার চেষ্টা করুন।"
+
+#: src/xenia/app/emulator_window.cc:329
+msgid "Wheel"
+msgstr "চাকা"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:173
 msgid "Yemen"

@@ -13,7 +13,10 @@
 #include <array>
 #include <atomic>
 #include <bitset>
+#include <functional>
 #include <memory>
+#include <set>
+#include <string>
 #include <vector>
 #include "xenia/base/mutex.h"
 #include "xenia/hid/input.h"
@@ -71,6 +74,52 @@ class InputSystem {
 
   std::unique_lock<xe_unlikely_mutex> lock();
 
+  // Which device currently feeds a guest controller slot.
+  struct SlotBinding {
+    InputDriver* driver = nullptr;  // null = empty or detached
+    uint8_t driver_slot = 0;
+    // Retained while detached so the same device reattaches to this slot.
+    std::string stable_id;
+    // Cached at bind time; UI uses it for the bound state only.
+    std::string display_name;
+    // 0 = report whatever the driver detected (e.g. SDL's XInput subtype
+    // translation); non-zero = force this XINPUT_DEVSUBTYPE_* value when the
+    // guest reads capabilities.
+    uint8_t subtype_override = 0;
+  };
+
+  // One enumerated device + its current binding state.
+  struct EnumeratedDevice {
+    InputDriver* driver;
+    InputDeviceInfo info;
+    int bound_slot;  // -1 if not bound
+  };
+
+  std::vector<EnumeratedDevice> EnumerateDevices();
+  void BindSlot(uint32_t guest_slot, InputDriver* driver, uint8_t driver_slot,
+                std::string stable_id, std::string display_name);
+  void UnbindSlot(uint32_t guest_slot);
+  // Pass subtype = 0 to clear the override and use the device's detected type.
+  void SetSlotSubtypeOverride(uint32_t guest_slot, uint8_t subtype);
+  const SlotBinding& GetSlotBinding(uint32_t guest_slot) const {
+    return slot_bindings_[guest_slot];
+  }
+
+  // Invoked whenever the binding table changes — explicit bind/unbind, or
+  // ReconcileBindings demoting/auto-binding due to hotplug. Fires on the
+  // calling thread with lock_ held, so subscribers must defer any work that
+  // re-enters InputSystem (CallInUIThreadDeferred — never sync, since lock_
+  // is a non-recursive spinlock).
+  using BindingsChangedCallback = std::function<void()>;
+  void SetBindingsChangedCallback(BindingsChangedCallback cb) {
+    bindings_changed_cb_ = std::move(cb);
+  }
+
+  // Drivers call this after a hotplug add/remove; schedules ReconcileBindings
+  // to run on the UI thread (which takes lock_) so the SDL event thread can
+  // post the notification without holding any of our locks.
+  void NotifyDevicesChanged();
+
  private:
   typedef std::pair<uint16_t, uint16_t> joystick_value;
 
@@ -82,7 +131,9 @@ class InputSystem {
   void AdjustDeadzoneLevels(const uint8_t slot, X_INPUT_GAMEPAD* gamepad);
   X_INPUT_VIBRATION ModifyVibrationLevel(X_INPUT_VIBRATION* vibration);
 
-  std::vector<InputDriver*> FilterDrivers(uint32_t flags);
+  // Detach gone devices, reattach by stable_id, auto-bind new devices to the
+  // first empty guest slot. Cheap; safe to call from the polling path.
+  void ReconcileBindings();
 
   xe::ui::Window* window_ = nullptr;
 
@@ -91,6 +142,15 @@ class InputSystem {
   std::unique_ptr<Portal> portal_;
 
   std::bitset<XUserMaxUserCount> connected_slots = {};
+  std::array<SlotBinding, XUserMaxUserCount> slot_bindings_{};
+  // True while a NotifyDevicesChanged() reconcile is pending on the UI
+  // thread; coalesces bursts of hotplug events into a single reconcile.
+  std::atomic<bool> reconcile_pending_{false};
+  // Devices the user has explicitly unbound this session; suppresses
+  // re-auto-binding by ReconcileBindings until BindSlot or app restart.
+  std::set<std::string> dismissed_ids_;
+
+  BindingsChangedCallback bindings_changed_cb_;
   std::array<std::pair<joystick_value, joystick_value>, XUserMaxUserCount>
       controllers_max_joystick_value = {};
   uint32_t last_used_slot = 0;

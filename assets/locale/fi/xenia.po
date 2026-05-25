@@ -69,6 +69,10 @@ msgstr "Ääni(&A)"
 msgid "&Configuration"
 msgstr "Määritykset(&C)"
 
+#: src/xenia/app/emulator_window.cc:898
+msgid "&Controllers"
+msgstr "Ohjaimet(&C)"
+
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
 msgstr "Tiedosto(&F)"
@@ -170,6 +174,14 @@ msgstr "Kaikki tiedostot"
 msgid "All cvars are already overridden."
 msgstr "Kaikki cvar-muuttujat on jo ohitettu."
 
+#: src/xenia/app/emulator_window.cc:343
+msgid "Arcade Pad"
+msgstr "Arcade-ohjain"
+
+#: src/xenia/app/emulator_window.cc:331
+msgid "Arcade Stick"
+msgstr "Arcade-tikku"
+
 #: src/xenia/ui/profile_editor_dialog_wx.cc:69
 msgid "Argentina"
 msgstr "Argentiina"
@@ -185,6 +197,10 @@ msgstr "Ääni"
 #: src/xenia/ui/quick_settings_dialog_wx.cc:258
 msgid "Audio Backend:"
 msgstr "Äänitaustajärjestelmä:"
+
+#: src/xenia/app/emulator_window.cc:2402
+msgid "Auto (%s)"
+msgstr "Automaattinen (%s)"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:71
 msgid "Australia"
@@ -351,6 +367,10 @@ msgstr "Tšekki"
 msgid "DLC"
 msgstr "DLC"
 
+#: src/xenia/app/emulator_window.cc:335
+msgid "Dance Pad"
+msgstr "Tanssimatto"
+
 #: src/xenia/ui/game_list_panel_wx.cc:690
 #: src/xenia/ui/game_list_panel_wx.cc:693
 msgid "Default"
@@ -378,6 +398,10 @@ msgstr "Hylkää muutokset"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:534
 msgid "Discard all unsaved changes?"
 msgstr "Hylätäänkö kaikki tallentamattomat muutokset?"
+
+#: src/xenia/app/emulator_window.cc:2317
+msgid "Disconnect"
+msgstr "Katkaise yhteys"
 
 #: src/xenia/ui/quick_settings_dialog_wx.cc:297
 msgid "Discord Rich Presence:"
@@ -494,6 +518,10 @@ msgstr "Family"
 msgid "Faroe Islands"
 msgstr "Färsaaret"
 
+#: src/xenia/app/emulator_window.cc:341
+msgid "Drum Kit"
+msgstr "Rumpusetti"
+
 #: src/xenia/ui/game_list_panel_wx.cc:1236
 msgid "File Corrupted"
 msgstr "Tiedosto vioittunut"
@@ -534,6 +562,10 @@ msgstr "Täysi"
 msgid "Full Screen:"
 msgstr "Koko näyttö:"
 
+#: src/xenia/app/emulator_window.cc:333
+msgid "Flight Stick"
+msgstr "Lentotikku"
+
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
 msgstr "Pelien yhteensopivuus(&C)…"
@@ -541,6 +573,10 @@ msgstr "Pelien yhteensopivuus(&C)…"
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
 msgstr "GameMode ei ole PATH-polussa; asenna ottaaksesi käyttöön."
+
+#: src/xenia/app/emulator_window.cc:345
+msgid "Gamepad"
+msgstr "Peliohjain"
 
 #: src/xenia/ui/game_list_panel_wx.cc:96
 msgid "Gameplay"
@@ -617,6 +653,10 @@ msgstr "Guatemala"
 #: src/xenia/app/emulator_window.cc:1722
 msgid "Guide"
 msgstr "Opas"
+
+#: src/xenia/app/emulator_window.cc:339
+msgid "Guitar"
+msgstr "Kitara"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:105
 msgid "Honduras"
@@ -1432,6 +1472,10 @@ msgid ""
 msgstr ""
 "Xeniaa ei ole vielä alustettu kokonaan. Yritä uudelleen, kun sovellus on "
 "käynnistynyt loppuun."
+
+#: src/xenia/app/emulator_window.cc:329
+msgid "Wheel"
+msgstr "Ratti"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:173
 msgid "Yemen"

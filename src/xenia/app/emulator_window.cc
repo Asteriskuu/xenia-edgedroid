@@ -17,6 +17,7 @@
 #include "xenia/ui/quick_settings_dialog_wx.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <set>
 #include <span>
@@ -291,6 +292,16 @@ struct WxToolbarState {
   wxBitmapBundle audio_low_bundle;
   wxBitmapBundle audio_mid_bundle;
   wxBitmapBundle audio_full_bundle;
+  // Per-subtype controller icons; picked by RefreshControllerToolbar.
+  wxBitmapBundle controller_empty_bundle;
+  wxBitmapBundle controller_gamepad_bundle;
+  wxBitmapBundle controller_wheel_bundle;
+  wxBitmapBundle controller_guitar_bundle;
+  wxBitmapBundle controller_drum_bundle;
+  wxBitmapBundle controller_keyboard_bundle;
+  wxBitmapBundle controller_arcade_stick_bundle;
+  wxBitmapBundle controller_flight_stick_bundle;
+  wxBitmapBundle controller_dance_pad_bundle;
   wxStaticText* profile_label = nullptr;
 };
 
@@ -300,7 +311,40 @@ constexpr int kToolIdOpenBack = 11000;
 constexpr int kToolIdSettings = 11001;
 constexpr int kToolIdProfile = 11002;
 constexpr int kToolIdAudio = 11003;
+// Controller tools occupy 11010..11013 (one per guest slot).
+constexpr int kToolIdControllerBase = 11010;
 constexpr int kToolbarIconSize = 32;
+
+// XINPUT_DEVSUBTYPE_* values offered as override choices. The alternate
+// guitar (0x07) and bass guitar (0x0B) variants collapse onto the single
+// "Guitar" entry (0x06) since the guest treats them equivalently.
+constexpr uint8_t kSelectableSubtypes[] = {0x01, 0x02, 0x03, 0x04,
+                                           0x05, 0x06, 0x08, 0x13};
+
+wxString SubtypeName(uint8_t subtype) {
+  switch (subtype) {
+    case 0x01:
+      return _("Gamepad");
+    case 0x02:
+      return _("Wheel");
+    case 0x03:
+      return _("Arcade Stick");
+    case 0x04:
+      return _("Flight Stick");
+    case 0x05:
+      return _("Dance Pad");
+    case 0x06:
+    case 0x07:
+    case 0x0B:
+      return _("Guitar");
+    case 0x08:
+      return _("Drum Kit");
+    case 0x13:
+      return _("Arcade Pad");
+    default:
+      return _("Gamepad");
+  }
+}
 }  // namespace
 
 using xe::ui::FileDropEvent;
@@ -527,6 +571,19 @@ void EmulatorWindow::OnEmulatorInitialized() {
   emulator_initialized_ = true;
   window_->SetMainMenuEnabled(true);
   RefreshProfileMenu();
+  RefreshControllersMenu();
+  // Live-refresh the Controllers menu on hotplug / auto-bind / detach.
+  // Deferred — BindSlot fires this with input_system->lock_ held, and the
+  // refresh path needs that lock to enumerate. CallInUIThread would run the
+  // refresh synchronously from the same thread, deadlocking the spinlock.
+  if (auto* is = emulator_->input_system()) {
+    is->SetBindingsChangedCallback([this]() {
+      if (window_) {
+        window_->app_context().CallInUIThreadDeferred(
+            [this]() { RefreshControllersMenu(); });
+      }
+    });
+  }
   InitializeGameLibrary();
   emulator_->set_disc_provider([this](uint32_t title_id) {
     std::vector<Emulator::TitleDisc> discs;
@@ -870,6 +927,12 @@ bool EmulatorWindow::Initialize() {
     audio_menu_ = audio_menu.get();
     main_menu->AddChild(std::move(audio_menu));
 
+    // Controllers Menu
+    auto controllers_menu =
+        WxMenuItem::Create(MenuItem::Type::kPopup, _("&Controllers"));
+    controllers_menu_ = controllers_menu.get();
+    main_menu->AddChild(std::move(controllers_menu));
+
     // Tools menu.
     auto tools_menu = WxMenuItem::Create(MenuItem::Type::kPopup, _("&Tools"));
     {
@@ -969,6 +1032,48 @@ bool EmulatorWindow::Initialize() {
       toolbar->AddTool(kToolIdAudio, _("Volume"),
                        wx_toolbar_state_->audio_no_bundle, _("Volume"));
       toolbar->EnableTool(kToolIdAudio, false);
+      wx_toolbar_state_->controller_gamepad_bundle =
+          load_bundle(ui::embedded_icons::icons8_game_controller_96_png_data,
+                      ui::embedded_icons::icons8_game_controller_96_png_size);
+      wx_toolbar_state_->controller_wheel_bundle =
+          load_bundle(ui::embedded_icons::icons8_steering_wheel_96_png_data,
+                      ui::embedded_icons::icons8_steering_wheel_96_png_size);
+      wx_toolbar_state_->controller_guitar_bundle =
+          load_bundle(ui::embedded_icons::icons8_guitar_96_png_data,
+                      ui::embedded_icons::icons8_guitar_96_png_size);
+      wx_toolbar_state_->controller_drum_bundle =
+          load_bundle(ui::embedded_icons::icons8_drum_set_96_png_data,
+                      ui::embedded_icons::icons8_drum_set_96_png_size);
+      wx_toolbar_state_->controller_keyboard_bundle =
+          load_bundle(ui::embedded_icons::icons8_keyboard_96_png_data,
+                      ui::embedded_icons::icons8_keyboard_96_png_size);
+      wx_toolbar_state_->controller_arcade_stick_bundle =
+          load_bundle(ui::embedded_icons::arcade_stick_png_data,
+                      ui::embedded_icons::arcade_stick_png_size);
+      wx_toolbar_state_->controller_flight_stick_bundle =
+          load_bundle(ui::embedded_icons::flight_stick_png_data,
+                      ui::embedded_icons::flight_stick_png_size);
+      wx_toolbar_state_->controller_dance_pad_bundle =
+          load_bundle(ui::embedded_icons::dance_pad_png_data,
+                      ui::embedded_icons::dance_pad_png_size);
+      // A fully-transparent placeholder so empty slots reserve space but
+      // don't draw an icon.
+      {
+        wxImage empty(kToolbarIconSize, kToolbarIconSize);
+        empty.InitAlpha();
+        std::memset(empty.GetAlpha(), 0, kToolbarIconSize * kToolbarIconSize);
+        wx_toolbar_state_->controller_empty_bundle =
+            wxBitmapBundle::FromBitmap(wxBitmap(empty));
+      }
+      // Reserve four controller slots between Audio and the stretch spacer.
+      // They start disabled (and invisible via the transparent bundle) until
+      // RefreshControllerToolbar enables the bound ones.
+      for (int slot = 0; slot < XUserMaxUserCount; ++slot) {
+        toolbar->AddTool(kToolIdControllerBase + slot, wxEmptyString,
+                         wx_toolbar_state_->controller_empty_bundle,
+                         wxEmptyString);
+        toolbar->EnableTool(kToolIdControllerBase + slot, false);
+      }
       toolbar->AddStretchSpacer(1);
       wx_toolbar_state_->profile_default_bundle =
           load_bundle(ui::embedded_icons::icons8_user_96_png_data,
@@ -1024,6 +1129,16 @@ bool EmulatorWindow::Initialize() {
           wxEVT_AUITOOLBAR_RIGHT_CLICK,
           [this](wxAuiToolBarEvent&) { ShowProfilePopupMenu(); },
           kToolIdProfile);
+      // Any controller-icon click pops the same menu as the bar entry.
+      for (int slot = 0; slot < XUserMaxUserCount; ++slot) {
+        frame->Bind(
+            wxEVT_TOOL, [this](wxCommandEvent&) { ShowControllersPopupMenu(); },
+            kToolIdControllerBase + slot);
+        toolbar->Bind(
+            wxEVT_AUITOOLBAR_RIGHT_CLICK,
+            [this](wxAuiToolBarEvent&) { ShowControllersPopupMenu(); },
+            kToolIdControllerBase + slot);
+      }
 
       // Frame-level Ctrl+O catches the shortcut even when a child control
       // (game list, search box) has focus and would otherwise eat the key.
@@ -2121,6 +2236,224 @@ void EmulatorWindow::ShowProfilePopupMenu() {
   auto* tb = wx_toolbar_state_->toolbar;
   auto rect = tb->GetToolRect(kToolIdProfile);
   tb->PopupMenu(menu, rect.GetLeft(), rect.GetBottom());
+}
+
+void EmulatorWindow::RefreshControllersMenu() {
+  if (!controllers_menu_) {
+    return;
+  }
+  while (controllers_menu_->child_count() > 0) {
+    controllers_menu_->RemoveChild(controllers_menu_->child(0));
+  }
+  PopulateControllersMenu(controllers_menu_);
+  window_->CompleteMainMenuItemsUpdate();
+  RefreshControllerToolbar();
+}
+
+void EmulatorWindow::RefreshControllerToolbar() {
+  if (!wx_toolbar_state_ || !wx_toolbar_state_->toolbar) {
+    return;
+  }
+  auto* tb = wx_toolbar_state_->toolbar;
+  auto& s = *wx_toolbar_state_;
+
+  // Fetch current bindings.
+  std::vector<InputSystem::EnumeratedDevice> devices;
+  if (auto* is = emulator_ ? emulator_->input_system() : nullptr) {
+    auto lock = is->lock();
+    devices = is->EnumerateDevices();
+  }
+
+  // Update each fixed controller slot's bitmap — bound slot gets the
+  // appropriate type icon, empty slot keeps a transparent placeholder so the
+  // toolbar geometry never changes.
+  for (uint32_t slot = 0; slot < XUserMaxUserCount; ++slot) {
+    const InputSystem::EnumeratedDevice* bound = nullptr;
+    for (const auto& d : devices) {
+      if (d.bound_slot == static_cast<int>(slot)) {
+        bound = &d;
+        break;
+      }
+    }
+    const int id = kToolIdControllerBase + static_cast<int>(slot);
+    if (!bound) {
+      tb->SetToolBitmap(id, s.controller_empty_bundle);
+      tb->SetToolShortHelp(id, wxEmptyString);
+      tb->EnableTool(id, false);
+      continue;
+    }
+    const wxBitmapBundle* bundle = &s.controller_gamepad_bundle;
+    if (bound->info.stable_id == "keyboard") {
+      bundle = &s.controller_keyboard_bundle;
+    } else {
+      // User override takes precedence over the device's detected subtype.
+      const auto& binding = emulator_->input_system()->GetSlotBinding(slot);
+      const uint8_t effective = binding.subtype_override != 0
+                                    ? binding.subtype_override
+                                    : bound->info.subtype;
+      switch (effective) {
+        case 0x02:  // WHEEL
+          bundle = &s.controller_wheel_bundle;
+          break;
+        case 0x03:  // ARCADE_STICK
+          bundle = &s.controller_arcade_stick_bundle;
+          break;
+        case 0x04:  // FLIGHT_STICK
+          bundle = &s.controller_flight_stick_bundle;
+          break;
+        case 0x05:  // DANCE_PAD
+          bundle = &s.controller_dance_pad_bundle;
+          break;
+        case 0x06:  // GUITAR
+        case 0x07:  // GUITAR_ALTERNATE
+        case 0x0B:  // GUITAR_BASS
+          bundle = &s.controller_guitar_bundle;
+          break;
+        case 0x08:  // DRUM_KIT
+          bundle = &s.controller_drum_bundle;
+          break;
+        default:
+          break;
+      }
+    }
+    tb->SetToolBitmap(id, *bundle);
+    tb->SetToolShortHelp(id, wxString::Format(_("Slot %d"), slot + 1) + ": " +
+                                 wxString::FromUTF8(bound->info.display_name));
+    tb->EnableTool(id, true);
+  }
+  tb->Refresh();
+}
+
+void EmulatorWindow::ShowControllersPopupMenu() {
+  if (!wx_toolbar_state_ || !wx_toolbar_state_->toolbar) {
+    return;
+  }
+  // Detached menu like ShowProfilePopupMenu — wx forbids popping up a wxMenu
+  // that's currently attached to the menu bar.
+  auto popup = ui::MenuItem::Create(ui::MenuItem::Type::kPopup, "");
+  PopulateControllersMenu(popup.get());
+  auto* wx_popup = dynamic_cast<ui::WxMenuItem*>(popup.get());
+  if (!wx_popup) {
+    return;
+  }
+  auto* menu = wx_popup->GetMenu();
+  if (!menu) {
+    return;
+  }
+  auto* tb = wx_toolbar_state_->toolbar;
+  // Anchor on slot 0's tool (always present).
+  auto rect = tb->GetToolRect(kToolIdControllerBase);
+  tb->PopupMenu(menu, rect.GetLeft(), rect.GetBottom());
+}
+
+void EmulatorWindow::PopulateControllersMenu(ui::MenuItem* parent) {
+  if (!parent) {
+    return;
+  }
+  auto* input_sys = emulator_ ? emulator_->input_system() : nullptr;
+  if (!input_sys) {
+    return;
+  }
+
+  auto lock = input_sys->lock();
+  auto devices = input_sys->EnumerateDevices();
+
+  for (uint32_t slot = 0; slot < XUserMaxUserCount; ++slot) {
+    const auto& binding = input_sys->GetSlotBinding(slot);
+    const bool bound = binding.driver != nullptr;
+    wxString slot_label = wxString::Format(_("Slot %d"), slot + 1);
+    if (bound) {
+      slot_label += ": " + wxString::FromUTF8(binding.display_name);
+    }
+    auto slot_entry =
+        ui::WxMenuItem::Create(ui::MenuItem::Type::kPopup, slot_label);
+
+    // Bound slot exposes a "Disconnect" action; an empty slot goes straight
+    // to the device list.
+    if (bound) {
+      slot_entry->AddChild(ui::WxMenuItem::Create(
+          ui::MenuItem::Type::kString, _("Disconnect"), "", [this, slot]() {
+            auto* is = emulator_ ? emulator_->input_system() : nullptr;
+            if (!is) {
+              return;
+            }
+            auto l = is->lock();
+            is->UnbindSlot(slot);
+          }));
+
+      // "Type: <effective>" submenu lets the user override the subtype the
+      // guest sees (e.g. expose a regular pad as a wheel or drum kit).
+      uint8_t detected = 0x01;
+      for (const auto& dev : devices) {
+        if (dev.bound_slot == static_cast<int>(slot)) {
+          detected = dev.info.subtype;
+          break;
+        }
+      }
+      const uint8_t effective =
+          binding.subtype_override != 0 ? binding.subtype_override : detected;
+      wxString type_label =
+          wxString::Format(_("Type: %s"), SubtypeName(effective));
+      auto type_entry =
+          ui::WxMenuItem::Create(ui::MenuItem::Type::kPopup, type_label);
+
+      wxString auto_label =
+          wxString::Format(_("Auto (%s)"), SubtypeName(detected));
+      if (binding.subtype_override == 0) {
+        auto_label = wxT("✓ ") + auto_label;
+      }
+      type_entry->AddChild(ui::WxMenuItem::Create(
+          ui::MenuItem::Type::kString, auto_label, "", [this, slot]() {
+            auto* is = emulator_ ? emulator_->input_system() : nullptr;
+            if (!is) {
+              return;
+            }
+            auto l = is->lock();
+            is->SetSlotSubtypeOverride(slot, 0);
+          }));
+      for (uint8_t st : kSelectableSubtypes) {
+        const bool active = binding.subtype_override == st;
+        wxString item_label =
+            active ? wxT("✓ ") + SubtypeName(st) : SubtypeName(st);
+        uint8_t captured = st;
+        type_entry->AddChild(ui::WxMenuItem::Create(
+            ui::MenuItem::Type::kString, item_label, "",
+            [this, slot, captured]() {
+              auto* is = emulator_ ? emulator_->input_system() : nullptr;
+              if (!is) {
+                return;
+              }
+              auto l = is->lock();
+              is->SetSlotSubtypeOverride(slot, captured);
+            }));
+      }
+      slot_entry->AddChild(std::move(type_entry));
+    }
+
+    // One entry per enumerated device.
+    for (const auto& dev : devices) {
+      const bool here = dev.bound_slot == static_cast<int>(slot);
+      wxString device_label =
+          here ? wxT("✓ ") + wxString::FromUTF8(dev.info.display_name)
+               : wxString::FromUTF8(dev.info.display_name);
+      InputDriver* driver = dev.driver;
+      uint8_t driver_slot = dev.info.driver_slot;
+      std::string stable_id = dev.info.stable_id;
+      std::string display_name = dev.info.display_name;
+      slot_entry->AddChild(ui::WxMenuItem::Create(
+          ui::MenuItem::Type::kString, device_label, "",
+          [this, slot, driver, driver_slot, stable_id, display_name]() {
+            auto* is = emulator_ ? emulator_->input_system() : nullptr;
+            if (!is) {
+              return;
+            }
+            auto l = is->lock();
+            is->BindSlot(slot, driver, driver_slot, stable_id, display_name);
+          }));
+    }
+
+    parent->AddChild(std::move(slot_entry));
+  }
 }
 
 void EmulatorWindow::RefreshProfileIcon() {
