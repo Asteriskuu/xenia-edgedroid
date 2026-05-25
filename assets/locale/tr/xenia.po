@@ -55,7 +55,7 @@ msgstr "%zu dizin tarandı   %zu dosya incelendi   %zu oyun bulundu"
 
 #: src/xenia/app/emulator_window.cc:895
 msgid "&About..."
-msgstr "Hakkında(&A)…"
+msgstr "H&akkında…"
 
 #: src/xenia/app/emulator_window.cc:794
 msgid "&Add Games..."
@@ -63,55 +63,55 @@ msgstr "Oyun &Ekle…"
 
 #: src/xenia/app/emulator_window.cc:864
 msgid "&Audio"
-msgstr "Ses(&A)"
+msgstr "&Ses"
 
 #: src/xenia/app/emulator_window.cc:824
 msgid "&Configuration"
-msgstr "Yapılandırma(&C)"
+msgstr "&Yapılandırma"
 
 #: src/xenia/app/emulator_window.cc:898
 msgid "&Controllers"
-msgstr "Kumandalar(&C)"
+msgstr "&Kumandalar"
 
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
-msgstr "Dosya(&F)"
+msgstr "&Dosya"
 
 #: src/xenia/app/emulator_window.cc:884
 msgid "&Help"
-msgstr "Yardım(&H)"
+msgstr "&Yardım"
 
 #: src/xenia/app/emulator_window.cc:877
 msgid "&Install Content..."
-msgstr "İçerik Yükle(&I)…"
+msgstr "İçer&ik Yükle…"
 
 #: src/xenia/app/emulator_window.cc:826
 msgid "&Main"
-msgstr "Ana(&M)"
+msgstr "&Ana"
 
 #: src/xenia/app/emulator_window.cc:789
 msgid "&Open..."
-msgstr "Aç(&O)…"
+msgstr "&Aç…"
 
 #: src/xenia/app/emulator_window.cc:816
 msgid "&Profile"
-msgstr "Profil(&P)"
+msgstr "&Profil"
 
 #: src/xenia/app/emulator_window.cc:799
 msgid "&Stop Game"
-msgstr "Oyunu Durdur(&S)"
+msgstr "&Oyunu Durdur"
 
 #: src/xenia/app/emulator_window.cc:874
 msgid "&Tools"
-msgstr "Araçlar(&T)"
+msgstr "&Araçlar"
 
 #: src/xenia/app/emulator_window.cc:853
 msgid "&View"
-msgstr "Görünüm(&V)"
+msgstr "&Görünüm"
 
 #: src/xenia/app/emulator_window.cc:867
 msgid "&Volume"
-msgstr "Ses Düzeyi(&V)"
+msgstr "&Ses Düzeyi"
 
 #: src/xenia/ui/game_scan_progress_dialog_wx.cc:276
 msgid "(Installed) "
@@ -413,7 +413,7 @@ msgstr "Dominik Cumhuriyeti"
 
 #: src/xenia/app/emulator_window.cc:809
 msgid "E&xit"
-msgstr "Çıkış(&X)"
+msgstr "&Çıkış"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:93
 msgid "Ecuador"
@@ -495,7 +495,7 @@ msgstr ""
 
 #: src/xenia/app/emulator_window.cc:887
 msgid "FA&Q..."
-msgstr "FAQ(&Q)…"
+msgstr "FA&Q…"
 
 #: src/xenia/ui/patches_dialog_wx.cc:225
 msgid "Failed to save changes."
@@ -568,7 +568,7 @@ msgstr "Uçuş Kolu"
 
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
-msgstr "Oyun uyumluluğu(&C)…"
+msgstr "&Oyun uyumluluğu…"
 
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
@@ -1253,7 +1253,7 @@ msgstr "Ayarlar"
 
 #: src/xenia/app/emulator_window.cc:856
 msgid "Show &Toolbar"
-msgstr "Araç Çubuğunu Göster(&T)"
+msgstr "Araç Çubuğunu Gös&ter"
 
 #: src/xenia/app/emulator_window.cc:805
 msgid "Show content directory..."

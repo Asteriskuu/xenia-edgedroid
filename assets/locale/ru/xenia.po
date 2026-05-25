@@ -72,7 +72,7 @@ msgstr "&Настройки"
 
 #: src/xenia/app/emulator_window.cc:898
 msgid "&Controllers"
-msgstr "Контроллеры(&C)"
+msgstr "&Контроллеры"
 
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"

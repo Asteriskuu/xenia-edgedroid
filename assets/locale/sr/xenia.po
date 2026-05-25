@@ -57,63 +57,63 @@ msgstr ""
 
 #: src/xenia/app/emulator_window.cc:895
 msgid "&About..."
-msgstr "О програму(&A)…"
+msgstr "&О програму…"
 
 #: src/xenia/app/emulator_window.cc:794
 msgid "&Add Games..."
-msgstr "Додај игре(&A)…"
+msgstr "&Додај игре…"
 
 #: src/xenia/app/emulator_window.cc:864
 msgid "&Audio"
-msgstr "Звук(&A)"
+msgstr "&Звук"
 
 #: src/xenia/app/emulator_window.cc:824
 msgid "&Configuration"
-msgstr "Подешавања(&C)"
+msgstr "&Подешавања"
 
 #: src/xenia/app/emulator_window.cc:898
 msgid "&Controllers"
-msgstr "Контролери(&C)"
+msgstr "&Контролери"
 
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
-msgstr "Датотека(&F)"
+msgstr "&Датотека"
 
 #: src/xenia/app/emulator_window.cc:884
 msgid "&Help"
-msgstr "Помоћ(&H)"
+msgstr "&Помоћ"
 
 #: src/xenia/app/emulator_window.cc:877
 msgid "&Install Content..."
-msgstr "Инсталирај садржај(&I)…"
+msgstr "&Инсталирај садржај…"
 
 #: src/xenia/app/emulator_window.cc:826
 msgid "&Main"
-msgstr "Главно(&M)"
+msgstr "&Главно"
 
 #: src/xenia/app/emulator_window.cc:789
 msgid "&Open..."
-msgstr "Отвори(&O)…"
+msgstr "&Отвори…"
 
 #: src/xenia/app/emulator_window.cc:816
 msgid "&Profile"
-msgstr "Профил(&P)"
+msgstr "&Профил"
 
 #: src/xenia/app/emulator_window.cc:799
 msgid "&Stop Game"
-msgstr "Заустави игру(&S)"
+msgstr "&Заустави игру"
 
 #: src/xenia/app/emulator_window.cc:874
 msgid "&Tools"
-msgstr "Алати(&T)"
+msgstr "&Алати"
 
 #: src/xenia/app/emulator_window.cc:853
 msgid "&View"
-msgstr "Приказ(&V)"
+msgstr "&Приказ"
 
 #: src/xenia/app/emulator_window.cc:867
 msgid "&Volume"
-msgstr "Јачина звука(&V)"
+msgstr "&Јачина звука"
 
 #: src/xenia/ui/game_scan_progress_dialog_wx.cc:276
 msgid "(Installed) "
@@ -415,7 +415,7 @@ msgstr "Доминиканска Република"
 
 #: src/xenia/app/emulator_window.cc:809
 msgid "E&xit"
-msgstr "Изађи(&X)"
+msgstr "&Изађи"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:93
 msgid "Ecuador"
@@ -497,7 +497,7 @@ msgstr ""
 
 #: src/xenia/app/emulator_window.cc:887
 msgid "FA&Q..."
-msgstr "FAQ(&Q)…"
+msgstr "&FAQ…"
 
 #: src/xenia/ui/patches_dialog_wx.cc:225
 msgid "Failed to save changes."
@@ -570,7 +570,7 @@ msgstr "Летачки џојстик"
 
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
-msgstr "Компатибилност игара(&C)…"
+msgstr "&Компатибилност игара…"
 
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
@@ -1253,7 +1253,7 @@ msgstr "Подешавања"
 
 #: src/xenia/app/emulator_window.cc:856
 msgid "Show &Toolbar"
-msgstr "Прикажи траку са алатима(&T)"
+msgstr "&Прикажи траку са алатима"
 
 #: src/xenia/app/emulator_window.cc:805
 msgid "Show content directory..."

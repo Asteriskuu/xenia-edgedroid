@@ -55,63 +55,63 @@ msgstr "%zu kataloger genomsökta   %zu filer undersökta   %zu spel hittade"
 
 #: src/xenia/app/emulator_window.cc:895
 msgid "&About..."
-msgstr "Om(&A)…"
+msgstr "&Om…"
 
 #: src/xenia/app/emulator_window.cc:794
 msgid "&Add Games..."
-msgstr "Lägg till spel(&A)…"
+msgstr "&Lägg till spel…"
 
 #: src/xenia/app/emulator_window.cc:864
 msgid "&Audio"
-msgstr "Ljud(&A)"
+msgstr "&Ljud"
 
 #: src/xenia/app/emulator_window.cc:824
 msgid "&Configuration"
-msgstr "Konfiguration(&C)"
+msgstr "&Konfiguration"
 
 #: src/xenia/app/emulator_window.cc:898
 msgid "&Controllers"
-msgstr "Kontroller(&C)"
+msgstr "&Kontroller"
 
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
-msgstr "Fil(&F)"
+msgstr "&Fil"
 
 #: src/xenia/app/emulator_window.cc:884
 msgid "&Help"
-msgstr "Hjälp(&H)"
+msgstr "&Hjälp"
 
 #: src/xenia/app/emulator_window.cc:877
 msgid "&Install Content..."
-msgstr "Installera innehåll(&I)…"
+msgstr "&Installera innehåll…"
 
 #: src/xenia/app/emulator_window.cc:826
 msgid "&Main"
-msgstr "Allmänt(&M)"
+msgstr "All&mänt"
 
 #: src/xenia/app/emulator_window.cc:789
 msgid "&Open..."
-msgstr "Öppna(&O)…"
+msgstr "&Öppna…"
 
 #: src/xenia/app/emulator_window.cc:816
 msgid "&Profile"
-msgstr "Profil(&P)"
+msgstr "&Profil"
 
 #: src/xenia/app/emulator_window.cc:799
 msgid "&Stop Game"
-msgstr "Stoppa spel(&S)"
+msgstr "&Stoppa spel"
 
 #: src/xenia/app/emulator_window.cc:874
 msgid "&Tools"
-msgstr "Verktyg(&T)"
+msgstr "Verk&tyg"
 
 #: src/xenia/app/emulator_window.cc:853
 msgid "&View"
-msgstr "Visa(&V)"
+msgstr "&Visa"
 
 #: src/xenia/app/emulator_window.cc:867
 msgid "&Volume"
-msgstr "Volym(&V)"
+msgstr "&Volym"
 
 #: src/xenia/ui/game_scan_progress_dialog_wx.cc:276
 msgid "(Installed) "
@@ -413,7 +413,7 @@ msgstr "Dominikanska republiken"
 
 #: src/xenia/app/emulator_window.cc:809
 msgid "E&xit"
-msgstr "Avsluta(&X)"
+msgstr "&Avsluta"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:93
 msgid "Ecuador"
@@ -495,7 +495,7 @@ msgstr ""
 
 #: src/xenia/app/emulator_window.cc:887
 msgid "FA&Q..."
-msgstr "FAQ(&Q)…"
+msgstr "FA&Q…"
 
 #: src/xenia/ui/patches_dialog_wx.cc:225
 msgid "Failed to save changes."
@@ -568,7 +568,7 @@ msgstr "Flygspak"
 
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
-msgstr "Spelkompatibilitet(&C)…"
+msgstr "&Spelkompatibilitet…"
 
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
@@ -1253,7 +1253,7 @@ msgstr "Inställningar"
 
 #: src/xenia/app/emulator_window.cc:856
 msgid "Show &Toolbar"
-msgstr "Visa verktygsfält(&T)"
+msgstr "Visa verk&tygsfält"
 
 #: src/xenia/app/emulator_window.cc:805
 msgid "Show content directory..."

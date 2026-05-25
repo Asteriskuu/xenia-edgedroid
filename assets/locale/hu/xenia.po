@@ -55,63 +55,63 @@ msgstr "%zu könyvtár átvizsgálva   %zu fájl ellenőrizve   %zu játék tal�
 
 #: src/xenia/app/emulator_window.cc:895
 msgid "&About..."
-msgstr "Névjegy(&A)…"
+msgstr "&Névjegy…"
 
 #: src/xenia/app/emulator_window.cc:794
 msgid "&Add Games..."
-msgstr "Játékok hozzáadása(&J)…"
+msgstr "&Játékok hozzáadása…"
 
 #: src/xenia/app/emulator_window.cc:864
 msgid "&Audio"
-msgstr "Hang(&A)"
+msgstr "H&ang"
 
 #: src/xenia/app/emulator_window.cc:824
 msgid "&Configuration"
-msgstr "Konfiguráció(&C)"
+msgstr "Konfigurá&ció"
 
 #: src/xenia/app/emulator_window.cc:898
 msgid "&Controllers"
-msgstr "Vezérlők(&C)"
+msgstr "&Vezérlők"
 
 #: src/xenia/app/emulator_window.cc:786
 msgid "&File"
-msgstr "Fájl(&F)"
+msgstr "&Fájl"
 
 #: src/xenia/app/emulator_window.cc:884
 msgid "&Help"
-msgstr "Súgó(&H)"
+msgstr "&Súgó"
 
 #: src/xenia/app/emulator_window.cc:877
 msgid "&Install Content..."
-msgstr "Tartalom telepítése(&I)…"
+msgstr "&Tartalom telepítése…"
 
 #: src/xenia/app/emulator_window.cc:826
 msgid "&Main"
-msgstr "Általános(&M)"
+msgstr "&Általános"
 
 #: src/xenia/app/emulator_window.cc:789
 msgid "&Open..."
-msgstr "Megnyitás(&O)…"
+msgstr "&Megnyitás…"
 
 #: src/xenia/app/emulator_window.cc:816
 msgid "&Profile"
-msgstr "Profil(&P)"
+msgstr "&Profil"
 
 #: src/xenia/app/emulator_window.cc:799
 msgid "&Stop Game"
-msgstr "Játék leállítása(&S)"
+msgstr "Játék leállítá&sa"
 
 #: src/xenia/app/emulator_window.cc:874
 msgid "&Tools"
-msgstr "Eszközök(&T)"
+msgstr "&Eszközök"
 
 #: src/xenia/app/emulator_window.cc:853
 msgid "&View"
-msgstr "Nézet(&V)"
+msgstr "&Nézet"
 
 #: src/xenia/app/emulator_window.cc:867
 msgid "&Volume"
-msgstr "Hangerő(&V)"
+msgstr "&Hangerő"
 
 #: src/xenia/ui/game_scan_progress_dialog_wx.cc:276
 msgid "(Installed) "
@@ -413,7 +413,7 @@ msgstr "Dominikai Köztársaság"
 
 #: src/xenia/app/emulator_window.cc:809
 msgid "E&xit"
-msgstr "Kilépés(&X)"
+msgstr "&Kilépés"
 
 #: src/xenia/ui/profile_editor_dialog_wx.cc:93
 msgid "Ecuador"
@@ -495,7 +495,7 @@ msgstr ""
 
 #: src/xenia/app/emulator_window.cc:887
 msgid "FA&Q..."
-msgstr "FAQ(&Q)…"
+msgstr "FA&Q…"
 
 #: src/xenia/ui/patches_dialog_wx.cc:225
 msgid "Failed to save changes."
@@ -568,7 +568,7 @@ msgstr "Repülő kar"
 
 #: src/xenia/app/emulator_window.cc:891
 msgid "Game &compatibility..."
-msgstr "Játékkompatibilitás(&C)…"
+msgstr "&Játékkompatibilitás…"
 
 #: src/xenia/ui/advanced_settings_dialog_wx.cc:277
 msgid "GameMode not in PATH; install to enable."
@@ -1255,7 +1255,7 @@ msgstr "Beállítások"
 
 #: src/xenia/app/emulator_window.cc:856
 msgid "Show &Toolbar"
-msgstr "Eszköztár megjelenítése(&T)"
+msgstr "Eszköz&tár megjelenítése"
 
 #: src/xenia/app/emulator_window.cc:805
 msgid "Show content directory..."
