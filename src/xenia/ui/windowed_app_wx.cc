@@ -104,34 +104,6 @@ bool XeniaWxApp::OnInit() {
   return true;
 }
 
-int XeniaWxApp::OnRun() {
-#if XE_PLATFORM_WIN32
-  // Tight Win32 message pump instead of wxApp's event loop, to minimize
-  // per-message overhead for real-time rendering. Idle processing is run
-  // when the queue is empty so wxDataViewCtrl and friends still get their
-  // OnInternalIdle calls for scrollbar/layout maintenance.
-  MSG message;
-  while (!app_context_->HasQuitFromUIThread()) {
-    if (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-      if (message.message == WM_QUIT) {
-        app_context_->QuitFromUIThread();
-        break;
-      }
-      TranslateMessage(&message);
-      DispatchMessageW(&message);
-      continue;
-    }
-    bool more_idle = ProcessIdle();
-    if (!more_idle && !app_context_->HasQuitFromUIThread()) {
-      ::WaitMessage();
-    }
-  }
-  return EXIT_SUCCESS;
-#else
-  return wxApp::OnRun();
-#endif
-}
-
 int XeniaWxApp::OnExit() {
   if (app_) {
     app_->InvokeOnDestroy();

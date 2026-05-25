@@ -21,8 +21,10 @@ WxWindowedAppContext::WxWindowedAppContext() {
 WxWindowedAppContext::~WxWindowedAppContext() = default;
 
 void WxWindowedAppContext::NotifyUILoopOfPendingFunctions() {
-  // wxEvtHandler::CallAfter is thread-safe; drain the pending function queue
-  // on the wx event loop.
+  // wxEvtHandler::CallAfter is thread-safe and queues a wxAsyncMethodCallEvent
+  // on wxTheApp's pending-event queue. QueueEvent calls wxWakeUpIdle, which on
+  // the active wxEventLoop signals its wake handle to unblock
+  // MsgWaitForMultipleObjects so the loop iterates and drains pending events.
   wxTheApp->CallAfter([this]() { ExecutePendingFunctionsFromUIThread(); });
 }
 

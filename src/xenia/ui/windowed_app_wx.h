@@ -33,7 +33,6 @@ extern char** g_argv;
 class XeniaWxApp : public wxApp {
  public:
   bool OnInit() override;
-  int OnRun() override;
   int OnExit() override;
   // Force LTR layout regardless of locale; RTL would propagate WS_EX_LAYOUTRTL
   // and reverse Latin text in wxDataView cells.
