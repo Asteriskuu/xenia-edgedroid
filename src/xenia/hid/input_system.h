@@ -105,6 +105,10 @@ class InputSystem {
     return slot_bindings_[guest_slot];
   }
 
+  // Serializes slot bindings for --slot_bindings_passthrough=; empty when
+  // nothing to forward. Format documented at the definition.
+  std::string SerializeSlotBindingsForPassthrough() const;
+
   // Invoked whenever the binding table changes — explicit bind/unbind, or
   // ReconcileBindings demoting/auto-binding due to hotplug. Fires on the
   // calling thread with lock_ held, so subscribers must defer any work that
@@ -134,6 +138,10 @@ class InputSystem {
   // Detach gone devices, reattach by stable_id, auto-bind new devices to the
   // first empty guest slot. Cheap; safe to call from the polling path.
   void ReconcileBindings();
+
+  // Seeds slot_bindings_ as detached entries from the passthrough cvar;
+  // ReconcileBindings reattaches them by stable_id as devices appear.
+  void LoadSlotBindingsFromPassthrough();
 
   xe::ui::Window* window_ = nullptr;
 

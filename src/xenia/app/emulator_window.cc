@@ -639,6 +639,12 @@ void EmulatorWindow::OnEmulatorInitialized() {
 
     std::filesystem::path executable_path = xe::filesystem::GetExecutablePath();
 
+    std::string slot_bindings_arg;
+    if (auto* is = emulator_ ? emulator_->input_system() : nullptr) {
+      auto l = is->lock();
+      slot_bindings_arg = is->SerializeSlotBindingsForPassthrough();
+    }
+
 #if XE_PLATFORM_WIN32
     auto exe_path_u16 = xe::path_to_utf16(executable_path);
     std::u16string cmd_line = u"\"" + exe_path_u16 + u"\"";
@@ -665,6 +671,10 @@ void EmulatorWindow::OnEmulatorInitialized() {
     }
     if (!launch_data.empty()) {
       cmd_line += u" --launch_data=" + xe::to_utf16(launch_data);
+    }
+    if (!slot_bindings_arg.empty()) {
+      cmd_line += u" --slot_bindings_passthrough=\"" +
+                  xe::to_utf16(slot_bindings_arg) + u"\"";
     }
     if (!host_path.empty()) {
       cmd_line += u" \"" + xe::to_utf16(host_path) + u"\"";
@@ -732,6 +742,10 @@ void EmulatorWindow::OnEmulatorInitialized() {
       }
       if (!launch_data.empty()) {
         arg_storage.push_back("--launch_data=" + launch_data);
+      }
+      if (!slot_bindings_arg.empty()) {
+        arg_storage.push_back("--slot_bindings_passthrough=" +
+                              slot_bindings_arg);
       }
       if (!host_path.empty()) {
         arg_storage.push_back(host_path);
@@ -3290,6 +3304,12 @@ void EmulatorWindow::LaunchTitleInNewProcess(
     return;
   }
 
+  std::string slot_bindings_arg;
+  if (auto* is = emulator_ ? emulator_->input_system() : nullptr) {
+    auto l = is->lock();
+    slot_bindings_arg = is->SerializeSlotBindingsForPassthrough();
+  }
+
 #if XE_PLATFORM_WIN32
   // On Windows, build command line using Xenia's Unicode path handling
   auto exe_path_u16 = xe::path_to_utf16(executable_path);
@@ -3304,6 +3324,11 @@ void EmulatorWindow::LaunchTitleInNewProcess(
 
   // Tell game process to return to UI when it exits
   cmd_line += u" --return_to_ui=true";
+
+  if (!slot_bindings_arg.empty()) {
+    cmd_line += u" --slot_bindings_passthrough=\"" +
+                xe::to_utf16(slot_bindings_arg) + u"\"";
+  }
 
   // Add the target game file
   if (!path_to_file.empty()) {
@@ -3371,6 +3396,13 @@ void EmulatorWindow::LaunchTitleInNewProcess(
 
     // Tell game process to return to UI when it exits
     argv.push_back("--return_to_ui=true");
+
+    std::string slot_bindings_cli_arg;
+    if (!slot_bindings_arg.empty()) {
+      slot_bindings_cli_arg =
+          "--slot_bindings_passthrough=" + slot_bindings_arg;
+      argv.push_back(slot_bindings_cli_arg.c_str());
+    }
 
     // Add the target game file
     std::string target_arg;

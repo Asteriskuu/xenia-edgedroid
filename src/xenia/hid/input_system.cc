@@ -9,6 +9,7 @@
 
 #include "xenia/base/logging.h"
 
+#include <cstdlib>
 #include <cstring>
 
 #include "xenia/hid/input_system.h"
@@ -34,6 +35,12 @@ DEFINE_double(
     right_stick_deadzone_percentage, 0.0,
     "Defines deadzone level for right stick. Allowed range [0.0-1.0].", "HID");
 
+DEFINE_transient_string(
+    slot_bindings_passthrough, "",
+    "Internal: slot bindings handed from a parent xenia process to its child "
+    "across out-of-process relaunch. Not persisted.",
+    "HID");
+
 InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
 #ifdef XE_PLATFORM_WIN32
   portal_ = std::make_unique<HardwarePortal>();
@@ -42,7 +49,14 @@ InputSystem::InputSystem(xe::ui::Window* window) : window_(window) {
 
 InputSystem::~InputSystem() = default;
 
-X_STATUS InputSystem::Setup() { return X_STATUS_SUCCESS; }
+X_STATUS InputSystem::Setup() {
+  LoadSlotBindingsFromPassthrough();
+  // SDL drains its initial DEVICEADDED events inside the driver's own Setup,
+  // before AddDriver wires devices_changed_callback_ — that auto-reconcile is
+  // lost, so already-connected controllers need an explicit pass to attach.
+  ReconcileBindings();
+  return X_STATUS_SUCCESS;
+}
 
 void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
   driver->set_devices_changed_callback([this]() { NotifyDevicesChanged(); });
@@ -553,6 +567,63 @@ void InputSystem::UnbindSlot(uint32_t guest_slot) {
   }
   if (bindings_changed_cb_) {
     bindings_changed_cb_();
+  }
+}
+
+// Format: four ';'-separated slot entries of "stable_id[:subtype]". Subtype is
+// omitted when zero; an empty entry means an unbound slot. Stable IDs are
+// "keyboard" or 32-hex-char SDL GUIDs, so ';' and ':' need no escaping.
+std::string InputSystem::SerializeSlotBindingsForPassthrough() const {
+  std::string out;
+  bool any = false;
+  for (uint32_t s = 0; s < XUserMaxUserCount; ++s) {
+    if (s) {
+      out += ';';
+    }
+    const auto& b = slot_bindings_[s];
+    if (b.stable_id.empty()) {
+      continue;
+    }
+    any = true;
+    out += b.stable_id;
+    if (b.subtype_override) {
+      out += ':';
+      out += std::to_string(b.subtype_override);
+    }
+  }
+  return any ? out : std::string();
+}
+
+void InputSystem::LoadSlotBindingsFromPassthrough() {
+  const std::string& s = cvars::slot_bindings_passthrough;
+  if (s.empty()) {
+    return;
+  }
+  uint32_t slot = 0;
+  size_t pos = 0;
+  while (slot < XUserMaxUserCount && pos <= s.size()) {
+    size_t sep = s.find(';', pos);
+    if (sep == std::string::npos) {
+      sep = s.size();
+    }
+    std::string entry = s.substr(pos, sep - pos);
+    pos = sep + 1;
+    if (!entry.empty()) {
+      uint8_t subtype = 0;
+      size_t colon = entry.find(':');
+      if (colon != std::string::npos) {
+        unsigned long v = std::strtoul(entry.c_str() + colon + 1, nullptr, 10);
+        subtype = static_cast<uint8_t>(v);
+        entry.resize(colon);
+      }
+      auto& b = slot_bindings_[slot];
+      b.driver = nullptr;
+      b.driver_slot = 0;
+      b.stable_id = std::move(entry);
+      b.display_name.clear();
+      b.subtype_override = subtype;
+    }
+    ++slot;
   }
 }
 
