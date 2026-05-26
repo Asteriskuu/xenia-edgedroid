@@ -13,8 +13,11 @@
 #include "xenia/base/platform_win.h"
 #endif  // XE_PLATFORM_WIN32
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
+#include <string_view>
 
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
@@ -504,10 +507,52 @@ static const char* XInputSubTypeName(uint8_t s) {
   }
 }
 
+// Case-insensitive substring match. `needle` must be lowercase ASCII.
+static bool NameContainsCI(const char* name, std::string_view needle) {
+  if (!name || needle.empty()) {
+    return false;
+  }
+  const std::string_view haystack(name);
+  return std::search(haystack.begin(), haystack.end(), needle.begin(),
+                     needle.end(), [](char a, char b) {
+                       return std::tolower(static_cast<unsigned char>(a)) ==
+                              static_cast<unsigned char>(b);
+                     }) != haystack.end();
+}
+
 // SDL_JoystickType numbering diverges from XINPUT_DEVSUBTYPE_* past value 6.
-static uint8_t SdlTypeToXInputSubType(SDL_JoystickType t) {
+// GAMECONTROLLER doesn't expose form factor; fall back to name keywords.
+static uint8_t SdlTypeToXInputSubType(SDL_JoystickType t, const char* name) {
   switch (t) {
     case SDL_JOYSTICK_TYPE_GAMECONTROLLER:
+      // SDL's XInput backend bakes the SubType into the device name (e.g.
+      // "XInput Guitar #1", "XInput DrumKit #1"), so a name keyword recovers
+      // the form factor for free.
+      if (NameContainsCI(name, "guitar")) {
+        return 0x06;  // XINPUT_DEVSUBTYPE_GUITAR
+      }
+      if (NameContainsCI(name, "drum")) {
+        return 0x08;  // XINPUT_DEVSUBTYPE_DRUM_KIT
+      }
+      if (NameContainsCI(name, "wheel")) {
+        return 0x02;  // XINPUT_DEVSUBTYPE_WHEEL
+      }
+      if (NameContainsCI(name, "dancepad") ||
+          NameContainsCI(name, "dance pad")) {
+        return 0x05;  // XINPUT_DEVSUBTYPE_DANCE_PAD
+      }
+      if (NameContainsCI(name, "flightstick") ||
+          NameContainsCI(name, "flight stick") ||
+          NameContainsCI(name, "hotas")) {
+        return 0x04;  // XINPUT_DEVSUBTYPE_FLIGHT_STICK
+      }
+      if (NameContainsCI(name, "arcadepad") ||
+          NameContainsCI(name, "arcade pad")) {
+        return 0x13;  // XINPUT_DEVSUBTYPE_ARCADE_PAD
+      }
+      if (NameContainsCI(name, "arcade")) {
+        return 0x03;  // XINPUT_DEVSUBTYPE_ARCADE_STICK
+      }
       return 0x01;  // XINPUT_DEVSUBTYPE_GAMEPAD
     case SDL_JOYSTICK_TYPE_WHEEL:
       return 0x02;  // XINPUT_DEVSUBTYPE_WHEEL
@@ -605,7 +650,9 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
 
   const SDL_JoystickType joy_type =
       SDL_JoystickGetType(SDL_GameControllerGetJoystick(controller));
-  const uint8_t xinput_subtype = SdlTypeToXInputSubType(joy_type);
+  const char* controller_name = SDL_GameControllerName(controller);
+  const uint8_t xinput_subtype =
+      SdlTypeToXInputSubType(joy_type, controller_name);
   XELOGI(
       "SDL OnControllerDeviceAdded: \"{}\", "
       "JoystickType({}), "
@@ -614,7 +661,7 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
       "VendorID(0x{:04X}), "
       "ProductID(0x{:04X}), "
       "GUID({})",
-      SDL_GameControllerName(controller), JoystickTypeName(joy_type),
+      controller_name ? controller_name : "?", JoystickTypeName(joy_type),
 #if SDL_VERSION_ATLEAST(2, 0, 12)
       static_cast<uint32_t>(SDL_GameControllerGetType(controller)),
 #else
@@ -871,7 +918,8 @@ void SDLInputDriver::UpdateXCapabilities(ControllerState& state) {
   auto& c = state.caps;
   c.type = 0x01;  // XINPUT_DEVTYPE_GAMEPAD
   c.sub_type = SdlTypeToXInputSubType(
-      SDL_JoystickGetType(SDL_GameControllerGetJoystick(state.sdl)));
+      SDL_JoystickGetType(SDL_GameControllerGetJoystick(state.sdl)),
+      SDL_GameControllerName(state.sdl));
   c.flags = cap_flags;
   c.gamepad.buttons =
       0xF3FF | (cvars::guide_button ? X_INPUT_GAMEPAD_GUIDE : 0x0);
@@ -894,15 +942,16 @@ std::vector<InputDeviceInfo> SDLInputDriver::EnumerateDevices() {
     }
     InputDeviceInfo info{};
     info.driver_slot = static_cast<uint8_t>(i);
+    const char* name = SDL_GameControllerName(sdl);
     auto* joystick = SDL_GameControllerGetJoystick(sdl);
     if (joystick) {
       char guid_buf[33] = {};
       SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joystick), guid_buf,
                                 sizeof(guid_buf));
       info.stable_id = guid_buf;
-      info.subtype = SdlTypeToXInputSubType(SDL_JoystickGetType(joystick));
+      info.subtype =
+          SdlTypeToXInputSubType(SDL_JoystickGetType(joystick), name);
     }
-    const char* name = SDL_GameControllerName(sdl);
     info.display_name = name ? name : "Controller";
     out.push_back(std::move(info));
   }

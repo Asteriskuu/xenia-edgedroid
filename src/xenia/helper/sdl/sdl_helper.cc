@@ -13,6 +13,7 @@
 // these features when available on a newer system.
 #if !SDL_VERSION_ATLEAST(2, 0, 14)
 #define SDL_HINT_AUDIO_DEVICE_APP_NAME "SDL_AUDIO_DEVICE_APP_NAME"
+#define SDL_HINT_JOYSTICK_RAWINPUT "SDL_JOYSTICK_RAWINPUT"
 #endif
 
 #include "xenia/base/assert.h"
@@ -80,6 +81,11 @@ bool SDLHelper::SetHints() {
   // marshaling. With it, SDL spawns its own thread that owns and pumps the
   // window. No-op on non-Windows platforms.
   suc &= setHint(SDL_HINT_JOYSTICK_THREAD, "1", true);
+
+  // Force SDL's XInput backend over RAWINPUT: it bakes the XInput SubType
+  // into the joystick name (e.g. "XInput Guitar #1"), letting us classify
+  // form factor by name.
+  suc &= setHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
 
   return suc;
 }
