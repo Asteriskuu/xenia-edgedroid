@@ -1326,9 +1326,18 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
       else()
         target_compile_options(${_xe_t} PRIVATE -w)
       endif()
+      # Strip wx's asserts in Release. wx defaults wxDEBUG_LEVEL to 1 in every
+      # config; under Ninja Multi-Config we apply the override per-target so
+      # the generator expression is evaluated at build time.
+      target_compile_definitions(${_xe_t} PRIVATE
+          $<$<CONFIG:Release>:wxDEBUG_LEVEL=0>)
     endforeach()
     set_property(DIRECTORY PROPERTY COMPILE_OPTIONS
         "${_xe_save_thirdparty_options}")
     add_library(xe-wxWidgets INTERFACE)
     target_link_libraries(xe-wxWidgets INTERFACE wx::aui wx::adv wx::core wx::base)
+    # Consumers including wx headers must agree on wxDEBUG_LEVEL with the
+    # compiled wx libraries to keep inline assert expansions consistent.
+    target_compile_definitions(xe-wxWidgets INTERFACE
+        $<$<CONFIG:Release>:wxDEBUG_LEVEL=0>)
 endif()
