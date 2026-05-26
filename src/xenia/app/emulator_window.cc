@@ -15,6 +15,7 @@
 #include "xenia/ui/install_progress_dialog_wx.h"
 #include "xenia/ui/profile_editor_dialog_wx.h"
 #include "xenia/ui/quick_settings_dialog_wx.h"
+#include "xenia/ui/windowed_app_wx.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -649,9 +650,20 @@ void EmulatorWindow::OnEmulatorInitialized() {
     auto exe_path_u16 = xe::path_to_utf16(executable_path);
     std::u16string cmd_line = u"\"" + exe_path_u16 + u"\"";
 
-    if (!cvars::config.empty()) {
-      cmd_line += u" --config=\"" + xe::to_utf16(cvars::config) + u"\"";
+    // Forward parent's CLI args.
+    int parent_argc = 0;
+    wchar_t** parent_argv = CommandLineToArgvW(GetCommandLineW(), &parent_argc);
+    if (parent_argv) {
+      for (int i = 1; i < parent_argc; ++i) {
+        std::u16string a(reinterpret_cast<const char16_t*>(parent_argv[i]));
+        if (a.empty() || a[0] != u'-') {
+          continue;  // positional game file — replaced below
+        }
+        cmd_line += u" \"" + a + u"\"";
+      }
+      LocalFree(parent_argv);
     }
+
     // Append to log file instead of overwriting
     cmd_line += u" --log_append=true";
     // Preserve return_to_ui through the title-to-title chain
@@ -721,9 +733,15 @@ void EmulatorWindow::OnEmulatorInitialized() {
 
       arg_storage.push_back(executable_path.string());
 
-      if (!cvars::config.empty()) {
-        arg_storage.push_back("--config=" + cvars::config);
+      // Forward parent's CLI args.
+      for (int i = 1; i < xe::ui::g_argc; ++i) {
+        std::string_view a = xe::ui::g_argv[i];
+        if (a.empty() || a[0] != '-') {
+          continue;  // positional game file — replaced below
+        }
+        arg_storage.emplace_back(a);
       }
+
       // Append to log file instead of overwriting
       arg_storage.push_back("--log_append=true");
       // Preserve return_to_ui through the title-to-title chain
@@ -3317,9 +3335,18 @@ void EmulatorWindow::LaunchTitleInNewProcess(
   // Build full command line with quotes for paths that may contain spaces
   std::u16string cmd_line = u"\"" + exe_path_u16 + u"\"";
 
-  // Pass the config file path if one is being used
-  if (!cvars::config.empty()) {
-    cmd_line += u" --config=\"" + xe::to_utf16(cvars::config) + u"\"";
+  // Forward parent's CLI args.
+  int parent_argc = 0;
+  wchar_t** parent_argv = CommandLineToArgvW(GetCommandLineW(), &parent_argc);
+  if (parent_argv) {
+    for (int i = 1; i < parent_argc; ++i) {
+      std::u16string a(reinterpret_cast<const char16_t*>(parent_argv[i]));
+      if (a.empty() || a[0] != u'-') {
+        continue;  // positional game file — replaced below
+      }
+      cmd_line += u" \"" + a + u"\"";
+    }
+    LocalFree(parent_argv);
   }
 
   // Tell game process to return to UI when it exits
@@ -3387,11 +3414,17 @@ void EmulatorWindow::LaunchTitleInNewProcess(
 
     argv.push_back(executable_path.c_str());
 
-    // Pass the config file if one is being used
-    std::string config_arg;
-    if (!cvars::config.empty()) {
-      config_arg = "--config=" + cvars::config;
-      argv.push_back(config_arg.c_str());
+    // Forward parent's CLI args.
+    std::vector<std::string> forwarded_args;
+    for (int i = 1; i < xe::ui::g_argc; ++i) {
+      std::string_view a = xe::ui::g_argv[i];
+      if (a.empty() || a[0] != '-') {
+        continue;  // positional game file — replaced below
+      }
+      forwarded_args.emplace_back(a);
+    }
+    for (const auto& f : forwarded_args) {
+      argv.push_back(f.c_str());
     }
 
     // Tell game process to return to UI when it exits
