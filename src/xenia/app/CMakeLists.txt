@@ -118,7 +118,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     X11
     xcb
     X11-xcb
-    SDL2
+    SDL3
   )
 elseif(APPLE)
   target_link_libraries(xenia-app PRIVATE

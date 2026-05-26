@@ -14,7 +14,7 @@
 #include <queue>
 #include <stack>
 
-#include "SDL.h"
+#include <SDL3/SDL.h>
 #include "xenia/apu/audio_driver.h"
 #include "xenia/base/threading.h"
 
@@ -38,13 +38,13 @@ class SDLAudioDriver : public AudioDriver {
   void Shutdown() override;
 
  protected:
-  static void SDLCallback(void* userdata, Uint8* stream, int len);
+  static void SDLCallback(void* userdata, SDL_AudioStream* stream,
+                          int additional_amount, int total_amount);
 
   xe::threading::Semaphore* semaphore_ = nullptr;
 
-  SDL_AudioDeviceID sdl_device_id_ = -1;
+  SDL_AudioStream* sdl_stream_ = nullptr;
   bool sdl_initialized_ = false;
-  uint8_t sdl_device_channels_ = 0;
 
   float volume_ = 1.0f;
 

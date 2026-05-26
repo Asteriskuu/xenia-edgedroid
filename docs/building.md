@@ -94,7 +94,9 @@ The build script uses Clang 21.
 You will also need some development libraries. To get them on an Ubuntu system:
 
 ```sh
-sudo apt-get install build-essential mesa-vulkan-drivers libc++-dev libc++abi-dev liblz4-dev libsdl2-dev libvulkan-dev libx11-xcb-dev clang-21 llvm-21 ninja-build libwxgtk3.2-dev libfontconfig1-dev
+sudo apt-get install build-essential mesa-vulkan-drivers libc++-dev libc++abi-dev liblz4-dev libvulkan-dev libx11-xcb-dev clang-21 llvm-21 ninja-build libfontconfig1-dev \
+  libasound2-dev libpulse-dev libudev-dev libdbus-1-dev \
+  libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxss-dev libxkbcommon-dev libxfixes-dev
 ```
 
 In addition, you will need up to date Vulkan libraries and drivers for your hardware, which most distributions have in their standard repositories nowadays.

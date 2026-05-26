@@ -17,7 +17,7 @@ if(APPLE)
 endif()
 
 if(APPLE)
-  # OBJC needed for SDL2's .m sources (Cocoa video, CoreAudio, MFi joystick).
+  # OBJC needed for SDL3's .m sources (Cocoa, CoreAudio, MFi joystick).
   project(xenia LANGUAGES C CXX OBJC OBJCXX)
   set(CMAKE_OBJCXX_STANDARD 20)
   set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)

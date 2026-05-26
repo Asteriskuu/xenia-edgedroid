@@ -677,165 +677,68 @@ if(WIN32)
 endif()
 
 # ==============================================================================
-# SDL2
+# SDL3
 # ==============================================================================
-if(WIN32)
-  # Build SDL2 from source on Windows
-  file(GLOB _sdl2_sources
-    "SDL2/src/*.c"
-    "SDL2/src/atomic/*.c"
-    "SDL2/src/audio/*.c"
-    "SDL2/src/audio/directsound/*.c"
-    "SDL2/src/audio/disk/*.c"
-    "SDL2/src/audio/dummy/*.c"
-    "SDL2/src/audio/wasapi/*.c"
-    "SDL2/src/audio/winmm/*.c"
-    "SDL2/src/core/windows/*.c"
-    "SDL2/src/cpuinfo/*.c"
-    "SDL2/src/dynapi/*.c"
-    "SDL2/src/events/*.c"
-    "SDL2/src/file/*.c"
-    "SDL2/src/filesystem/windows/*.c"
-    "SDL2/src/haptic/*.c"
-    "SDL2/src/haptic/dummy/*.c"
-    "SDL2/src/haptic/windows/*.c"
-    "SDL2/src/hidapi/*.c"
-    "SDL2/src/joystick/*.c"
-    "SDL2/src/joystick/dummy/*.c"
-    "SDL2/src/joystick/hidapi/*.c"
-    "SDL2/src/joystick/virtual/*.c"
-    "SDL2/src/joystick/windows/*.c"
-    "SDL2/src/libm/*.c"
-    "SDL2/src/loadso/windows/*.c"
-    "SDL2/src/locale/*.c"
-    "SDL2/src/locale/windows/*.c"
-    "SDL2/src/misc/*.c"
-    "SDL2/src/misc/windows/*.c"
-    "SDL2/src/power/*.c"
-    "SDL2/src/power/windows/*.c"
-    "SDL2/src/render/*.c"
-    "SDL2/src/render/direct3d/*.c"
-    "SDL2/src/render/direct3d11/*.c"
-    "SDL2/src/render/direct3d12/*.c"
-    "SDL2/src/render/opengl/*.c"
-    "SDL2/src/render/opengles2/*.c"
-    "SDL2/src/render/software/*.c"
-    "SDL2/src/sensor/*.c"
-    "SDL2/src/sensor/dummy/*.c"
-    "SDL2/src/sensor/windows/*.c"
-    "SDL2/src/stdlib/*.c"
-    "SDL2/src/thread/*.c"
-    "SDL2/src/thread/generic/SDL_syscond.c"
-    "SDL2/src/thread/windows/*.c"
-    "SDL2/src/timer/*.c"
-    "SDL2/src/timer/windows/*.c"
-    "SDL2/src/video/*.c"
-    "SDL2/src/video/dummy/*.c"
-    "SDL2/src/video/windows/*.c"
-    "SDL2/src/video/yuv2rgb/*.c"
-  )
-  add_library(SDL2 STATIC ${_sdl2_sources})
-  target_compile_definitions(SDL2 PRIVATE
-    HAVE_LIBC
-    SDL_LEAN_AND_MEAN
-    SDL_RENDER_DISABLED
-  )
-  target_include_directories(SDL2 PUBLIC SDL2/include)
-  target_link_libraries(SDL2 PRIVATE setupapi winmm imm32 version)
-elseif(APPLE)
-  # Build SDL2 from source on macOS. SDL2's auto-detected SDL_config_macosx.h
-  # selects the CoreAudio audio, Cocoa video, IOKit joystick/haptic, MFi
-  # controller, pthread, and dlopen subsystems wired up below; SDL_RENDER_DISABLED
-  # keeps the renderer subsystem out (xenia drives Metal directly).
-  file(GLOB _sdl2_sources
-    "SDL2/src/*.c"
-    "SDL2/src/atomic/*.c"
-    "SDL2/src/audio/*.c"
-    "SDL2/src/audio/coreaudio/*.m"
-    "SDL2/src/audio/disk/*.c"
-    "SDL2/src/audio/dummy/*.c"
-    "SDL2/src/cpuinfo/*.c"
-    "SDL2/src/dynapi/*.c"
-    "SDL2/src/events/*.c"
-    "SDL2/src/file/*.c"
-    "SDL2/src/file/cocoa/*.m"
-    "SDL2/src/filesystem/cocoa/*.m"
-    "SDL2/src/haptic/*.c"
-    "SDL2/src/haptic/darwin/*.c"
-    "SDL2/src/hidapi/*.c"
-    "SDL2/src/joystick/*.c"
-    "SDL2/src/joystick/darwin/*.c"
-    "SDL2/src/joystick/dummy/*.c"
-    "SDL2/src/joystick/hidapi/*.c"
-    "SDL2/src/joystick/iphoneos/*.m"
-    "SDL2/src/joystick/virtual/*.c"
-    "SDL2/src/libm/*.c"
-    "SDL2/src/loadso/dlopen/*.c"
-    "SDL2/src/locale/*.c"
-    "SDL2/src/locale/macosx/*.m"
-    "SDL2/src/misc/*.c"
-    "SDL2/src/misc/macosx/*.m"
-    "SDL2/src/power/*.c"
-    "SDL2/src/power/macosx/*.c"
-    "SDL2/src/render/*.c"
-    "SDL2/src/sensor/*.c"
-    "SDL2/src/sensor/dummy/*.c"
-    "SDL2/src/stdlib/*.c"
-    "SDL2/src/thread/*.c"
-    "SDL2/src/thread/pthread/*.c"
-    "SDL2/src/timer/*.c"
-    "SDL2/src/timer/unix/*.c"
-    "SDL2/src/video/*.c"
-    "SDL2/src/video/cocoa/*.m"
-    "SDL2/src/video/dummy/*.c"
-    "SDL2/src/video/yuv2rgb/*.c"
-  )
-  add_library(SDL2 STATIC ${_sdl2_sources})
-  target_compile_definitions(SDL2 PRIVATE
-    HAVE_LIBC
-    SDL_LEAN_AND_MEAN
-    SDL_RENDER_DISABLED
-    # Apple ships CGL but not <EGL/egl.h>. SDL_USE_BUILTIN_OPENGL_DEFINITIONS
-    # makes SDL_egl.h provide stub EGL typedefs, which is enough for the
-    # whole EGL family (SDL_egl.c, SDL_cocoaopengles.m) to compile — the
-    # actual EGL entry points are runtime-loaded via dlopen("libEGL.so") and
-    # only fail if an app explicitly asks for SDL_GL_CONTEXT_PROFILE_ES.
-    SDL_USE_BUILTIN_OPENGL_DEFINITIONS
-  )
-  # SDL_mfijoystick.m uses __weak — requires ARC. Other .m files don't rely
-  # on explicit retain/release, so ARC across the whole OBJC set is safe.
-  target_compile_options(SDL2 PRIVATE
-    $<$<COMPILE_LANGUAGE:OBJC>:-fobjc-arc>
-  )
-  target_include_directories(SDL2 PUBLIC SDL2/include)
-  target_link_libraries(SDL2 PRIVATE
-    "-framework AVFoundation"
-    "-framework AudioToolbox"
-    "-framework Carbon"
-    "-framework Cocoa"
-    "-framework CoreAudio"
-    "-framework CoreFoundation"
-    "-framework CoreGraphics"
-    "-framework CoreHaptics"
-    "-framework CoreServices"
-    "-framework CoreVideo"
-    "-framework ForceFeedback"
-    "-framework Foundation"
-    "-framework GameController"
-    "-framework IOKit"
-    "-framework Metal"
-    "-framework OpenGL"
-    "-framework QuartzCore"
-    iconv
-  )
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  # Use system SDL2 on Linux
-  add_library(SDL2 INTERFACE)
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(SDL2_PKG REQUIRED sdl2)
-  target_include_directories(SDL2 INTERFACE ${SDL2_PKG_INCLUDE_DIRS})
-  target_link_libraries(SDL2 INTERFACE ${SDL2_PKG_LDFLAGS})
-  target_compile_options(SDL2 INTERFACE ${SDL2_PKG_CFLAGS_OTHER})
+# Build SDL3 from source on every platform using upstream's own CMake. Xenia
+# drives windowing/rendering/GPU directly, so the SDL subsystems we don't
+# consume are switched off. Only audio + joystick/gamepad/haptic + events are
+# exercised by xenia-apu-sdl / xenia-hid-sdl. Linux builds shared so the
+# runtime dlopen("libSDL3.so.0") path in system_gnulinux.cc can resolve and so
+# linuxdeploy can bundle the .so into the AppImage; Windows/macOS build static.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(SDL_SHARED ON CACHE INTERNAL "")
+  set(SDL_STATIC OFF CACHE INTERNAL "")
+else()
+  set(SDL_SHARED OFF CACHE INTERNAL "")
+  set(SDL_STATIC ON CACHE INTERNAL "")
+endif()
+set(SDL_TEST_LIBRARY OFF CACHE INTERNAL "")
+set(SDL_INSTALL OFF CACHE INTERNAL "")
+set(SDL_DISABLE_INSTALL ON CACHE INTERNAL "")
+set(SDL_CAMERA OFF CACHE INTERNAL "")
+set(SDL_DIALOG OFF CACHE INTERNAL "")
+set(SDL_GPU OFF CACHE INTERNAL "")
+set(SDL_RENDER OFF CACHE INTERNAL "")
+set(SDL_SENSOR OFF CACHE INTERNAL "")
+set(SDL_HIDAPI_LIBUSB OFF CACHE INTERNAL "")
+
+# SDL3's sdlcommands.cmake uses file(GLOB CONFIGURE_DEPENDS ...) for its
+# source lists. CMake honours that by emitting a "Re-checking globbed
+# directories" probe on every build — slow and pointless for a submodule
+# pinned to a release tag. Strip the flag in place at configure time;
+# .gitmodules marks SDL3 as ignore=dirty so the in-tree edit doesn't pollute
+# git status. Same pattern as snappy and zlib-ng.
+set(_sdl3_cmd "${CMAKE_CURRENT_SOURCE_DIR}/SDL3/cmake/sdlcommands.cmake")
+if(EXISTS "${_sdl3_cmd}")
+  file(READ "${_sdl3_cmd}" _sdl3_cmd_content)
+  string(REPLACE " CONFIGURE_DEPENDS " " " _sdl3_cmd_patched "${_sdl3_cmd_content}")
+  if(NOT "${_sdl3_cmd_patched}" STREQUAL "${_sdl3_cmd_content}")
+    file(WRITE "${_sdl3_cmd}" "${_sdl3_cmd_patched}")
+  endif()
+endif()
+
+add_subdirectory(SDL3 EXCLUDE_FROM_ALL)
+# Consistent target name for downstream link calls.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_library(SDL3 ALIAS SDL3-shared)
+else()
+  add_library(SDL3 ALIAS SDL3-static)
+endif()
+
+# SDL3 explicitly bakes /W3 into its target COMPILE_OPTIONS, which clashes
+# with the directory-level /W0 above and produces D9025 noise on every TU.
+# Strip the /W* and /WX flags it added so only the directory-level /W0
+# survives. Mirrors the same workaround we apply to SPIRV-Tools.
+if(MSVC)
+  foreach(_sdl3_target SDL3-static SDL_uclibc)
+    if(TARGET ${_sdl3_target})
+      get_target_property(_opts ${_sdl3_target} COMPILE_OPTIONS)
+      if(_opts)
+        list(FILTER _opts EXCLUDE REGEX "^/[Ww]([0-9]|all|X)$")
+        set_target_properties(${_sdl3_target} PROPERTIES COMPILE_OPTIONS "${_opts}")
+      endif()
+    endif()
+  endforeach()
 endif()
 
 # ==============================================================================

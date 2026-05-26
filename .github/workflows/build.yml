@@ -45,7 +45,9 @@ jobs:
           sudo apt-add-repository "deb http://apt.llvm.org/${UBUNTU_BASE}/ llvm-toolchain-${UBUNTU_BASE}-21 main"
 
           sudo apt-get -y update
-          sudo apt-get -y install libc++-dev libc++abi-dev libgtk-3-dev libsdl2-dev libx11-xcb-dev clang-21 lld-21 ninja-build cmake libwxgtk3.2-dev libfontconfig1-dev libxtst-dev
+          sudo apt-get -y install libc++-dev libc++abi-dev libgtk-3-dev libx11-xcb-dev clang-21 lld-21 ninja-build cmake libfontconfig1-dev libxtst-dev \
+            libasound2-dev libpulse-dev libudev-dev libdbus-1-dev \
+            libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxss-dev libxkbcommon-dev libxfixes-dev
 
           # Download linuxdeploy if not cached.
           if [ '${{ steps.cache-linuxdeploy.outputs.cache-hit }}' != 'true' ]; then
