@@ -110,6 +110,7 @@ if(WIN32)
     xenia-gpu-d3d12
     xenia-hid-keyboard
     xenia-ui-d3d12
+    uxtheme
   )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(xenia-app PRIVATE

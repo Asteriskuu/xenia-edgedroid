@@ -286,7 +286,7 @@ class EmulatorWindow {
   ui::MenuItem* config_menu_ = nullptr;
   ui::MenuItem* tools_menu_ = nullptr;
   ui::MenuItem* audio_menu_ = nullptr;
-  // Dedupes toolbar volume-button updates (enabled state + icon bucket).
+  // Dedupes audio-icon bucket updates (no-audio/low/mid/full).
   int audio_icon_key_ = -1;
   ui::MenuItem* view_show_toolbar_item_ = nullptr;
   bool show_toolbar_ = true;
@@ -300,7 +300,7 @@ class EmulatorWindow {
   // surface.
   void ShowNoProfilePrompt();
   void RefreshProfileIcon();
-  // Toolbar volume button: enabled while a title runs, icon picked from volume.
+  // Sync the toolbar's audio icon (bucket) and slider value from cvars::volume.
   void RefreshAudioIcon();
   void ShowProfilePopupMenu();
   // Show or hide the icon toolbar pane and persist the preference.

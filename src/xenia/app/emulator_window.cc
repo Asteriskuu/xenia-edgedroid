@@ -50,6 +50,7 @@
 #include "xenia/vfs/devices/xcontent_container_device.h"
 
 #if XE_PLATFORM_WIN32
+#include <uxtheme.h>
 #include <windows.h>
 #else
 #include <signal.h>
@@ -145,6 +146,8 @@
 #include <wx/msgdlg.h>
 #include <wx/mstream.h>
 #include <wx/settings.h>
+#include <wx/slider.h>
+#include <wx/statbmp.h>
 #include <wx/stattext.h>
 #include <wx/textdlg.h>
 
@@ -293,6 +296,8 @@ struct WxToolbarState {
   wxBitmapBundle audio_low_bundle;
   wxBitmapBundle audio_mid_bundle;
   wxBitmapBundle audio_full_bundle;
+  wxStaticBitmap* audio_icon = nullptr;
+  wxSlider* audio_slider = nullptr;
   // Per-subtype controller icons; picked by RefreshControllerToolbar.
   wxBitmapBundle controller_empty_bundle;
   wxBitmapBundle controller_gamepad_bundle;
@@ -311,10 +316,11 @@ namespace {
 constexpr int kToolIdOpenBack = 11000;
 constexpr int kToolIdSettings = 11001;
 constexpr int kToolIdProfile = 11002;
-constexpr int kToolIdAudio = 11003;
 // Controller tools occupy 11010..11013 (one per guest slot).
 constexpr int kToolIdControllerBase = 11010;
 constexpr int kToolbarIconSize = 32;
+// Smaller than the tool buttons — informative-only, paired with the slider.
+constexpr int kAudioIconSize = 24;
 
 // XINPUT_DEVSUBTYPE_* values offered as override choices. The alternate
 // guitar (0x07) and bass guitar (0x0B) variants collapse onto the single
@@ -1009,7 +1015,8 @@ bool EmulatorWindow::Initialize() {
     auto* aui = wx_window->aui_manager();
     if (frame && aui) {
       const bool light_theme = !wxSystemSettings::GetAppearance().IsDark();
-      auto load_bundle = [light_theme](const unsigned char* data, size_t size) {
+      auto load_bundle = [light_theme](const unsigned char* data, size_t size,
+                                       int target = kToolbarIconSize) {
         wxMemoryInputStream stream(data, size);
         wxImage image(stream);
         if (light_theme && image.IsOk()) {
@@ -1022,10 +1029,9 @@ bool EmulatorWindow::Initialize() {
             rgb[i] = static_cast<unsigned char>(255 - rgb[i]);
           }
         }
-        if (image.IsOk() && (image.GetWidth() != kToolbarIconSize ||
-                             image.GetHeight() != kToolbarIconSize)) {
-          image.Rescale(kToolbarIconSize, kToolbarIconSize,
-                        wxIMAGE_QUALITY_HIGH);
+        if (image.IsOk() &&
+            (image.GetWidth() != target || image.GetHeight() != target)) {
+          image.Rescale(target, target, wxIMAGE_QUALITY_HIGH);
         }
         return wxBitmapBundle::FromBitmap(wxBitmap(image));
       };
@@ -1049,21 +1055,56 @@ bool EmulatorWindow::Initialize() {
                       ui::embedded_icons::icons8_settings_96_png_size);
       toolbar->AddTool(kToolIdSettings, _("Settings"), settings_bundle,
                        _("Settings"));
-      wx_toolbar_state_->audio_no_bundle =
-          load_bundle(ui::embedded_icons::icons8_no_audio_96_png_data,
-                      ui::embedded_icons::icons8_no_audio_96_png_size);
-      wx_toolbar_state_->audio_low_bundle =
-          load_bundle(ui::embedded_icons::icons8_low_audio_96_png_data,
-                      ui::embedded_icons::icons8_low_audio_96_png_size);
-      wx_toolbar_state_->audio_mid_bundle =
-          load_bundle(ui::embedded_icons::icons8_mid_audio_96_png_data,
-                      ui::embedded_icons::icons8_mid_audio_96_png_size);
-      wx_toolbar_state_->audio_full_bundle =
-          load_bundle(ui::embedded_icons::icons8_audio_96_png_data,
-                      ui::embedded_icons::icons8_audio_96_png_size);
-      toolbar->AddTool(kToolIdAudio, _("Volume"),
-                       wx_toolbar_state_->audio_no_bundle, _("Volume"));
-      toolbar->EnableTool(kToolIdAudio, false);
+      wx_toolbar_state_->audio_no_bundle = load_bundle(
+          ui::embedded_icons::icons8_no_audio_96_png_data,
+          ui::embedded_icons::icons8_no_audio_96_png_size, kAudioIconSize);
+      wx_toolbar_state_->audio_low_bundle = load_bundle(
+          ui::embedded_icons::icons8_low_audio_96_png_data,
+          ui::embedded_icons::icons8_low_audio_96_png_size, kAudioIconSize);
+      wx_toolbar_state_->audio_mid_bundle = load_bundle(
+          ui::embedded_icons::icons8_mid_audio_96_png_data,
+          ui::embedded_icons::icons8_mid_audio_96_png_size, kAudioIconSize);
+      wx_toolbar_state_->audio_full_bundle = load_bundle(
+          ui::embedded_icons::icons8_audio_96_png_data,
+          ui::embedded_icons::icons8_audio_96_png_size, kAudioIconSize);
+      // Group the icon + slider so they read as one volume control;
+      // wxAuiToolBar's per-item packing would otherwise space them too far
+      // apart. wxControl (not wxPanel) since AddControl wants a wxControl.
+      auto* audio_group = new wxControl(toolbar, wxID_ANY, wxDefaultPosition,
+                                        wxDefaultSize, wxBORDER_NONE);
+      // Own the background paint to avoid the default white erase flashing
+      // during toolbar relayouts.
+      audio_group->SetBackgroundColour(toolbar->GetBackgroundColour());
+      audio_group->SetBackgroundStyle(wxBG_STYLE_PAINT);
+      audio_group->Bind(wxEVT_ERASE_BACKGROUND, [](wxEraseEvent&) {});
+      audio_group->Bind(wxEVT_PAINT, [audio_group](wxPaintEvent&) {
+        wxPaintDC dc(audio_group);
+        dc.SetBackground(wxBrush(audio_group->GetBackgroundColour()));
+        dc.Clear();
+      });
+      audio_group->SetDoubleBuffered(true);
+      auto* audio_sizer = new wxBoxSizer(wxHORIZONTAL);
+      wx_toolbar_state_->audio_icon = new wxStaticBitmap(
+          audio_group, wxID_ANY, wx_toolbar_state_->audio_no_bundle);
+      wx_toolbar_state_->audio_icon->SetToolTip(_("Volume"));
+      audio_sizer->Add(wx_toolbar_state_->audio_icon, 0,
+                       wxALIGN_CENTER_VERTICAL);
+      wx_toolbar_state_->audio_slider = new wxSlider(
+          audio_group, wxID_ANY,
+          static_cast<int>(cvars::volume > 100 ? 100 : cvars::volume), 0, 100,
+          wxDefaultPosition, wxSize(120, -1));
+      wx_toolbar_state_->audio_slider->SetToolTip(_("Volume"));
+#if XE_PLATFORM_WIN32
+      // Strip Win10+ theming — the blue accent fill clashes with the flat
+      // toolbar palette; classic gray track fits better.
+      SetWindowTheme(
+          static_cast<HWND>(wx_toolbar_state_->audio_slider->GetHandle()), L"",
+          L"");
+#endif
+      audio_sizer->Add(wx_toolbar_state_->audio_slider, 0,
+                       wxALIGN_CENTER_VERTICAL);
+      audio_group->SetSizerAndFit(audio_sizer);
+      toolbar->AddControl(audio_group);
       wx_toolbar_state_->controller_gamepad_bundle =
           load_bundle(ui::embedded_icons::icons8_game_controller_96_png_data,
                       ui::embedded_icons::icons8_game_controller_96_png_size);
@@ -1151,9 +1192,21 @@ bool EmulatorWindow::Initialize() {
             }
           },
           kToolIdSettings);
-      frame->Bind(
-          wxEVT_TOOL, [this](wxCommandEvent&) { ToggleAudioDialog(); },
-          kToolIdAudio);
+      wx_toolbar_state_->audio_slider->Bind(
+          wxEVT_SLIDER, [this](wxCommandEvent&) {
+            if (!wx_toolbar_state_ || !wx_toolbar_state_->audio_slider) {
+              return;
+            }
+            apu::SetVolumePersistent(static_cast<uint32_t>(
+                wx_toolbar_state_->audio_slider->GetValue()));
+            RefreshAudioIcon();
+          });
+      // Save on settle, not every drag tick; THUMBRELEASE covers mouse,
+      // SCROLL_CHANGED covers keyboard + track-click on Windows.
+      auto save_volume = [](wxScrollEvent&) { config::SaveConfig(); };
+      wx_toolbar_state_->audio_slider->Bind(wxEVT_SCROLL_THUMBRELEASE,
+                                            save_volume);
+      wx_toolbar_state_->audio_slider->Bind(wxEVT_SCROLL_CHANGED, save_volume);
       frame->Bind(
           wxEVT_TOOL, [this](wxCommandEvent&) { ShowProfilePopupMenu(); },
           kToolIdProfile);
@@ -2669,44 +2722,42 @@ void EmulatorWindow::RefreshAudioIcon() {
   if (!wx_toolbar_state_ || !wx_toolbar_state_->toolbar) {
     return;
   }
-  auto* tb = wx_toolbar_state_->toolbar;
-  const bool title_open = emulator_ && emulator_->is_title_open();
 
   int percent = cvars::volume > 100 ? 100 : static_cast<int>(cvars::volume);
 
-  // 0 = no audio, 1 = low, 2 = mid, 3 = full (disabled game list shows
-  // no-audio).
+  // 0 = mute, 1 = low, 2 = mid, 3 = full.
   int bucket = 0;
-  if (title_open && percent > 0) {
+  if (percent > 0) {
     bucket = percent <= 33 ? 1 : (percent <= 67 ? 2 : 3);
   }
 
-  const int key = (title_open ? 1 : 0) * 10 + bucket;
-  if (key == audio_icon_key_) {
-    return;
+  if (bucket != audio_icon_key_ && wx_toolbar_state_->audio_icon) {
+    audio_icon_key_ = bucket;
+    const wxBitmapBundle* bundle = &wx_toolbar_state_->audio_no_bundle;
+    switch (bucket) {
+      case 1:
+        bundle = &wx_toolbar_state_->audio_low_bundle;
+        break;
+      case 2:
+        bundle = &wx_toolbar_state_->audio_mid_bundle;
+        break;
+      case 3:
+        bundle = &wx_toolbar_state_->audio_full_bundle;
+        break;
+      default:
+        break;
+    }
+    wx_toolbar_state_->audio_icon->SetBitmap(*bundle);
   }
-  audio_icon_key_ = key;
 
-  const wxBitmapBundle* bundle = &wx_toolbar_state_->audio_no_bundle;
-  switch (bucket) {
-    case 1:
-      bundle = &wx_toolbar_state_->audio_low_bundle;
-      break;
-    case 2:
-      bundle = &wx_toolbar_state_->audio_mid_bundle;
-      break;
-    case 3:
-      bundle = &wx_toolbar_state_->audio_full_bundle;
-      break;
-    default:
-      break;
+  // HasFocus filters out the user-drag case: the slider already shows the
+  // right value, and re-painting per drag tick lags noticeably.
+  if (wx_toolbar_state_->audio_slider) {
+    auto* slider = wx_toolbar_state_->audio_slider;
+    if (!slider->HasFocus() && slider->GetValue() != percent) {
+      slider->SetValue(percent);
+    }
   }
-  tb->EnableTool(kToolIdAudio, title_open);
-  tb->SetToolBitmap(kToolIdAudio, *bundle);
-  tb->Refresh();
-  // Force a repaint now; the open dialog's continuous repaint starves the
-  // queue.
-  tb->Update();
 }
 
 void EmulatorWindow::ToggleControllerVibration() {
