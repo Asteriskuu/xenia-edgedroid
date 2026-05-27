@@ -37,9 +37,6 @@
 
 // Available audio systems:
 #include "xenia/apu/nop/nop_audio_system.h"
-#if XE_PLATFORM_LINUX
-#include "xenia/apu/alsa/alsa_audio_system.h"
-#endif  // XE_PLATFORM_LINUX
 #if !XE_PLATFORM_ANDROID
 #include "xenia/apu/sdl/sdl_audio_system.h"
 #endif  // !XE_PLATFORM_ANDROID
@@ -72,10 +69,10 @@ DEFINE_string(apu, "xaudio2", "Audio system. Use: " APU_OPTIONS, "APU");
 DEFINE_string(gpu, "d3d12", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #elif XE_PLATFORM_LINUX
-#define APU_OPTIONS "[alsa, sdl, nop]"
+#define APU_OPTIONS "[sdl, nop]"
 #define GPU_OPTIONS "[vulkan, null]"
 #define HID_OPTIONS "[sdl, nop]"
-DEFINE_string(apu, "alsa", "Audio system. Use: " APU_OPTIONS, "APU");
+DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
 DEFINE_string(gpu, "vulkan", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #elif XE_PLATFORM_MAC
@@ -400,9 +397,6 @@ std::unique_ptr<apu::AudioSystem> EmulatorApp::CreateAudioSystem(
 #if XE_PLATFORM_WIN32
   factory.Add<apu::xaudio2::XAudio2AudioSystem>("xaudio2");
 #endif  // XE_PLATFORM_WIN32
-#if XE_PLATFORM_LINUX
-  factory.Add<apu::alsa::ALSAAudioSystem>("alsa");
-#endif  // XE_PLATFORM_LINUX
 #if !XE_PLATFORM_ANDROID
   factory.Add<apu::sdl::SDLAudioSystem>("sdl");
 #endif  // !XE_PLATFORM_ANDROID

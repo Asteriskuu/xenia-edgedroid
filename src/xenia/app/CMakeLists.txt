@@ -114,7 +114,6 @@ if(WIN32)
   )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(xenia-app PRIVATE
-    xenia-apu-alsa
     xenia-hid-keyboard
     X11
     xcb

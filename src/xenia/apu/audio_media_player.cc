@@ -13,10 +13,6 @@
 #include "xenia/apu/xma_context.h"
 #include "xenia/base/logging.h"
 
-#if XE_PLATFORM_LINUX
-#include "xenia/apu/sdl/sdl_audio_driver.h"
-#endif
-
 extern "C" {
 #if XE_COMPILER_MSVC
 #pragma warning(push)
@@ -545,16 +541,8 @@ bool AudioMediaPlayer::SetupDriver(uint32_t sample_rate, uint32_t channels) {
     return false;
   }
 
-#if XE_PLATFORM_LINUX
-  // On Linux always use SDL driver for XMP to avoid conflicts with ALSA
-  // which opens the driver in exclusive hardware access mode
-  driver_ = std::unique_ptr<AudioDriver>(new xe::apu::sdl::SDLAudioDriver(
-      driver_semaphore_.get(), sample_rate, channels, false));
-#else
-  // Use the same driver type as the main audio system
   driver_ = std::unique_ptr<AudioDriver>(audio_system_->CreateDriver(
       driver_semaphore_.get(), sample_rate, channels, false));
-#endif
 
   if (!driver_) {
     driver_semaphore_.reset();

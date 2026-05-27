@@ -43,10 +43,6 @@ add_subdirectory(debug/ui)
 add_subdirectory(app/discord)
 add_subdirectory(app)
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  add_subdirectory(apu/alsa)
-endif()
-
 if(WIN32)
   add_subdirectory(apu/xaudio2)
   add_subdirectory(debug/gdb)
