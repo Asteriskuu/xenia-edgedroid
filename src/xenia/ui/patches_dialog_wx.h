@@ -10,9 +10,9 @@
 #ifndef XENIA_UI_PATCHES_DIALOG_WX_H_
 #define XENIA_UI_PATCHES_DIALOG_WX_H_
 
+#include <cstddef>
 #include <cstdint>
-#include <filesystem>
-#include <string>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -20,6 +20,7 @@
 #include <wx/string.h>
 
 #include "xenia/patcher/patch_db.h"
+#include "xenia/patcher/patch_file_editor.h"
 
 class wxCheckBox;
 class wxScrolledWindow;
@@ -37,27 +38,14 @@ class PatchesDialog : public wxDialog {
                 uint32_t title_id, patcher::BundledPatchFile bundled);
 
  private:
-  struct PatchInfo {
-    std::string name;
-    std::string description;
-    std::string author;
-    bool is_enabled = false;
-    size_t patch_index = 0;
-    wxCheckBox* checkbox = nullptr;
-  };
-
   void Build();
   void OnToggle(size_t patch_index, bool new_value);
-  bool UpdateEnabledLine(size_t patch_index, bool new_value);
   void OnScrollSize(wxSizeEvent& event);
   void RewrapDescriptions();
 
   EmulatorWindow* emulator_window_;
   uint32_t title_id_;
-  patcher::BundledPatchFile bundled_;
-  std::filesystem::path storage_path_;
-  std::vector<std::string> lines_;
-  std::vector<PatchInfo> patches_;
+  std::unique_ptr<patcher::PatchFileEditor> editor_;
   wxStaticText* info_label_ = nullptr;
   wxScrolledWindow* scroll_ = nullptr;
   std::vector<std::pair<wxStaticText*, wxString>> desc_labels_;
