@@ -2480,20 +2480,25 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
 
   if (use_dynamic_rendering) {
     // Use dynamic rendering - construct VkRenderingInfo from render targets.
+    // The PSI ("accuracy") path emulates EDRAM via SSBOs and uses no real
+    // attachments (mirrors the zero-attachment fsi_render_pass_).
     VkRenderingAttachmentInfo color_attachments[xenos::kMaxColorRenderTargets];
-    VkRenderingAttachmentInfo depth_attachment;
-    VkRenderingAttachmentInfo stencil_attachment;
+    VkRenderingAttachmentInfo depth_attachment = {};
+    VkRenderingAttachmentInfo stencil_attachment = {};
     uint32_t color_attachment_count = 0;
 
-    render_target_cache_->GetLastUpdateRenderingAttachments(
-        color_attachments, &color_attachment_count, &depth_attachment,
-        &stencil_attachment);
-
-    // Check if depth attachment was actually set up (has valid sType).
-    bool has_depth =
-        depth_attachment.sType == VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    bool has_stencil =
-        stencil_attachment.sType == VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    bool has_depth = false;
+    bool has_stencil = false;
+    if (render_target_cache_->GetPath() ==
+        RenderTargetCache::Path::kHostRenderTargets) {
+      render_target_cache_->GetLastUpdateRenderingAttachments(
+          color_attachments, &color_attachment_count, &depth_attachment,
+          &stencil_attachment);
+      has_depth =
+          depth_attachment.sType == VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+      has_stencil = stencil_attachment.sType ==
+                    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    }
 
     VkRenderingInfo rendering_info = {};
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
