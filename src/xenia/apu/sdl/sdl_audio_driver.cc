@@ -73,6 +73,26 @@ bool SDLAudioDriver::Initialize() {
     return false;
   }
 
+  // Downmix 5.1->stereo ourselves; SDL3's matrix mixer normalizes off ~6dB.
+  // Shared downmix expects BE-sequential input, so only engage with the
+  // format-conversion path (i.e. main audio system, not XMP-stereo).
+  if (frame_channels_ == 6 && need_format_conversion_) {
+    SDL_AudioDeviceID dev = SDL_GetAudioStreamDevice(sdl_stream_);
+    SDL_AudioSpec device_spec = {};
+    int sample_frames = 0;
+    if (dev != 0 &&
+        SDL_GetAudioDeviceFormat(dev, &device_spec, &sample_frames) &&
+        device_spec.channels == 2) {
+      SDL_AudioSpec stereo_spec = spec;
+      stereo_spec.channels = 2;
+      if (SDL_SetAudioStreamFormat(sdl_stream_, &stereo_spec, nullptr)) {
+        manual_downmix_5_1_to_stereo_ = true;
+      } else {
+        XELOGW("SDL_SetAudioStreamFormat() failed: {}", SDL_GetError());
+      }
+    }
+  }
+
   SDL_ResumeAudioStreamDevice(sdl_stream_);
 
   return true;
@@ -155,30 +175,38 @@ void SDLAudioDriver::SDLCallback(void* userdata, SDL_AudioStream* stream,
       driver->frames_queued_.pop();
     }
 
-    // Convert into a scratch buffer in the format SDL3 expects (interleaved
-    // little-endian floats at our requested channel count). SDL3 will then
-    // matrix-mix this to whatever the hardware actually wants.
+    // Produce a scratch buffer in SDL3's expected format. With manual downmix
+    // we go straight from BE-sequential 5.1 to interleaved LE stereo via the
+    // shared conversion; otherwise feed SDL3 our native channel count and let
+    // its matrix mixer handle any conversion to the device's actual format.
     float scratch[kFrameSizeMax / sizeof(float)];
-    if (driver->need_format_conversion_) {
-      // need_format_conversion implies 6-channel BE-sequential input.
+    int out_bytes;
+    if (driver->manual_downmix_5_1_to_stereo_) {
+      conversion::sequential_6_BE_to_interleaved_2_LE(scratch, buffer,
+                                                      driver->channel_samples_);
+      out_bytes =
+          static_cast<int>(driver->channel_samples_ * 2 * sizeof(float));
+    } else if (driver->need_format_conversion_) {
       conversion::sequential_6_BE_to_interleaved_6_LE(scratch, buffer,
                                                       driver->channel_samples_);
+      out_bytes = frame_bytes;
     } else {
       std::memcpy(scratch, buffer, frame_bytes);
+      out_bytes = frame_bytes;
     }
 
     // Scale by master (cvar) and per-driver volume.
     const uint32_t mv = cvars::volume > 100 ? 100 : cvars::volume;
     const float volume = driver->volume_ * (mv / 100.0f);
     if (volume != 1.0f) {
-      const size_t count = frame_bytes / sizeof(float);
+      const size_t count = out_bytes / sizeof(float);
       for (size_t i = 0; i < count; ++i) {
         scratch[i] *= volume;
       }
     }
 
-    SDL_PutAudioStreamData(stream, scratch, frame_bytes);
-    additional_amount -= frame_bytes;
+    SDL_PutAudioStreamData(stream, scratch, out_bytes);
+    additional_amount -= out_bytes;
 
     {
       std::unique_lock<std::mutex> guard(driver->frames_mutex_);

@@ -72,34 +72,39 @@ inline void sequential_6_BE_to_interleaved_2_LE(float* output,
   assert_true(ch_sample_count % 4 == 0);
   const __m128i byte_swap_shuffle =
       _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
-  const __m128 half = _mm_set1_ps(0.5f);
-  const __m128 two_fifths = _mm_set1_ps(1.0f / 2.5f);
+  // XAudio2-default-style downmix: front pair at unity, C/surround at -3dB,
+  // LFE at -6dB. Matches the loudness of XAudio2's default output matrix.
+  const __m128 surround_gain = _mm_set1_ps(0.707106781f);
+  const __m128 lfe_gain = _mm_set1_ps(0.5f);
 
-  // put center on left and right, discard low frequency
   for (size_t sample = 0; sample < ch_sample_count; sample += 4) {
-    // load 4 samples from 6 channels each
     __m128 fl = _mm_loadu_ps(&input[0 * ch_sample_count + sample]);
     __m128 fr = _mm_loadu_ps(&input[1 * ch_sample_count + sample]);
     __m128 fc = _mm_loadu_ps(&input[2 * ch_sample_count + sample]);
+    __m128 lfe = _mm_loadu_ps(&input[3 * ch_sample_count + sample]);
     __m128 bl = _mm_loadu_ps(&input[4 * ch_sample_count + sample]);
     __m128 br = _mm_loadu_ps(&input[5 * ch_sample_count + sample]);
-    // byte swap
     fl = _mm_castsi128_ps(
         _mm_shuffle_epi8(_mm_castps_si128(fl), byte_swap_shuffle));
     fr = _mm_castsi128_ps(
         _mm_shuffle_epi8(_mm_castps_si128(fr), byte_swap_shuffle));
     fc = _mm_castsi128_ps(
         _mm_shuffle_epi8(_mm_castps_si128(fc), byte_swap_shuffle));
+    lfe = _mm_castsi128_ps(
+        _mm_shuffle_epi8(_mm_castps_si128(lfe), byte_swap_shuffle));
     bl = _mm_castsi128_ps(
         _mm_shuffle_epi8(_mm_castps_si128(bl), byte_swap_shuffle));
     br = _mm_castsi128_ps(
         _mm_shuffle_epi8(_mm_castps_si128(br), byte_swap_shuffle));
 
-    __m128 center_halved = _mm_mul_ps(fc, half);
-    __m128 left = _mm_add_ps(_mm_add_ps(fl, bl), center_halved);
-    __m128 right = _mm_add_ps(_mm_add_ps(fr, br), center_halved);
-    left = _mm_mul_ps(left, two_fifths);
-    right = _mm_mul_ps(right, two_fifths);
+    __m128 fc_mix = _mm_mul_ps(fc, surround_gain);
+    __m128 lfe_mix = _mm_mul_ps(lfe, lfe_gain);
+    __m128 left = _mm_add_ps(
+        fl,
+        _mm_add_ps(fc_mix, _mm_add_ps(_mm_mul_ps(bl, surround_gain), lfe_mix)));
+    __m128 right = _mm_add_ps(
+        fr,
+        _mm_add_ps(fc_mix, _mm_add_ps(_mm_mul_ps(br, surround_gain), lfe_mix)));
     _mm_storeu_ps(&output[sample * 2], _mm_unpacklo_ps(left, right));
     _mm_storeu_ps(&output[(sample + 2) * 2], _mm_unpackhi_ps(left, right));
   }
@@ -118,18 +123,19 @@ inline void sequential_6_BE_to_interleaved_6_LE(float* output,
 inline void sequential_6_BE_to_interleaved_2_LE(float* output,
                                                 const float* input,
                                                 size_t ch_sample_count) {
-  // Default 5.1 channel mapping is fl, fr, fc, lf, bl, br
-  // https://docs.microsoft.com/en-us/windows/win32/xaudio2/xaudio2-default-channel-mapping
+  // 5.1 mapping: fl, fr, fc, lfe, bl, br. XAudio2-default-style downmix:
+  // front pair at unity, C/surround at -3dB, LFE at -6dB.
   for (size_t sample = 0; sample < ch_sample_count; sample++) {
-    // put center on left and right, discard low frequency
     float fl = xe::byte_swap(input[0 * ch_sample_count + sample]);
     float fr = xe::byte_swap(input[1 * ch_sample_count + sample]);
     float fc = xe::byte_swap(input[2 * ch_sample_count + sample]);
+    float lfe = xe::byte_swap(input[3 * ch_sample_count + sample]);
     float bl = xe::byte_swap(input[4 * ch_sample_count + sample]);
     float br = xe::byte_swap(input[5 * ch_sample_count + sample]);
-    float center_halved = fc * 0.5f;
-    output[sample * 2] = (fl + bl + center_halved) * (1.0f / 2.5f);
-    output[sample * 2 + 1] = (fr + br + center_halved) * (1.0f / 2.5f);
+    output[sample * 2] =
+        fl + 0.707106781f * fc + 0.707106781f * bl + 0.5f * lfe;
+    output[sample * 2 + 1] =
+        fr + 0.707106781f * fc + 0.707106781f * br + 0.5f * lfe;
   }
 }
 #endif
