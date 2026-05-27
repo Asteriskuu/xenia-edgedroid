@@ -26,6 +26,7 @@
 #include <wx/msgdlg.h>
 #include <wx/settings.h>
 #include <wx/sizer.h>
+#include <wx/stattext.h>
 #include <wx/textdlg.h>
 #include <wx/variant.h>
 
@@ -399,8 +400,25 @@ GameListPanel::GameListPanel(wxWindow* parent, EmulatorWindow* emulator_window)
     main->Bind(wxEVT_MOTION, &GameListPanel::OnListMouseMotion, this);
   }
 
+  loading_panel_ = new wxPanel(this, wxID_ANY);
+  {
+    auto* loading_sizer = new wxBoxSizer(wxVERTICAL);
+    loading_sizer->AddStretchSpacer(1);
+    auto* loading_label =
+        new wxStaticText(loading_panel_, wxID_ANY, _("Loading titles..."));
+    wxFont loading_font = loading_label->GetFont();
+    loading_font.Scale(1.2f);
+    loading_label->SetFont(loading_font);
+    loading_sizer->Add(loading_label, 0, wxALIGN_CENTER_HORIZONTAL);
+    loading_sizer->AddStretchSpacer(1);
+    loading_panel_->SetSizer(loading_sizer);
+  }
+  list_->Hide();
+
   auto* sizer = new wxBoxSizer(wxVERTICAL);
   sizer->Add(search_, wxSizerFlags().Expand().Border(wxALL, 4));
+  sizer->Add(loading_panel_,
+             wxSizerFlags(1).Expand().Border(wxLEFT | wxRIGHT | wxBOTTOM, 4));
   sizer->Add(list_,
              wxSizerFlags(1).Expand().Border(wxLEFT | wxRIGHT | wxBOTTOM, 4));
   SetSizer(sizer);
@@ -415,14 +433,23 @@ GameListPanel::GameListPanel(wxWindow* parent, EmulatorWindow* emulator_window)
 
 void GameListPanel::Reload() {
   entries_.clear();
+  auto reveal_list = [this]() {
+    if (loading_panel_ && loading_panel_->IsShown()) {
+      loading_panel_->Hide();
+      list_->Show();
+      Layout();
+    }
+  };
 
   if (!emulator_window_) {
     Repopulate();
+    reveal_list();
     return;
   }
   auto* library = emulator_window_->game_library();
   if (!library) {
     Repopulate();
+    reveal_list();
     return;
   }
 
@@ -445,6 +472,7 @@ void GameListPanel::Reload() {
   LoadTimestampsFromProfiles();
   Repopulate();
   UpdateSearchPlaceholder();
+  reveal_list();
   StartIconLoad();
 }
 

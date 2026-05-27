@@ -103,6 +103,7 @@ class GameListPanel : public wxPanel {
   EmulatorWindow* emulator_window_;
   wxSearchCtrl* search_ = nullptr;
   wxDataViewListCtrl* list_ = nullptr;
+  wxPanel* loading_panel_ = nullptr;
   std::vector<Entry> entries_;
   std::vector<size_t> visible_indices_;
   LaunchCallback launch_cb_;
