@@ -3531,6 +3531,13 @@ xe::X_STATUS EmulatorWindow::RunTitle(
 #endif
   }
 
+  // Guard against re-entry — a rapid double-click would otherwise spawn
+  // two concurrent LaunchPath threads.
+  if (target_pending_launch_) {
+    XELOGW("RunTitle: launch already in progress, ignoring");
+    return X_STATUS_UNSUCCESSFUL;
+  }
+
   // Prevent crashing the emulator by not loading a game if a game is already
   // loaded.
   auto abs_path = std::filesystem::absolute(path_to_file);
@@ -3593,30 +3600,35 @@ xe::X_STATUS EmulatorWindow::RunTitle(
     }
   }
   SetupGraphicsSystemPresenterPainting();
-  auto result = emulator_->LaunchPath(abs_path);
+  // LaunchPath blocks for seconds; run it off the UI thread so the
+  // toolbar/render transition paints immediately. Post-launch work goes
+  // back to the UI thread via CallAfter.
+  auto* emulator = emulator_;
+  std::thread([this, emulator, abs_path]() {
+    auto result = emulator->LaunchPath(abs_path);
+    wxTheApp->CallAfter([this, result, abs_path]() {
+      disable_hotkeys_ = false;
+      ClearDialogs();
+      if (result) {
+        XELOGE("Failed to launch target: {:08X}", result);
+        xe::ui::ImGuiDialog::ShowMessageBox(
+            imgui_drawer_.get(), "Title Launch Failed!",
+            "Failed to launch title.\n\nCheck xenia.log for technical "
+            "details.");
+        emulator_->file_system()->Clear();
+        target_pending_launch_ = false;
+        ApplyContentVisibility();
+      } else {
+        auto xam =
+            emulator_->kernel_state()->GetKernelModule<kernel::xam::XamModule>(
+                "xam.xex");
+        xam->loader_data().host_path = xe::path_to_utf8(abs_path);
+        ApplyContentVisibility();
+      }
+    });
+  }).detach();
 
-  disable_hotkeys_ = false;
-
-  ClearDialogs();
-
-  if (result) {
-    XELOGE("Failed to launch target: {:08X}", result);
-
-    xe::ui::ImGuiDialog::ShowMessageBox(
-        imgui_drawer_.get(), "Title Launch Failed!",
-        "Failed to launch title.\n\nCheck xenia.log for technical details.");
-
-    emulator_->file_system()->Clear();
-  } else {
-    auto xam =
-        emulator_->kernel_state()->GetKernelModule<kernel::xam::XamModule>(
-            "xam.xex");
-
-    xam->loader_data().host_path = xe::path_to_utf8(abs_path);
-    ApplyContentVisibility();
-  }
-
-  return result;
+  return X_STATUS_SUCCESS;
 }
 
 std::filesystem::path EmulatorWindow::GetFilePickerInitialDirectory() const {
