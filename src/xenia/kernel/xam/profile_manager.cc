@@ -13,6 +13,7 @@
 
 #include <map>
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/config.h"
 #include "xenia/emulator.h"
@@ -687,22 +688,10 @@ std::vector<ScannedTitleInfo> ProfileManager::ScanAllProfilesForTitles() const {
         fmt::format("{:08X}", static_cast<uint32_t>(XContentType::kProfile)) /
         profile_dir.name / fmt::format("{:08X}.gpd", kDashboardID);
 
-    if (!std::filesystem::exists(dashboard_gpd_path)) {
+    auto gpd_data = xe::filesystem::ReadAllBytes(dashboard_gpd_path);
+    if (gpd_data.empty()) {
       continue;
     }
-
-    std::ifstream file(dashboard_gpd_path, std::ios::binary);
-    if (!file.is_open()) {
-      continue;
-    }
-
-    file.seekg(0, std::ios::end);
-    size_t file_size = file.tellg();
-    file.seekg(0, std::ios::beg);
-
-    std::vector<uint8_t> gpd_data(file_size);
-    file.read(reinterpret_cast<char*>(gpd_data.data()), file_size);
-    file.close();
 
     GpdInfoProfile dashboard_gpd(gpd_data);
     if (!dashboard_gpd.IsValid()) {
@@ -783,20 +772,10 @@ std::vector<uint8_t> ProfileManager::ReadTitleIcon(uint32_t title_id) const {
         fmt::format("{:08X}", static_cast<uint32_t>(XContentType::kProfile)) /
         profile_dir.name / fmt::format("{:08X}.gpd", title_id);
 
-    if (!std::filesystem::exists(gpd_path)) {
+    auto gpd_data = xe::filesystem::ReadAllBytes(gpd_path);
+    if (gpd_data.empty()) {
       continue;
     }
-
-    std::ifstream file(gpd_path, std::ios::binary);
-    if (!file.is_open()) {
-      continue;
-    }
-    file.seekg(0, std::ios::end);
-    size_t file_size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<uint8_t> gpd_data(file_size);
-    file.read(reinterpret_cast<char*>(gpd_data.data()), file_size);
-    file.close();
 
     GpdInfoTitle title_gpd(title_id, gpd_data);
     if (!title_gpd.IsValid()) {

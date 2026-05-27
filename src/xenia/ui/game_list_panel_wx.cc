@@ -13,7 +13,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 
 #include <wx/button.h>
 #include <wx/dcclient.h>
@@ -542,24 +541,6 @@ void GameListPanel::StartIconLoad() {
   CallAfter([this, gen]() { ProcessIconChunk(0, gen); });
 }
 
-static std::vector<uint8_t> ReadIconFile(const std::filesystem::path& path) {
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
-  if (!file) {
-    return {};
-  }
-  const std::streamoff size = file.tellg();
-  if (size <= 0) {
-    return {};
-  }
-  std::vector<uint8_t> data(static_cast<size_t>(size));
-  file.seekg(0);
-  file.read(reinterpret_cast<char*>(data.data()), data.size());
-  if (!file) {
-    return {};
-  }
-  return data;
-}
-
 void GameListPanel::ProcessIconChunk(size_t start, int gen) {
   if (gen != icon_load_generation_) {
     return;
@@ -581,7 +562,8 @@ void GameListPanel::ProcessIconChunk(size_t start, int gen) {
     if (entry.icon.IsOk()) {
       continue;
     }
-    std::vector<uint8_t> data = ReadIconFile(library->IconPath(entry.title_id));
+    std::vector<uint8_t> data =
+        xe::filesystem::ReadAllBytes(library->IconPath(entry.title_id));
     if (data.empty()) {
       continue;
     }

@@ -11,7 +11,6 @@
 
 #include <array>
 #include <cstring>
-#include <fstream>
 
 #include <wx/button.h>
 #include <wx/checkbox.h>
@@ -241,31 +240,11 @@ int CurrentValue(wxChoice* combo, const std::vector<int>& values,
   return values[sel];
 }
 
-bool IsPng(const std::filesystem::path& path) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f.is_open()) {
-    return false;
-  }
-  unsigned char sig[8];
-  f.read(reinterpret_cast<char*>(sig), 8);
-  if (f.gcount() != 8) {
-    return false;
-  }
-  static const unsigned char kPngSig[8] = {0x89, 0x50, 0x4E, 0x47,
-                                           0x0D, 0x0A, 0x1A, 0x0A};
-  return std::memcmp(sig, kPngSig, 8) == 0;
-}
-
-std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f.is_open()) {
-    return {};
-  }
-  f.seekg(0, std::ios::end);
-  std::vector<uint8_t> data(f.tellg());
-  f.seekg(0, std::ios::beg);
-  f.read(reinterpret_cast<char*>(data.data()), data.size());
-  return data;
+bool IsPngSignature(const std::vector<uint8_t>& bytes) {
+  static constexpr uint8_t kPngSig[8] = {0x89, 0x50, 0x4E, 0x47,
+                                         0x0D, 0x0A, 0x1A, 0x0A};
+  return bytes.size() >= sizeof(kPngSig) &&
+         std::memcmp(bytes.data(), kPngSig, sizeof(kPngSig)) == 0;
 }
 
 }  // namespace
@@ -589,12 +568,12 @@ void ProfileEditorDialog::OnChangeIcon() {
     return;
   }
   std::filesystem::path path(dlg.GetPath().wc_str());
-  if (!IsPng(path)) {
+  auto bytes = xe::filesystem::ReadAllBytes(path);
+  if (!IsPngSignature(bytes)) {
     wxMessageBox(_("Selected file is not a valid PNG image."),
                  _("Invalid file"), wxOK | wxICON_WARNING, this);
     return;
   }
-  auto bytes = ReadFileBytes(path);
   // Quick dimension check: decode to validate 64x64 or 32x32.
   wxMemoryInputStream stream(bytes.data(), bytes.size());
   wxImage img;

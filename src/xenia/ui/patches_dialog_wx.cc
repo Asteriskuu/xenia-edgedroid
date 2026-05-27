@@ -9,9 +9,6 @@
 
 #include "xenia/ui/patches_dialog_wx.h"
 
-#include <fstream>
-#include <sstream>
-
 #include <wx/checkbox.h>
 #include <wx/scrolwin.h>
 #include <wx/sizer.h>
@@ -20,6 +17,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 
 #include "xenia/app/emulator_window.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/emulator.h"
 
 namespace xe {
@@ -46,12 +44,10 @@ PatchesDialog::PatchesDialog(wxWindow* parent, EmulatorWindow* emulator_window,
   }
 
   std::string source_text;
-  if (!storage_path.empty() && std::filesystem::exists(storage_path)) {
-    std::ifstream f(storage_path, std::ios::binary);
-    std::stringstream ss;
-    ss << f.rdbuf();
-    source_text = ss.str();
-  } else {
+  if (!storage_path.empty()) {
+    source_text = xe::filesystem::ReadAllText(storage_path);
+  }
+  if (source_text.empty()) {
     source_text = std::move(bundled.toml_content);
   }
 

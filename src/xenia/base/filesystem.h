@@ -52,6 +52,15 @@ std::error_code CreateFolder(const std::filesystem::path& path);
 // Creates an empty file at the given path, overwriting if it exists.
 bool CreateEmptyFile(const std::filesystem::path& path);
 
+// Reads the entire file at the given path as a byte buffer.
+// Returns an empty vector on open/read failure or for empty files.
+std::vector<uint8_t> ReadAllBytes(const std::filesystem::path& path);
+
+// Reads the entire file at the given path as a text string (binary mode; the
+// caller gets any \r bytes verbatim). Returns an empty string on open failure
+// or for empty files.
+std::string ReadAllText(const std::filesystem::path& path);
+
 // Opens the file at the given path with the specified mode.
 // This behaves like fopen and the returned handle can be used with stdio.
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode);

@@ -9,8 +9,6 @@
 #include "xenia/patcher/patch_db.h"
 
 #include <algorithm>
-#include <fstream>
-#include <sstream>
 #include <unordered_map>
 
 #include "xenia/base/cvar.h"
@@ -49,13 +47,11 @@ void PatchDB::LoadPatches() {
     if (!std::regex_match(filename, patch_filename_regex_)) {
       continue;
     }
-    std::ifstream f(fi.path / fi.name, std::ios::binary);
-    if (!f.is_open()) {
+    std::string contents = xe::filesystem::ReadAllText(fi.path / fi.name);
+    if (contents.empty()) {
       continue;
     }
-    std::stringstream ss;
-    ss << f.rdbuf();
-    PatchFileEntry loaded = ReadPatchFromString(filename, ss.str());
+    PatchFileEntry loaded = ReadPatchFromString(filename, contents);
     if (loaded.title_id != -1) {
       loaded.filename = std::move(filename);
       loaded_patches_.push_back(std::move(loaded));

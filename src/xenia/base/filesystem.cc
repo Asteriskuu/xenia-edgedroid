@@ -9,10 +9,47 @@
 
 #include "xenia/base/filesystem.h"
 
+#include <fstream>
+#include <ios>
+
 #include "xenia/base/string_util.h"
 
 namespace xe {
 namespace filesystem {
+
+std::vector<uint8_t> ReadAllBytes(const std::filesystem::path& path) {
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  if (!f) {
+    return {};
+  }
+  const std::streamoff size = f.tellg();
+  if (size <= 0) {
+    return {};
+  }
+  std::vector<uint8_t> data(static_cast<size_t>(size));
+  f.seekg(0);
+  if (!f.read(reinterpret_cast<char*>(data.data()), data.size())) {
+    return {};
+  }
+  return data;
+}
+
+std::string ReadAllText(const std::filesystem::path& path) {
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  if (!f) {
+    return {};
+  }
+  const std::streamoff size = f.tellg();
+  if (size <= 0) {
+    return {};
+  }
+  std::string data(static_cast<size_t>(size), '\0');
+  f.seekg(0);
+  if (!f.read(data.data(), data.size())) {
+    return {};
+  }
+  return data;
+}
 
 bool CreateParentFolder(const std::filesystem::path& path) {
   if (path.has_parent_path()) {
