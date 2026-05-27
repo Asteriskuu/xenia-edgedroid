@@ -592,10 +592,23 @@ int main(int argc, char** argv) {
       std::set<std::string> seen;
       size_t pos = 0;
       while ((pos = pp.find("#line ", pos)) != std::string::npos) {
+        // FXC emits two forms: `#line N "path"` (file change) and `#line N`
+        // (line reset, no filename). Constrain the path search to the current
+        // line so a no-filename directive doesn't grab a `"..."` literal from
+        // later shader code (e.g. `[domain("quad")]`).
+        size_t eol = pp.find('\n', pos);
         size_t quote = pp.find('"', pos);
-        if (quote == std::string::npos) break;
+        if (quote == std::string::npos ||
+            (eol != std::string::npos && quote > eol)) {
+          pos += 6;
+          continue;
+        }
         size_t end = pp.find('"', quote + 1);
-        if (end == std::string::npos) break;
+        if (end == std::string::npos ||
+            (eol != std::string::npos && end > eol)) {
+          pos += 6;
+          continue;
+        }
         std::string path = pp.substr(quote + 1, end - quote - 1);
         // FXC emits paths with escaped backslashes on Windows — unescape.
         std::string unescaped;
