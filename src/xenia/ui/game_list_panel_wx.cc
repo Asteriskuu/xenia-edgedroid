@@ -1060,7 +1060,10 @@ void GameListPanel::OnItemContextMenu(wxDataViewEvent& event) {
               title_id));
         },
         master->GetId());
-    menu.AppendSubMenu(compat, _("Compatibility"));
+    auto* compat_item = menu.AppendSubMenu(compat, _("Compatibility"));
+    if (GetCompatState(entry.title_id) == CompatState::kUnknown) {
+      compat_item->Enable(false);
+    }
 
     menu.AppendSeparator();
     auto* remove = menu.Append(wxID_ANY, _("Remove from list"));
