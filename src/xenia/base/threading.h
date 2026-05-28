@@ -497,6 +497,52 @@ class Thread : public WaitHandle {
   std::string name_;
 };
 
+// A stackful cooperative fiber: an independent call stack + register context
+// that runs on whatever host thread switches into it. Fibers are scheduled
+// cooperatively — control only moves between them at explicit SwitchTo()
+// calls — which is what lets the guest scheduler serialize guest execution.
+//
+// Backed by Boost.Context (fcontext_t). Unlike Thread, a Fiber is not a host
+// wait object; the guest scheduler tracks blocked fibers itself.
+class Fiber {
+ public:
+  struct CreationParameters {
+    size_t stack_size = 4_MiB;
+  };
+
+  // Creates a suspended fiber that will run |start_routine| the first time it
+  // is switched to. The routine runs on the host thread that performs that
+  // switch.
+  static std::unique_ptr<Fiber> Create(CreationParameters params,
+                                       std::function<void()> start_routine);
+
+  // Wraps the calling host thread's current stack as a Fiber so other fibers
+  // can switch back to it. Must be called on the thread that will host fibers,
+  // before switching away. Establishes the calling context as the current
+  // fiber.
+  static std::unique_ptr<Fiber> CreateFromThread();
+
+  // Returns the fiber currently executing on this host thread, or nullptr if
+  // the thread has not been adopted via CreateFromThread()/a switch.
+  static Fiber* GetCurrentFiber();
+
+  virtual ~Fiber() = default;
+
+  // Switches execution from the current fiber to this one. Returns (on the
+  // calling fiber) when some other fiber later switches back to it.
+  virtual void SwitchTo() = 0;
+
+  // Marks a fiber whose start routine has returned so teardown does not try to
+  // resume it. Switching to a terminated fiber is undefined.
+  virtual void SetTerminated() = 0;
+
+  virtual void set_name(std::string name) { name_ = std::move(name); }
+  const std::string& name() const { return name_; }
+
+ protected:
+  std::string name_;
+};
+
 }  // namespace threading
 }  // namespace xe
 

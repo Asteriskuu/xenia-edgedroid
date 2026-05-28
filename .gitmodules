@@ -127,3 +127,6 @@
 	path = third_party/SDL3
 	url = https://github.com/libsdl-org/SDL.git
 	ignore = dirty
+[submodule "third_party/boost_context/context"]
+	path = third_party/boost_context/context
+	url = https://github.com/boostorg/context.git

@@ -91,6 +91,15 @@ file(GLOB_RECURSE _capstone_all_c "capstone/*.c")
 set_source_files_properties(${_capstone_all_c} PROPERTIES LANGUAGE C)
 
 # ==============================================================================
+# boost_context (fcontext_t fiber context switching)
+#
+# In its own subdirectory because it builds assembly: the project's global
+# C/C++ compile options (/Zc:*, /arch:AVX, ...) are not valid for ml64 and
+# silently break the MASM build, so that subdir clears inherited COMPILE_OPTIONS.
+# ==============================================================================
+add_subdirectory(boost_context)
+
+# ==============================================================================
 # cxxopts (header-only)
 # ==============================================================================
 add_library(cxxopts INTERFACE)
