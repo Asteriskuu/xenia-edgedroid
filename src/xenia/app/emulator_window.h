@@ -10,6 +10,7 @@
 #ifndef XENIA_APP_EMULATOR_WINDOW_H_
 #define XENIA_APP_EMULATOR_WINDOW_H_
 
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -61,6 +62,7 @@ class EmulatorWindow {
       uint32_t height);
 
   std::unique_ptr<xe::threading::Thread> Gamepad_HotKeys_Listener;
+  std::atomic<bool> hotkeys_listener_running_ = {false};
 
   static constexpr int64_t diff_in_ms(
       const steady_clock::time_point t1,
