@@ -151,10 +151,13 @@ AudioMediaPlayer::AudioMediaPlayer(apu::AudioSystem* audio_system,
 
 AudioMediaPlayer::~AudioMediaPlayer() {
   Stop();
-  // Stop worker before fences get destroyed; worker waits on resume_fence_.
+  // Thread::reset() only closes the handle; must wait for the worker to exit.
   worker_running_ = false;
   resume_fence_.Signal();
-  worker_thread_.reset();
+  if (worker_thread_) {
+    xe::threading::Wait(worker_thread_.get(), false);
+    worker_thread_.reset();
+  }
   DeleteDriver();
 };
 
