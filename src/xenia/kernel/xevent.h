@@ -45,6 +45,7 @@ class XEvent : public XObject {
 
  protected:
   xe::threading::WaitHandle* GetWaitHandle() override { return event_.get(); }
+  void WaitCallback() override;
 
  private:
   bool manual_reset_ = false;

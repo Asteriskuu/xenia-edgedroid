@@ -36,6 +36,11 @@ class XMutant : public XObject {
   static object_ref<XMutant> Restore(KernelState* kernel_state,
                                      ByteStream* stream);
 
+  // Mark every mutant in |thread|'s mutants_list abandoned and unlink it.
+  // Called from XThread::Exit/Terminate.
+  static void AbandonAllOwnedByThread(KernelState* kernel_state,
+                                      XThread* thread);
+
  protected:
   xe::threading::WaitHandle* GetWaitHandle() override { return mutant_.get(); }
   void WaitCallback() override;
@@ -45,6 +50,9 @@ class XMutant : public XObject {
 
   std::unique_ptr<xe::threading::Mutant> mutant_;
   std::atomic<XThread*> owning_thread_{nullptr};
+  // Mutant::Release() doesn't report count-to-zero, so we track recursion
+  // ourselves. Only the current owner mutates this -- no synchronization.
+  uint32_t recursion_count_ = 0;
 };
 
 }  // namespace kernel

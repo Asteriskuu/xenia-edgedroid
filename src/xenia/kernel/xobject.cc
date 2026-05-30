@@ -188,6 +188,35 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
   }
 }
 
+namespace {
+// Mirror NT-observable KTHREAD wait fields so guest code that inline-reads
+// them gets live values. Returns null for non-guest host callers.
+X_KTHREAD* WaitEnter(uint32_t wait_reason, uint32_t processor_mode,
+                     uint32_t alertable) {
+  XThread* self = XThread::GetCurrentThread();
+  if (!self) {
+    return nullptr;
+  }
+  auto* kthread = self->guest_object<X_KTHREAD>();
+  auto* context = self->thread_state()->context();
+  auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+  kthread->thread_state = KTHREAD_STATE_WAITING;
+  kthread->wait_irql = kpcr->current_irql;
+  kthread->wait_reason = static_cast<uint8_t>(wait_reason);
+  kthread->processor_mode = static_cast<uint8_t>(processor_mode);
+  kthread->alertable = alertable ? 1 : 0;
+  return kthread;
+}
+
+void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
+  if (!kthread) {
+    return;
+  }
+  kthread->thread_state = KTHREAD_STATE_RUNNING;
+  kthread->wait_result = result;
+}
+}  // namespace
+
 X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                        uint32_t alertable, uint64_t* opt_timeout) {
   auto wait_handle = GetWaitHandle();
@@ -201,6 +230,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
 
+  X_KTHREAD* kthread = WaitEnter(wait_reason, processor_mode, alertable);
   auto result =
       xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
 
@@ -213,16 +243,20 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
       }
       if (result == xe::threading::WaitResult::kSuccess) {
         WaitCallback();
+        WaitExit(kthread, X_STATUS_SUCCESS);
         return X_STATUS_SUCCESS;
       }
+      WaitExit(kthread, X_STATUS_USER_APC);
       return X_STATUS_USER_APC;
     }
     case xe::threading::WaitResult::kTimeout:
       xe::threading::MaybeYield();
+      WaitExit(kthread, X_STATUS_TIMEOUT);
       return X_STATUS_TIMEOUT;
     default:
     case xe::threading::WaitResult::kAbandoned:
     case xe::threading::WaitResult::kFailed:
+      WaitExit(kthread, X_STATUS_ABANDONED_WAIT_0);
       return X_STATUS_ABANDONED_WAIT_0;
   }
 }
@@ -235,6 +269,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
 
+  X_KTHREAD* kthread = WaitEnter(wait_reason, processor_mode, alertable);
   auto result = xe::threading::SignalAndWait(
       signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
       alertable ? true : false, timeout_ms);
@@ -248,16 +283,20 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
       }
       if (result == xe::threading::WaitResult::kSuccess) {
         wait_object->WaitCallback();
+        WaitExit(kthread, X_STATUS_SUCCESS);
         return X_STATUS_SUCCESS;
       }
+      WaitExit(kthread, X_STATUS_USER_APC);
       return X_STATUS_USER_APC;
     }
     case xe::threading::WaitResult::kTimeout:
       xe::threading::MaybeYield();
+      WaitExit(kthread, X_STATUS_TIMEOUT);
       return X_STATUS_TIMEOUT;
     default:
     case xe::threading::WaitResult::kAbandoned:
     case xe::threading::WaitResult::kFailed:
+      WaitExit(kthread, X_STATUS_ABANDONED_WAIT_0);
       return X_STATUS_ABANDONED_WAIT_0;
   }
 }
@@ -278,6 +317,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
 
+  X_KTHREAD* kthread = WaitEnter(wait_reason, processor_mode, alertable);
   X_STATUS status;
   uint32_t boost_increment = 0;
   if (wait_type) {
@@ -342,6 +382,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
       current_thread->BoostOnWake(boost_increment);
     }
   }
+  WaitExit(kthread, status);
   return status;
 }
 
@@ -472,11 +513,8 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
         XELOGW("GetNativeObject: Unimplemented object type {}", as_type);
         result = nullptr;
     }
-    // Stash pointer in struct.
-    // FIXME: This assumes the object contains a dispatch header (some don't!)
-    if (object) {
-      StashHandle(header, object->handle());
-    }
+    // InitializeNative paths call SetNativePointer, which stashes the handle.
+    // New object types (when implemented) must do the same.
     result = object;
   }
 

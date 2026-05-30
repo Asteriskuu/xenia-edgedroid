@@ -497,9 +497,13 @@ X_STATUS XThread::Exit(int exit_code) {
   auto kthread = guest_object<X_KTHREAD>();
   auto cpu_context = thread_state_->context();
   kthread->terminated = 1;
+  kthread->thread_state = KTHREAD_STATE_TERMINATED;
+  // Block any racing KeInsertQueueApc from another thread before we drain.
+  kthread->may_queue_apcs = 0;
 
   // TODO(benvanik): dispatch events? waiters? etc?
   RundownAPCs();
+  XMutant::AbandonAllOwnedByThread(kernel_state(), this);
 
   // Set exit code.
   kthread->header.signal_state = 1;
@@ -545,6 +549,10 @@ X_STATUS XThread::Terminate(int exit_code) {
   X_KTHREAD* thread = guest_object<X_KTHREAD>();
   thread->header.signal_state = 1;
   thread->exit_status = exit_code;
+  thread->terminated = 1;
+  thread->thread_state = KTHREAD_STATE_TERMINATED;
+  thread->may_queue_apcs = 0;
+  XMutant::AbandonAllOwnedByThread(kernel_state(), this);
 
   // Notify processor of our exit.
   emulator()->processor()->OnThreadExit(thread_id_);
@@ -568,6 +576,7 @@ X_STATUS XThread::Terminate(int exit_code) {
 void XThread::Execute() {
   XELOGD("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X})",
          thread_id_, handle(), thread_name_, thread_->system_id());
+  guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_RUNNING;
   // Let the kernel know we are starting.
   kernel_state()->OnThreadExecute(this);
 

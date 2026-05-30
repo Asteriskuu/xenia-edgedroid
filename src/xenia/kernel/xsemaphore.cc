@@ -11,6 +11,8 @@
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/memory.h"
 
 namespace xe {
 namespace kernel {
@@ -24,6 +26,11 @@ bool XSemaphore::Initialize(int32_t initial_count, int32_t maximum_count) {
   assert_false(semaphore_);
 
   CreateNative(sizeof(X_KSEMAPHORE));
+  auto* ksem = memory()->TranslateVirtual<X_KSEMAPHORE*>(guest_object());
+  // Don't touch header.wait_list: SetNativePointer stashes the handle there.
+  ksem->header.type = 5;  // DISPATCHER_SEMAPHORE
+  ksem->header.signal_state = initial_count;
+  ksem->limit = maximum_count;
 
   maximum_count_ = maximum_count;
   semaphore_ = xe::threading::Semaphore::Create(initial_count, maximum_count);
@@ -37,7 +44,11 @@ bool XSemaphore::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
   maximum_count_ = semaphore->limit;
   semaphore_ = xe::threading::Semaphore::Create(semaphore->header.signal_state,
                                                 semaphore->limit);
-  return !!semaphore_;
+  if (!semaphore_) {
+    return false;
+  }
+  SetNativePointer(memory()->HostToGuestVirtual(native_ptr), true);
+  return true;
 }
 
 bool XSemaphore::ReleaseSemaphore(int32_t release_count,
@@ -47,7 +58,19 @@ bool XSemaphore::ReleaseSemaphore(int32_t release_count,
   if (out_previous_count) {
     *out_previous_count = previous_count;
   }
+  if (success) {
+    memory()
+        ->TranslateVirtual<X_KSEMAPHORE*>(guest_object())
+        ->header.signal_state = previous_count + release_count;
+  }
   return success;
+}
+
+void XSemaphore::WaitCallback() {
+  auto& signal_state = memory()
+                           ->TranslateVirtual<X_KSEMAPHORE*>(guest_object())
+                           ->header.signal_state;
+  signal_state = signal_state - 1;
 }
 
 bool XSemaphore::Save(ByteStream* stream) {
