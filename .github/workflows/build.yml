@@ -1,9 +1,8 @@
 name: Build (reusable)
 
-# Callable from CI.yml. Permissions are set by the caller so one set of build
-# logic can run either with write access to the sccache cache (from the trusted
-# edge branch) or read-only (from feature branches and PRs, where sccache
-# self-demotes to read-only on its startup write probe).
+# Callable from CI.yml. The caller grants `actions: write` so sccache can
+# populate the GHA cache; fork PRs get a read-only token from GitHub anyway, so
+# sccache self-demotes to read-only on its startup write probe there.
 on:
   workflow_call:
 
@@ -185,8 +184,17 @@ jobs:
           echo "::error::MetalToolchain download failed after 5 attempts"
           exit 1
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@main
       - name: Build
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          CMAKE_C_COMPILER_LAUNCHER: sccache
+          CMAKE_CXX_COMPILER_LAUNCHER: sccache
         run: ./xenia-build.py build --config=Release --target=xenia-app
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
       - name: Prepare artifacts
         id: prepare_artifacts
@@ -259,8 +267,17 @@ jobs:
           echo "::error::MetalToolchain download failed after 5 attempts"
           exit 1
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@main
       - name: Build
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          CMAKE_C_COMPILER_LAUNCHER: sccache
+          CMAKE_CXX_COMPILER_LAUNCHER: sccache
         run: ./xenia-build.py build --config=Release --target=xenia-app --target-arch=x64
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
       - name: Prepare artifacts
         id: prepare_artifacts

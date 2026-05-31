@@ -16,33 +16,24 @@ on:
 # No workflow-level `permissions:` block; each job declares its own minimum
 # set explicitly. Workflow-level restrictions can cap job-level overrides in
 # ways that break release creation, so this keeps the release job's
-# `contents: write` intact while still locking sccache down to read-only on
-# non-edge branches.
+# `contents: write` intact.
 
 jobs:
-  # Trusted builds: pushes to edge can write to the sccache cache.
-  build-trusted:
+  # One build job for every ref, each granted `actions: write` so any branch can
+  # populate the sccache cache. Cache writes cover only third_party (stable
+  # across branches), keeping per-branch entries small and isolated. Fork PRs
+  # get a read-only token from GitHub regardless, so sccache self-demotes to
+  # read-only on its startup write probe.
+  build:
     name: Build
-    if: github.ref == 'refs/heads/edge'
     permissions:
       contents: read
       actions: write
     uses: ./.github/workflows/build.yml
 
-  # Read-only builds: feature branches, PRs, and anything else. sccache
-  # reads from edge's cache via the default-branch fallback but cannot
-  # write new entries.
-  build-readonly:
-    name: Build
-    if: github.ref != 'refs/heads/edge'
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/build.yml
-
   release:
     name: Create Release
-    needs: build-trusted
+    needs: build
     # Runs on macOS so we can lipo the two per-arch app bundles into a
     # universal binary here rather than in a separate build job. lipo,
     # codesign, hdiutil, gh, and 7z are all available on macOS runners.
