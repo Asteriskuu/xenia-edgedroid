@@ -522,13 +522,18 @@ def fetch_data_repos():
 
 
 def get_cc(cc=None):
-    if sys.platform == "linux":
-        if os.environ.get("CC"):
-            if "gcc" in os.environ.get("CC"):
-                return "gcc"
-        return "clang"
-    if sys.platform == "win32":
-        return "msc"
+    """Resolve the (C, C++) compiler binaries to configure CMake with.
+
+    An explicit --cc family ("clang"/"gcc") maps to its driver pair;
+    otherwise $CC/$CXX are honored verbatim so versioned names like
+    clang-21 / clang++-21 survive. Defaults to clang.
+    """
+    families = {"clang": ("clang", "clang++"), "gcc": ("gcc", "g++")}
+    if cc in families:
+        return families[cc]
+    if cc:
+        return (cc, cc + "++")
+    return (os.environ.get("CC", "clang"), os.environ.get("CXX", "clang++"))
 
 def get_clang_format_binary():
     # Use pre-vsvars PATH so VS's bundled Llvm clang-format doesn't shadow the user's.
@@ -613,10 +618,7 @@ def run_cmake_configure(cc=None, generator=None, build_tests=False,
         "-G", generator,
     ]
     if sys.platform != "win32":
-        if not cc:
-            cc = get_cc(cc=cc)
-        c_compiler = cc or os.environ.get("CC", "clang")
-        cxx_compiler = (cc + "++") if cc else os.environ.get("CXX", "clang++")
+        c_compiler, cxx_compiler = get_cc(cc)
         args += [
             f"-DCMAKE_C_COMPILER={c_compiler}",
             f"-DCMAKE_CXX_COMPILER={cxx_compiler}",

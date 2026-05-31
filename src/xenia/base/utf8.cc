@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <tuple>
 
 // https://github.com/nemtrif/utfcpp/issues/85
 #if defined(_MSVC_LANG) && _MSVC_LANG > __cplusplus

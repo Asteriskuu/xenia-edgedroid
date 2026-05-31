@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <tuple>
 
 #include "third_party/dxbc/DXBCChecksum.h"
 #include "third_party/fmt/include/fmt/xchar.h"

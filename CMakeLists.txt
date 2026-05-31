@@ -358,6 +358,13 @@ else()
 
     link_libraries(stdc++fs dl lz4 m pthread rt)
 
+    # Statically link the C++ runtime so the AppImage carries no GLIBCXX
+    # dependency: we build against a newer libstdc++ (g++-14, for Clang-
+    # compatible <ranges> and <chrono>) than the oldest target system ships,
+    # and baking it in keeps the only runtime floor glibc itself (from the
+    # jammy build host).
+    add_link_options(-static-libstdc++ -static-libgcc)
+
     # Link group so executables resolve circular static-lib deps.
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--start-group")
     set(CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} -Wl,--end-group")
@@ -402,8 +409,12 @@ else()
     endif()
     # Use llvm-ar / llvm-ranlib when available to avoid LTO plugin
     # version mismatch between system ar/ranlib and clang's bitcode.
-    find_program(LLVM_AR NAMES llvm-ar)
-    find_program(LLVM_RANLIB NAMES llvm-ranlib)
+    # apt.llvm.org ships only versioned binaries (llvm-ar-21) with no
+    # unversioned symlink, so search the compiler-major name first; a bare
+    # llvm-ar search falls back to GNU ar, which can't index ThinLTO bitcode.
+    string(REGEX MATCH "^[0-9]+" _xe_clang_major "${CMAKE_CXX_COMPILER_VERSION}")
+    find_program(LLVM_AR NAMES "llvm-ar-${_xe_clang_major}" llvm-ar)
+    find_program(LLVM_RANLIB NAMES "llvm-ranlib-${_xe_clang_major}" llvm-ranlib)
     if(LLVM_AR)
       set(CMAKE_AR "${LLVM_AR}" CACHE FILEPATH "" FORCE)
     endif()

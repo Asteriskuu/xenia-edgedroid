@@ -12,6 +12,7 @@
 
 #include <cstring>
 #include <string>
+#include <tuple>
 #include <type_traits>
 
 #include "xenia/base/byte_order.h"
