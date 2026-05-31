@@ -5862,20 +5862,34 @@ void D3D12CommandProcessor::EnsureZPDQueryResources() {
   zpd_host_query_pool_->EnsureInitialized(GetD3D12Provider(),
                                           kZPDQueryPoolCapacity, can_recreate,
                                           initialize_rov_counter);
+  ID3D12Resource* rov_counter_buffer = nullptr;
+  uint32_t rov_counter_capacity = 0;
+  if (zpd_host_query_pool_->rov_counter_initialized()) {
+    rov_counter_buffer = zpd_host_query_pool_->rov_counter_buffer();
+    rov_counter_capacity = zpd_host_query_pool_->capacity();
+  }
   if (bindless_resources_used_) {
     D3D12_CPU_DESCRIPTOR_HANDLE handle =
         GetD3D12Provider().OffsetViewDescriptor(
             view_bindless_heap_cpu_start_,
             uint32_t(SystemBindlessView::kZpdROVCounterRawUAV));
-    if (zpd_host_query_pool_->rov_counter_initialized()) {
+    if (rov_counter_buffer) {
       ui::d3d12::util::CreateBufferRawUAV(
-          GetD3D12Provider().GetDevice(), handle,
-          zpd_host_query_pool_->rov_counter_buffer(),
-          sizeof(uint32_t) * zpd_host_query_pool_->capacity());
+          GetD3D12Provider().GetDevice(), handle, rov_counter_buffer,
+          sizeof(uint32_t) * rov_counter_capacity);
     } else {
       ui::d3d12::util::CreateBufferRawUAV(GetD3D12Provider().GetDevice(),
                                           handle, nullptr, 0);
     }
+  } else if (bindful_zpd_rov_counter_buffer_ != rov_counter_buffer ||
+             bindful_zpd_rov_counter_capacity_ != rov_counter_capacity) {
+    // If the ROV counter appears or changes after a bindful page was built,
+    // an old page can end up counting into a null/stale UAV. Invalidate it
+    // and let the normal bindful rebuild pick up the current counter.
+    bindful_zpd_rov_counter_buffer_ = rov_counter_buffer;
+    bindful_zpd_rov_counter_capacity_ = rov_counter_capacity;
+    draw_view_bindful_heap_index_ =
+        ui::d3d12::D3D12DescriptorHeapPool::kHeapIndexInvalid;
   }
 }
 

@@ -1186,7 +1186,6 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
   // QueryBatch titles can have multiple pending sentinels in a row and don't
   // necessarily update in an order we currently observe.
   bool guest_marks_end = report && XenosZPDReport::HasPendingSentinel(report);
-  uint32_t slot_base = XenosZPDReport::GetSlotBase(report_address);
   bool logical_active = zpd_active_segment_.logical_active;
 
   if (cvars::occlusion_query_log && report) {
@@ -1214,11 +1213,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
     return true;
   }
 
-  if (COMMAND_PROCESSOR::GetZPDMode() != ZPDMode::kFake) {
+  if (COMMAND_PROCESSOR::GetZPDMode() != ZPDMode::kFake &&
+      !zpd_force_fake_fallback_) {
     if (logical_active && is_end_record) {
-      if (slot_base == zpd_active_segment_.slot_base) {
-        COMMAND_PROCESSOR::EndZPDReport(report_address, false);
-      }
+      COMMAND_PROCESSOR::EndZPDReport(report_address, false);
       return true;
     }
     if (is_begin_record) {

@@ -517,6 +517,8 @@ class D3D12CommandProcessor final : public CommandProcessor {
     zpd_active_query_index_ = UINT32_MAX;
     zpd_active_query_generation_ = 0;
     zpd_active_query_is_rov_ = false;
+    bindful_zpd_rov_counter_buffer_ = nullptr;
+    bindful_zpd_rov_counter_capacity_ = 0;
     if (zpd_host_query_pool_) {
       zpd_host_query_pool_->Shutdown();
     }
@@ -596,6 +598,10 @@ class D3D12CommandProcessor final : public CommandProcessor {
   std::unique_ptr<D3D12RenderTargetCache> render_target_cache_;
 
   std::unique_ptr<D3D12ZPDQueryPool> zpd_host_query_pool_;
+  // Tracks the ROV counter buffer captured by the current bindful page so we
+  // can invalidate the page when the counter resource changes.
+  ID3D12Resource* bindful_zpd_rov_counter_buffer_ = nullptr;
+  uint32_t bindful_zpd_rov_counter_capacity_ = 0;
 
   std::unique_ptr<ui::d3d12::D3D12UploadBufferPool> constant_buffer_pool_;
 

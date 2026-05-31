@@ -94,11 +94,12 @@ DEFINE_int32(occlusion_query_fake_upper_threshold, 100,
 DEFINE_bool(occlusion_query_log, false,
             "Log occlusion query lifetime and summary stats.", "GPU");
 DEFINE_bool(
-    occlusion_query_fast_trust_report, false,
-    "Prefer the current query report over cached fast mode values.\n"
-    "Can improve occlusion accuracy in fast mode by reducing stale results,\n"
-    "but may also regress occlusion culling in titles that already have\n"
-    "issues with fast mode.",
+    occlusion_query_fast_preserve_cached_zero, false,
+    "Alternate fast ZPD behavior that allows saved zero results to be used "
+    "for unresolved fast writes instead of forcing them visible.\n"
+    "This can materially improve flare accuracy in titles that might otherwise "
+    "need strict mode, but it also tends to break occlusion culling in some "
+    "titles.",
     "GPU");
 DEFINE_int32(occlusion_query_querybatch_range, 0,
              "Range of fake sample count values to walk for titles using the\n"

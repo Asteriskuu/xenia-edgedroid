@@ -37,7 +37,7 @@ DECLARE_int32(occlusion_query_fake_upper_threshold);
 
 DECLARE_bool(occlusion_query_log);
 
-DECLARE_bool(occlusion_query_fast_trust_report);
+DECLARE_bool(occlusion_query_fast_preserve_cached_zero);
 
 DECLARE_int32(occlusion_query_querybatch_range);
 

@@ -355,6 +355,8 @@ class CommandProcessor {
     // Last known delta. Carried forward on forced close so slot doesn't
     // briefly look fully occluded.
     uint32_t cached_delta = 0;
+    // Distinguishes "we resolved to zero" from "we have no cached value yet".
+    bool has_cached_delta = false;
     bool ended = false;
   };
 
@@ -372,6 +374,7 @@ class CommandProcessor {
   struct PendingZPDSlot {
     ReportHandle report_handle = kInvalidReportHandle;
     uint32_t cached_delta = 0;
+    bool has_cached_delta = false;
   };
 
   // Logged by the backend every 100 frames if ZPD logging cvar is true.
@@ -466,6 +469,7 @@ class CommandProcessor {
     zpd_pending_retire_handle_ = kInvalidReportHandle;
     zpd_pending_retire_stalls_ = 0;
     zpd_pending_retire_start_ms_ = 0;
+    zpd_force_fake_fallback_ = false;
   }
 
 #include "pm4_command_processor_declare.h"
@@ -513,6 +517,11 @@ class CommandProcessor {
   std::unordered_map<uint32_t, uint32_t> fast_zpd_report_cached_values_;
 
   uint32_t querybatch_zpd_sample_count_ = UINT32_MAX;
+
+  // Sticky after host pool init failure. Forces EVENT_WRITE_ZPD onto the fake
+  // path so guests don't stall waiting on a pending sentinel that will never
+  // be written. Cleared by ResetZPDState.
+  bool zpd_force_fake_fallback_ = false;
 
   // Strict mode defers guest completion until the queued END has retired.
   ReportHandle zpd_pending_retire_handle_ = kInvalidReportHandle;
