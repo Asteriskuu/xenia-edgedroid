@@ -247,26 +247,49 @@ void QuickSettingsDialog::Build() {
     main_sizer->Add(box_sizer, 0, wxEXPAND | wxALL, 6);
   }
 
-  // ---- Audio ----
+#if XE_PLATFORM_LINUX
+  // ---- Linux launch options ----
   {
-    auto* box = new wxStaticBox(this, wxID_ANY, _("Audio"));
+    auto* box = new wxStaticBox(this, wxID_ANY, _("Linux"));
     auto* box_sizer = new wxStaticBoxSizer(box, wxVERTICAL);
     auto* grid = new wxFlexGridSizer(2, 6, 8);
     grid->AddGrowableCol(1, 1);
 
-    auto* apu = add_combo(box, "apu", find_options("apu"));
-    auto* apu_label = add_label(box, _("Audio Backend:"));
-    remember_label("apu", apu_label);
-    add_form_row(grid, apu_label, apu);
+    auto* mangohud = add_check(box, "use_mangohud");
+    auto* mangohud_label = add_label(box, _("MangoHUD overlay:"));
+    remember_label("use_mangohud", mangohud_label);
+    add_form_row(grid, mangohud_label, mangohud);
 
-    auto* volume = add_spin(box, "volume", 0, 100);
-    auto* volume_label = add_label(box, _("Default Volume:"));
-    remember_label("volume", volume_label);
-    add_form_row(grid, volume_label, volume);
+    auto* gamemode = add_check(box, "use_gamemode");
+    auto* gamemode_label = add_label(box, _("Feral GameMode:"));
+    remember_label("use_gamemode", gamemode_label);
+    add_form_row(grid, gamemode_label, gamemode);
 
     box_sizer->Add(grid, 1, wxEXPAND | wxALL, 6);
     main_sizer->Add(box_sizer, 0, wxEXPAND | wxALL, 6);
   }
+#elif XE_PLATFORM_MAC
+  // ---- macOS launch options ----
+  {
+    auto* box = new wxStaticBox(this, wxID_ANY, _("macOS"));
+    auto* box_sizer = new wxStaticBoxSizer(box, wxVERTICAL);
+    auto* grid = new wxFlexGridSizer(2, 6, 8);
+    grid->AddGrowableCol(1, 1);
+
+    auto* metal_hud = add_check(box, "use_metal_hud");
+    auto* metal_hud_label = add_label(box, _("Metal performance HUD:"));
+    remember_label("use_metal_hud", metal_hud_label);
+    add_form_row(grid, metal_hud_label, metal_hud);
+
+    auto* rosetta = add_check(box, "use_rosetta");
+    auto* rosetta_label = add_label(box, _("Run under Rosetta 2 (x86_64):"));
+    remember_label("use_rosetta", rosetta_label);
+    add_form_row(grid, rosetta_label, rosetta);
+
+    box_sizer->Add(grid, 1, wxEXPAND | wxALL, 6);
+    main_sizer->Add(box_sizer, 0, wxEXPAND | wxALL, 6);
+  }
+#endif
 
   // ---- Other ----
   {
@@ -549,11 +572,6 @@ void QuickSettingsDialog::Save() {
                        static_cast<int64_t>(std::stoull(opt.pending_value))));
       } catch (...) {
       }
-    } else if (name == "volume") {
-      try {
-        apply(var, toml::value(std::stoi(opt.pending_value)));
-      } catch (...) {
-      }
     } else if (name == "license_mask") {
       try {
         apply(var, toml::value(std::stoi(opt.pending_value)));
@@ -561,7 +579,9 @@ void QuickSettingsDialog::Save() {
       }
     } else if (name == "fullscreen" || name == "present_letterbox" ||
                name == "discord" || name == "use_dedicated_xma_thread" ||
-               name == "in_process_title_relaunch") {
+               name == "in_process_title_relaunch" || name == "use_mangohud" ||
+               name == "use_gamemode" || name == "use_metal_hud" ||
+               name == "use_rosetta") {
       apply(var, toml::value(opt.pending_value == "true"));
     } else if (ui::FindIntCvarEnumOptions(name)) {
       // Dropdown int cvar: convert the selected option name to its id.
