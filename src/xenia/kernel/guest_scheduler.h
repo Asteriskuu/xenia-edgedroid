@@ -55,6 +55,13 @@ class GuestScheduler {
   // the dispatcher pick the next ready thread.
   void YieldCurrentThread();
 
+  // Parks the running guest fiber in the blocked (waiting) list and yields.
+  // Returns once the dispatcher re-readies it -- after a short poll backoff or
+  // sooner if another thread becomes runnable -- so a cooperative wait can
+  // re-poll its host primitive. |deadline_ms| is an absolute host-uptime
+  // deadline used only to bound the dispatcher's idle sleep, or 0 for none.
+  void BlockCurrentThread(uint64_t deadline_ms);
+
   // Marks the running guest fiber finished; the dispatcher reclaims it (drops
   // the final handle once control is back on the idle fiber). Call immediately
   // before the final YieldToScheduler().
@@ -67,17 +74,35 @@ class GuestScheduler {
   KernelState* kernel_state() const { return kernel_state_; }
 
  private:
+  // Single-thread busy-poll backoff: when no thread is ready but some are
+  // blocked, the dispatcher sleeps at most this long before re-polling them, so
+  // a signal from another host thread (GPU, I/O, ...) is observed promptly
+  // without spinning a core. This is the wake-latency floor for the cooperative
+  // waits until a proper wake mechanism replaces the busy-poll.
+  static constexpr uint64_t kPollBackoffMs = 1;
+
   XThread* DequeueReady();
   void SwitchTo(XThread* next);
   void RunLoop();
+  // Moves every blocked thread back onto the ready queue so it re-polls.
+  void RereadyBlocked();
+  // Unlinks |thread| from a singly-linked list (ready_next), fixing up tail.
+  static void UnlinkLocked(XThread*& head, XThread*& tail, XThread* thread);
+  // ms the dispatcher should sleep before re-polling blocked threads, capped to
+  // the nearest blocked deadline. Caller must hold lock_.
+  uint64_t ComputeBackoffLocked(uint64_t now_ms) const;
 
   KernelState* kernel_state_;
 
-  // Guards the ready queue. Never held across a fiber switch.
+  // Guards the ready and blocked lists. Never held across a fiber switch.
   std::mutex lock_;
   // Intrusive ready FIFO, linked through XThread::scheduler_links().ready_next.
   XThread* ready_head_ = nullptr;
   XThread* ready_tail_ = nullptr;
+  // Intrusive list of fibers blocked in a cooperative wait, linked through the
+  // same ready_next (a thread is in at most one list).
+  XThread* blocked_head_ = nullptr;
+  XThread* blocked_tail_ = nullptr;
   // The fiber the dispatcher has switched into (null while on the idle fiber).
   XThread* current_thread_ = nullptr;
   // A thread that exited on its fiber, awaiting reclaim by the dispatch loop

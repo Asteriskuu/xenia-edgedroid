@@ -455,6 +455,11 @@ class XThread : public XObject, public cpu::Thread {
   void EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
                   uint32_t arg1, uint32_t arg2);
 
+  // True if this thread has a user-mode APC queued (or pending). Used by the
+  // cooperative scheduler's alertable waits to return USER_APC, the same way a
+  // host alertable wait wakes on a queued APC.
+  bool HasPendingUserApc();
+
   int32_t priority() const { return priority_; }
   int32_t QueryPriority();
   void SetPriority(int32_t increment);
@@ -513,11 +518,13 @@ class XThread : public XObject, public cpu::Thread {
   xe::threading::Fiber* fiber() const { return fiber_.get(); }
 
   // Intrusive scheduler links, owned exclusively by GuestScheduler and only
-  // touched under its lock. Embedding them here keeps the ready-queue
-  // operations allocation-free. A thread is in at most one ready list.
+  // touched under its lock. Embedding them here keeps the queue operations
+  // allocation-free. A thread is in at most one of the ready or blocked lists.
   struct SchedulerLinks {
-    XThread* ready_next = nullptr;  // singly-linked ready FIFO
+    XThread* ready_next = nullptr;  // link for the ready OR blocked list
+    uint64_t wait_deadline_ms = 0;  // absolute host-uptime deadline, 0 = none
     bool queued = false;            // in the ready list
+    bool blocked = false;           // parked in the blocked (waiting) list
   };
   SchedulerLinks& scheduler_links() { return scheduler_links_; }
 

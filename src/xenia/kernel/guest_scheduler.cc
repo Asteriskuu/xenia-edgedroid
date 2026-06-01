@@ -9,9 +9,11 @@
 
 #include "xenia/kernel/guest_scheduler.h"
 
+#include <algorithm>
 #include <string>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
@@ -97,27 +99,34 @@ XThread* GuestScheduler::DequeueReady() {
   return thread;
 }
 
-void GuestScheduler::ForgetThread(XThread* thread) {
-  std::lock_guard<std::mutex> lock(lock_);
-  auto& links = thread->scheduler_links();
-  if (!links.queued) {
-    return;
-  }
-  XThread** link = &ready_head_;
+void GuestScheduler::UnlinkLocked(XThread*& head, XThread*& tail,
+                                  XThread* thread) {
+  XThread** link = &head;
   XThread* prev = nullptr;
   while (*link) {
     if (*link == thread) {
-      *link = links.ready_next;
-      if (ready_tail_ == thread) {
-        ready_tail_ = prev;
+      *link = thread->scheduler_links().ready_next;
+      if (tail == thread) {
+        tail = prev;
       }
-      break;
+      return;
     }
     prev = *link;
     link = &(*link)->scheduler_links().ready_next;
   }
+}
+
+void GuestScheduler::ForgetThread(XThread* thread) {
+  std::lock_guard<std::mutex> lock(lock_);
+  auto& links = thread->scheduler_links();
+  if (links.queued) {
+    UnlinkLocked(ready_head_, ready_tail_, thread);
+    links.queued = false;
+  } else if (links.blocked) {
+    UnlinkLocked(blocked_head_, blocked_tail_, thread);
+    links.blocked = false;
+  }
   links.ready_next = nullptr;
-  links.queued = false;
 }
 
 void GuestScheduler::SwitchTo(XThread* next) {
@@ -149,6 +158,60 @@ void GuestScheduler::NotifyThreadExited(XThread* thread) {
   exited_thread_ = thread;
 }
 
+void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms) {
+  XThread* self = XThread::GetCurrentThread();
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    auto& links = self->scheduler_links();
+    // self is currently running (in no list); park it on the blocked list.
+    links.blocked = true;
+    links.wait_deadline_ms = deadline_ms;
+    links.ready_next = nullptr;
+    if (blocked_tail_) {
+      blocked_tail_->scheduler_links().ready_next = self;
+    } else {
+      blocked_head_ = self;
+    }
+    blocked_tail_ = self;
+  }
+  self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_WAITING;
+  YieldToScheduler();
+}
+
+void GuestScheduler::RereadyBlocked() {
+  std::lock_guard<std::mutex> lock(lock_);
+  XThread* t = blocked_head_;
+  while (t) {
+    auto& links = t->scheduler_links();
+    XThread* next = links.ready_next;
+    links.blocked = false;
+    links.queued = true;
+    links.ready_next = nullptr;
+    if (ready_tail_) {
+      ready_tail_->scheduler_links().ready_next = t;
+    } else {
+      ready_head_ = t;
+    }
+    ready_tail_ = t;
+    t = next;
+  }
+  blocked_head_ = nullptr;
+  blocked_tail_ = nullptr;
+}
+
+uint64_t GuestScheduler::ComputeBackoffLocked(uint64_t now_ms) const {
+  uint64_t backoff = kPollBackoffMs;
+  for (XThread* t = blocked_head_; t; t = t->scheduler_links().ready_next) {
+    uint64_t deadline = t->scheduler_links().wait_deadline_ms;
+    if (deadline == 0) {
+      continue;  // no timeout on this waiter
+    }
+    uint64_t remaining = deadline > now_ms ? deadline - now_ms : 0;
+    backoff = std::min(backoff, remaining);
+  }
+  return backoff;
+}
+
 void GuestScheduler::RunLoop() {
   // Adopt this host thread's stack as the dispatcher's idle fiber.
   idle_fiber_ = xe::threading::Fiber::CreateFromThread();
@@ -156,22 +219,39 @@ void GuestScheduler::RunLoop() {
 
   while (!shutting_down_.load()) {
     XThread* next = DequeueReady();
-    if (!next) {
+    if (next) {
+      exited_thread_ = nullptr;
+      SwitchTo(next);
+      if (exited_thread_) {
+        // Safe to drop the final reference (which may destroy the XThread, and
+        // with it its Fiber): control is back on the idle fiber, the exited
+        // thread's fiber is suspended on its terminal YieldToScheduler, and the
+        // dispatcher holds no other reference to it. The fiber being destroyed
+        // is the one we just switched away from, never the one executing.
+        XThread* dead = exited_thread_;
+        exited_thread_ = nullptr;
+        dead->ReleaseHandle();
+      }
+      continue;
+    }
+
+    // No thread is ready. If some are blocked in a cooperative wait, sleep
+    // briefly (woken early by any MarkReady) then re-poll them; otherwise idle
+    // until something becomes runnable.
+    uint64_t backoff_ms;
+    bool have_blocked;
+    {
+      std::lock_guard<std::mutex> lock(lock_);
+      have_blocked = blocked_head_ != nullptr;
+      backoff_ms = ComputeBackoffLocked(Clock::QueryHostUptimeMillis());
+    }
+    if (!have_blocked) {
       xe::threading::Wait(ready_event_.get(), false);
       continue;
     }
-    exited_thread_ = nullptr;
-    SwitchTo(next);
-    if (exited_thread_) {
-      // Safe to drop the final reference (which may destroy the XThread, and
-      // with it its Fiber): control is back on the idle fiber, the exited
-      // thread's fiber is suspended on its terminal YieldToScheduler, and the
-      // dispatcher holds no other reference to it. The fiber being destroyed is
-      // the one we just switched away from, never the one currently executing.
-      XThread* dead = exited_thread_;
-      exited_thread_ = nullptr;
-      dead->ReleaseHandle();
-    }
+    xe::threading::Wait(ready_event_.get(), false,
+                        std::chrono::milliseconds(backoff_ms));
+    RereadyBlocked();
   }
   XELOGI("GuestScheduler: dispatch loop exited (shutting_down={})",
          shutting_down_.load());

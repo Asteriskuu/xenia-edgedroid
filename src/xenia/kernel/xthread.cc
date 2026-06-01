@@ -783,6 +783,14 @@ void XThread::EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
   xenia_assert(success == X_STATUS_SUCCESS);
 }
 
+bool XThread::HasPendingUserApc() {
+  auto* kthread = guest_object<X_KTHREAD>();
+  if (kthread->user_apc_pending) {
+    return true;
+  }
+  return !kthread->apc_lists[1].empty(thread_state_->context());
+}
+
 void XThread::SetCurrentThread(XThread* thread) {
   current_xthread_tls_ = thread;
   current_thread_ = thread;
@@ -1149,6 +1157,26 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
   }
 
   timeout_ms = Clock::ScaleGuestDurationMillis(timeout_ms);
+
+  if (fiber_) {
+    // Cooperative path: yield/park the fiber instead of sleeping the dispatch
+    // host thread. A zero timeout is a plain yield; otherwise park until the
+    // deadline, returning early on a user APC when alertable.
+    auto* scheduler = kernel_state()->guest_scheduler();
+    if (timeout_ms == 0) {
+      scheduler->YieldCurrentThread();
+      return X_STATUS_SUCCESS;
+    }
+    uint64_t deadline = Clock::QueryHostUptimeMillis() + timeout_ms;
+    while (Clock::QueryHostUptimeMillis() < deadline) {
+      if (alertable && HasPendingUserApc()) {
+        return X_STATUS_USER_APC;
+      }
+      scheduler->BlockCurrentThread(deadline);
+    }
+    return X_STATUS_SUCCESS;
+  }
+
   if (alertable) {
     auto result =
         xe::threading::AlertableSleep(std::chrono::milliseconds(timeout_ms));
