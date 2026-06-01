@@ -726,6 +726,9 @@ class D3D12CommandProcessor final : public CommandProcessor {
     uint32_t scale_y;          // 1 to kMaxDrawResolutionScaleAlongAxis
     uint32_t pixel_size_log2;  // 0=8bit, 1=16bit, 2=32bit, 3=64bit
     uint32_t tile_count;       // Number of 32x32 tiles to process
+    // Byte offset into the source buffer. Always 0 on D3D12 (the offset is
+    // baked into the source SRV); kept for a shared shader with Vulkan.
+    uint32_t source_offset_bytes;
     // When non-zero, apply half-pixel offset correction by sampling from
     // (scale/2, scale/2) within each scaled block instead of (0, 0).
     uint32_t half_pixel_offset;

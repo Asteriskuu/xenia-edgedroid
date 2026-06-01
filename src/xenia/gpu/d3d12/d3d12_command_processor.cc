@@ -3505,6 +3505,9 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     constants.scale_y = scale_y;
     constants.pixel_size_log2 = pixel_size_log2;
     constants.tile_count = tile_count;
+    // The source SRV is already created at source_offset, so the shader reads
+    // from the start of the bound range.
+    constants.source_offset_bytes = 0;
     // Optionally sample from center of scaled block instead of top-left.
     constants.half_pixel_offset = (cvars::readback_resolve_half_pixel_offset &&
                                    (scale_x > 1 || scale_y > 1))
