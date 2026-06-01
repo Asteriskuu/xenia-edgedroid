@@ -1332,8 +1332,11 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
     return X_STATUS_UNSUCCESSFUL;
   }
   // no-op, just meant to awaken a sleeping alertable thread to process real
-  // apcs
-  thread->thread()->QueueUserCallback([]() {});
+  // apcs. A fiber-backed thread has no host thread; cooperative alertable
+  // wake-on-APC is handled by the scheduler in a later stage.
+  if (thread->thread()) {
+    thread->thread()->QueueUserCallback([]() {});
+  }
   return X_STATUS_SUCCESS;
 }
 dword_result_t NtQueueApcThread_entry(dword_t thread_handle,

@@ -46,6 +46,8 @@ class Processor;
 namespace xe {
 namespace kernel {
 
+class GuestScheduler;
+
 constexpr fourcc_t kKernelSaveSignature = make_fourcc("KRNL");
 
 static constexpr const uint16_t kBaseKernelBuildVersion = 1888;
@@ -180,6 +182,8 @@ class KernelState {
       object_ref<UserModule> exec_module) const;
 
   xam::XamState* xam_state() const { return xam_state_.get(); }
+
+  GuestScheduler* guest_scheduler() const { return guest_scheduler_.get(); }
 
   SystemManagementController* smc() const { return smc_.get(); }
 
@@ -355,6 +359,7 @@ class KernelState {
   cpu::Processor* processor_;
   vfs::VirtualFileSystem* file_system_;
   std::unique_ptr<xam::XamState> xam_state_;
+  std::unique_ptr<GuestScheduler> guest_scheduler_;
   std::unique_ptr<SystemManagementController> smc_;
   std::unique_ptr<XmpVolumePatch> xmp_volume_patch_;
   std::unique_ptr<XConfig> xconfig_;

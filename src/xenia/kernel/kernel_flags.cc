@@ -14,3 +14,9 @@ DEFINE_bool(headless, false,
             "UI");
 DEFINE_bool(log_high_frequency_kernel_calls, false,
             "Log kernel calls with the kHighFrequency tag.", "Logging");
+DEFINE_bool(
+    guest_scheduler, false,
+    "Run guest threads as cooperative fibers driven by an in-kernel scheduler "
+    "instead of mapping each to its own host OS thread. Experimental; off by "
+    "default. Requires a restart to take effect.",
+    "Kernel");

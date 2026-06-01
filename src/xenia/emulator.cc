@@ -1701,7 +1701,9 @@ bool Emulator::ExceptionCallback(Exception* ex) {
 void Emulator::WaitUntilExit() {
   while (true) {
     if (main_thread_) {
-      xe::threading::Wait(main_thread_->thread(), false);
+      // Use wait_handle() rather than thread(): a fiber-backed main thread has
+      // no host thread, only an exit event.
+      xe::threading::Wait(main_thread_->wait_handle(), false);
     }
 
     if (restoring_) {

@@ -11,6 +11,7 @@
 #define XENIA_KERNEL_XTHREAD_H_
 
 #include <atomic>
+#include <memory>
 #include <string>
 
 #include "xenia/base/mutex.h"
@@ -408,6 +409,11 @@ class XThread : public XObject, public cpu::Thread {
   static bool IsInThread(XThread* other);
   static bool IsInThread();
   static XThread* GetCurrentThread();
+  // Returns the currently-running thread iff it is a scheduler-managed fiber
+  // (guest code on the dispatch host thread), otherwise nullptr. Use this to
+  // decide whether a blocking call yields cooperatively or blocks the host
+  // thread.
+  static XThread* GetCurrentFiberThread();
   static uint32_t GetCurrentThreadHandle();
   static uint32_t GetCurrentThreadId();
 
@@ -423,6 +429,12 @@ class XThread : public XObject, public cpu::Thread {
   bool is_guest_thread() const { return guest_thread_; }
   bool main_thread() const { return main_thread_; }
   bool is_running() const { return running_; }
+
+  // True for threads that run a host C++ routine (XHostThread) rather than
+  // guest PPC code. These always use a real host thread, never a cooperative
+  // fiber, since they run host loops/blocking and other code dereferences their
+  // thread().
+  virtual bool is_host_thread() const { return false; }
 
   uint32_t thread_id() const { return thread_id_; }
   uint32_t last_error();
@@ -495,6 +507,24 @@ class XThread : public XObject, public cpu::Thread {
 
   xe::threading::Thread* thread() { return thread_.get(); }
 
+  // The fiber this guest thread runs on when the cooperative scheduler is
+  // active (null under the host-thread model). Created in the fiber path of
+  // Create().
+  xe::threading::Fiber* fiber() const { return fiber_.get(); }
+
+  // Intrusive scheduler links, owned exclusively by GuestScheduler and only
+  // touched under its lock. Embedding them here keeps the ready-queue
+  // operations allocation-free. A thread is in at most one ready list.
+  struct SchedulerLinks {
+    XThread* ready_next = nullptr;  // singly-linked ready FIFO
+    bool queued = false;            // in the ready list
+  };
+  SchedulerLinks& scheduler_links() { return scheduler_links_; }
+
+  // A handle a host-side caller can block on until this thread exits. Resolves
+  // to the host thread, or (for a fiber-backed thread) its exit event.
+  xe::threading::WaitHandle* wait_handle() { return GetWaitHandle(); }
+
   virtual bool Save(ByteStream* stream) override;
   static object_ref<XThread> Restore(KernelState* kernel_state,
                                      ByteStream* stream);
@@ -503,7 +533,10 @@ class XThread : public XObject, public cpu::Thread {
   void AcquireMutantOnStartup(object_ref<XMutant> mutant) {
     pending_mutant_acquires_.push_back(mutant);
   }
-  void SetCurrentThread();
+  // Rebinds the per-host-thread TLS (XThread / cpu::Thread / ThreadState) so
+  // |thread| becomes the current guest thread on the calling host thread. Used
+  // on each fiber switch by the guest scheduler. Pass nullptr to clear.
+  static void SetCurrentThread(XThread* thread);
   void OnHostThreadExitCleanup();
 
  protected:
@@ -514,7 +547,15 @@ class XThread : public XObject, public cpu::Thread {
   void DeliverAPCs();
   void RundownAPCs();
 
-  xe::threading::WaitHandle* GetWaitHandle() override { return thread_.get(); }
+  xe::threading::WaitHandle* GetWaitHandle() override {
+    // Under the cooperative scheduler there is no host thread; a fiber-backed
+    // thread exposes an event that is signaled when it exits so other threads
+    // can wait on it.
+    if (thread_) {
+      return thread_.get();
+    }
+    return fiber_exit_event_.get();
+  }
 
   CreationParams creation_params_ = {0};
 
@@ -553,6 +594,14 @@ class XThread : public XObject, public cpu::Thread {
   uint32_t reentry_address_ = 0;
 #endif
 
+  // When the cooperative scheduler is active, the guest thread runs on this
+  // fiber instead of its own host thread (cpu::Thread::thread_).
+  std::unique_ptr<xe::threading::Fiber> fiber_;
+  SchedulerLinks scheduler_links_;
+  // Signaled when a fiber-backed thread exits, so waits on the thread object
+  // resolve (the host thread handle that normally serves this role is absent).
+  std::unique_ptr<xe::threading::Event> fiber_exit_event_;
+
   std::mutex thread_lock_;
 };
 
@@ -562,7 +611,9 @@ class XHostThread : public XThread {
               uint32_t creation_flags, std::function<int()> host_fn,
               uint32_t guest_process = 0);
 
-  virtual void Execute();
+  bool is_host_thread() const override { return true; }
+
+  void Execute() override;
 
  private:
   std::function<int()> host_fn_;
