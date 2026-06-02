@@ -13,13 +13,12 @@
 #include <array>
 #include <atomic>
 #include <future>
-#include <iosfwd>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 
 #include <SDL3/SDL.h>
-#include "third_party/rapidcsv/src/rapidcsv.h"
 #include "xenia/hid/input_driver.h"
 #include "xenia/xbox.h"
 
@@ -41,7 +40,7 @@ class SDLInputDriver final : public InputDriver {
   X_STATUS Setup() override;
 
   void LoadGameControllerDB();
-  void LoadMappingsFromStream(std::istream& stream);
+  void LoadMappingsFromMemory(std::string_view data);
 
   X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
                            X_INPUT_CAPABILITIES* out_caps) override;

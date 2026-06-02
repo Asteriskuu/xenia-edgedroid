@@ -160,8 +160,7 @@ void SDLInputDriver::LoadGameControllerDB() {
         return;
       }
       XELOGI("SDL GameControllerDB: Loading bundled mappings");
-      std::istringstream stream{std::string(data)};
-      LoadMappingsFromStream(stream);
+      LoadMappingsFromMemory(data);
     });
     return;
   }
@@ -173,56 +172,28 @@ void SDLInputDriver::LoadGameControllerDB() {
   }
 
   XELOGI("SDL GameControllerDB: Loading {}", cvars::mappings_file);
+  // ifstream for Unicode-safe paths.
   std::ifstream stream(cvars::mappings_file, std::ios::binary);
   if (!stream) {
     XELOGW("SDL GameControllerDB: could not open '{}'.", cvars::mappings_file);
     return;
   }
-  LoadMappingsFromStream(stream);
+  std::ostringstream ss;
+  ss << stream.rdbuf();
+  LoadMappingsFromMemory(ss.str());
 }
 
-void SDLInputDriver::LoadMappingsFromStream(std::istream& stream) {
-  uint32_t updated_mappings = 0;
-  uint32_t added_mappings = 0;
+void SDLInputDriver::LoadMappingsFromMemory(std::string_view data) {
+  SDL_IOStream* io = SDL_IOFromConstMem(data.data(), data.size());
+  if (!io) {
+    XELOGW("SDL GameControllerDB: {}", SDL_GetError());
+    return;
+  }
 
-  rapidcsv::Document mappings(
-      stream, rapidcsv::LabelParams(-1, -1), rapidcsv::SeparatorParams(),
-      rapidcsv::ConverterParams(),
-      rapidcsv::LineReaderParams(true /* pSkipCommentLines */,
-                                 '#' /* pCommentPrefix */,
-                                 true /* pSkipEmptyLines */));
-
-  for (size_t i = 0; i < mappings.GetRowCount(); i++) {
-    std::vector<std::string> row = mappings.GetRow<std::string>(i);
-
-    if (row.size() < 2) {
-      continue;
-    }
-
-    std::string guid = row[0];
-    std::string controller_name = row[1];
-
-    auto format = [](std::string ss, const std::string& s) {
-      return ss.empty() ? s : ss + "," + s;
-    };
-
-    std::string mapping_str =
-        std::accumulate(row.begin(), row.end(), std::string{}, format);
-
-    int updated = SDL_AddGamepadMapping(mapping_str.c_str());
-
-    switch (updated) {
-      case 0: {
-        XELOGD("SDL GameControllerDB: Updated {}, {}", controller_name, guid);
-        updated_mappings++;
-      } break;
-      case 1: {
-        added_mappings++;
-      } break;
-      default:
-        XELOGW("SDL GameControllerDB: error loading mapping '{}'", mapping_str);
-        break;
-    }
+  int added = SDL_AddGamepadMappingsFromIO(io, true /* closeio */);
+  if (added < 0) {
+    XELOGW("SDL GameControllerDB: failed to load mappings: {}", SDL_GetError());
+    return;
   }
 
   for (uint32_t i = 0; i < HID_SDL_USER_COUNT; i++) {
@@ -234,8 +205,7 @@ void SDLInputDriver::LoadMappingsFromStream(std::istream& stream) {
     }
   }
 
-  XELOGI("SDL GameControllerDB: Updated {} mappings.", updated_mappings);
-  XELOGI("SDL GameControllerDB: Added {} mappings.", added_mappings);
+  XELOGI("SDL GameControllerDB: Added {} mappings.", added);
 }
 
 X_RESULT SDLInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
