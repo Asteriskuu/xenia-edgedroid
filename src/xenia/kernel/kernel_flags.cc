@@ -20,3 +20,11 @@ DEFINE_bool(
     "instead of mapping each to its own host OS thread. Experimental; off by "
     "default. Requires a restart to take effect.",
     "Kernel");
+DEFINE_uint32(
+    guest_scheduler_cpus, 6,
+    "Number of host dispatch threads the cooperative scheduler spreads the "
+    "360's 6 logical CPUs across (clamped to 1-6). 6 is one per guest CPU "
+    "(full "
+    "parallelism), 3 is one per physical core (SMT pairs share a thread), 1 is "
+    "all guest threads cooperative on a single thread. Requires a restart.",
+    "Kernel");

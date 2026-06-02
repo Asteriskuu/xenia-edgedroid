@@ -24,13 +24,13 @@ class XThread;
 
 // Cooperative, in-kernel scheduler for guest threads.
 //
-// First stage: all guest threads run as host fibers multiplexed onto a single
-// dispatch host thread, scheduled round-robin. Scheduling is purely
-// cooperative. A fiber yields control only at explicit points (thread exit,
-// waits, delays, NtYieldExecution), with no forced preemption. Running on one
-// host thread makes scheduling deterministic, with no cross-thread races to
-// reason about while the cooperative model is brought up. Parallelism across
-// the guest's logical CPUs comes later.
+// The 360's 6 logical CPUs are spread across a configurable number of dispatch
+// host threads (guest_scheduler_cpus: 1, 3, or 6). Each guest thread runs as a
+// host fiber pinned by its guest current_cpu to one dispatch thread. Fibers on
+// different dispatch threads run truly in parallel, while fibers sharing one
+// are cooperatively scheduled, switching only at yield points (waits, delays,
+// NtYieldExecution, exit). There is no forced preemption. A single lock guards
+// every per-CPU queue and is never held across a fiber switch.
 class GuestScheduler {
  public:
   explicit GuestScheduler(KernelState* kernel_state);
@@ -39,74 +39,85 @@ class GuestScheduler {
   // True if the cooperative scheduler is active (gated by the cvar).
   static bool enabled();
 
-  // Starts the dispatch host thread the first time it is called (no-op after).
+  // Starts the per-CPU dispatch threads the first time it is called (no-op
+  // after).
   void EnsureStarted();
   void Shutdown();
 
-  // Adds |thread| to the ready queue and wakes the dispatcher. Idempotent and
-  // safe to call from any host thread.
+  // Adds |thread| to its CPU's ready queue (by guest affinity) and wakes that
+  // CPU. Idempotent and safe to call from any host thread. The thread must not
+  // be currently running on a dispatch thread.
   void MarkReady(XThread* thread);
 
-  // Yields the running guest fiber back to the dispatcher's idle fiber. Returns
-  // (on the calling fiber) once the dispatcher switches back into it.
+  // Yields the running guest fiber back to its CPU's idle fiber. Returns (on
+  // the calling fiber) once the dispatcher switches back into it.
   void YieldToScheduler();
 
-  // Cooperative yield (NtYieldExecution): re-queue the current thread, then let
-  // the dispatcher pick the next ready thread.
+  // Cooperative yield (NtYieldExecution): re-queue the current thread on its
+  // current CPU, then let that CPU pick the next ready thread.
   void YieldCurrentThread();
 
-  // Parks the running guest fiber in the blocked (waiting) list and yields.
-  // Returns once the dispatcher re-readies it, after a short poll backoff or
-  // sooner if another thread becomes runnable, so a cooperative wait can
-  // re-poll its host primitive. The deadline is owned by the caller's poll
-  // loop.
+  // Parks the running guest fiber on its CPU's blocked list and yields. Returns
+  // once the dispatcher re-readies it, after a short poll backoff or sooner if
+  // another thread becomes runnable, so a cooperative wait can re-poll its host
+  // primitive. The deadline is owned by the caller's poll loop.
   void BlockCurrentThread();
 
-  // Marks the running guest fiber finished so the dispatcher can reclaim it,
-  // dropping the final handle once control is back on the idle fiber. Call
-  // before the final YieldToScheduler().
+  // Marks the running guest fiber finished so its CPU can reclaim it, dropping
+  // the final handle once control is back on the idle fiber. Call before the
+  // final YieldToScheduler().
   void NotifyThreadExited(XThread* thread);
 
-  // Detaches |thread| from the ready queue. Used by external Terminate so the
-  // dispatcher can't reach a soon-to-be-freed XThread via a dangling pointer.
+  // Detaches |thread| from every ready and blocked queue. Used by external
+  // Terminate so a dispatcher can't reach a soon-to-be-freed XThread.
   void ForgetThread(XThread* thread);
 
   KernelState* kernel_state() const { return kernel_state_; }
 
  private:
-  // Single-thread busy-poll backoff: when no thread is ready but some are
-  // blocked, the dispatcher sleeps at most this long before re-polling them, so
-  // a signal from another host thread (GPU, I/O, ...) is observed promptly
-  // without spinning a core. This is the wake-latency floor for the cooperative
-  // waits until a proper wake mechanism replaces the busy-poll.
+  // Xbox 360 logical CPU count, also the maximum number of dispatch threads.
+  static constexpr int kMaxCpus = 6;
+  // When no thread is ready but some are blocked, a CPU sleeps at most this
+  // long before re-polling them, so a signal from another host thread (GPU,
+  // I/O, or a fiber on another CPU) is observed promptly without spinning a
+  // core.
   static constexpr uint64_t kPollBackoffMs = 1;
 
-  XThread* DequeueReady();
+  // Per-CPU dispatch state, each driven by its own host thread. Ready and
+  // blocked fibers are intrusive FIFOs linked through
+  // XThread::scheduler_links().ready_next (a thread is in at most one list).
+  struct Cpu {
+    XThread* ready_head = nullptr;
+    XThread* ready_tail = nullptr;
+    XThread* blocked_head = nullptr;
+    XThread* blocked_tail = nullptr;
+    XThread* exited_thread = nullptr;
+    std::unique_ptr<xe::threading::Thread> host_thread;
+    std::unique_ptr<xe::threading::Fiber> idle_fiber;
+    std::unique_ptr<xe::threading::Event> ready_event;
+  };
+
+  // The dispatch thread a thread is pinned to: its guest current_cpu mapped
+  // onto the active host_cpu_count_ dispatch threads.
+  int CpuOf(XThread* thread) const;
+
+  void EnqueueReady(XThread* thread, int cpu_index);
+  XThread* DequeueReady(int cpu_index);
   void SwitchTo(XThread* next);
-  void RunLoop();
-  // Moves every blocked thread back onto the ready queue so it re-polls.
-  void RereadyBlocked();
+  void RereadyBlocked(int cpu_index);
+  void RunLoop(int cpu_index);
   // Unlinks |thread| from a singly-linked list (ready_next), fixing up tail.
   static void UnlinkLocked(XThread*& head, XThread*& tail, XThread* thread);
 
   KernelState* kernel_state_;
 
-  // Guards the ready and blocked lists. Never held across a fiber switch.
-  std::mutex lock_;
-  // Intrusive ready FIFO, linked through XThread::scheduler_links().ready_next.
-  XThread* ready_head_ = nullptr;
-  XThread* ready_tail_ = nullptr;
-  // Intrusive list of fibers blocked in a cooperative wait, linked through the
-  // same ready_next (a thread is in at most one list).
-  XThread* blocked_head_ = nullptr;
-  XThread* blocked_tail_ = nullptr;
-  // A thread that exited on its fiber, awaiting reclaim by the dispatch loop
-  // (its final handle is dropped once control is back on the idle fiber).
-  XThread* exited_thread_ = nullptr;
+  // Number of active dispatch threads (guest_scheduler_cpus, 1..kMaxCpus).
+  int host_cpu_count_ = kMaxCpus;
 
-  std::unique_ptr<xe::threading::Thread> host_thread_;
-  std::unique_ptr<xe::threading::Fiber> idle_fiber_;
-  std::unique_ptr<xe::threading::Event> ready_event_;
+  // Guards every CPU's ready and blocked lists. Never held across a fiber
+  // switch.
+  std::mutex lock_;
+  Cpu cpus_[kMaxCpus];
 
   std::atomic<bool> started_{false};
   std::atomic<bool> shutting_down_{false};
