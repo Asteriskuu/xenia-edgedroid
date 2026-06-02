@@ -193,10 +193,12 @@ namespace {
 // them gets live values. Returns null for non-guest host callers.
 X_KTHREAD* WaitEnter(uint32_t wait_reason, uint32_t processor_mode,
                      uint32_t alertable) {
-  XThread* self = XThread::GetCurrentThread();
-  if (!self) {
+  // Waits can come from non-guest host threads (e.g. waiting on a thread object
+  // during teardown), where IsInThread() avoids GetCurrentThread() asserting.
+  if (!XThread::IsInThread()) {
     return nullptr;
   }
+  XThread* self = XThread::GetCurrentThread();
   auto* kthread = self->guest_object<X_KTHREAD>();
   auto* context = self->thread_state()->context();
   auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
@@ -237,9 +239,8 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
   switch (result) {
     case xe::threading::WaitResult::kSuccess:
     case xe::threading::WaitResult::kUserCallback: {
-      auto current_thread = XThread::GetCurrentThread();
-      if (current_thread) {
-        current_thread->BoostOnWake(priority_increment());
+      if (XThread::IsInThread()) {
+        XThread::GetCurrentThread()->BoostOnWake(priority_increment());
       }
       if (result == xe::threading::WaitResult::kSuccess) {
         WaitCallback();
@@ -277,9 +278,9 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
   switch (result) {
     case xe::threading::WaitResult::kSuccess:
     case xe::threading::WaitResult::kUserCallback: {
-      auto current_thread = XThread::GetCurrentThread();
-      if (current_thread) {
-        current_thread->BoostOnWake(wait_object->priority_increment());
+      if (XThread::IsInThread()) {
+        XThread::GetCurrentThread()->BoostOnWake(
+            wait_object->priority_increment());
       }
       if (result == xe::threading::WaitResult::kSuccess) {
         wait_object->WaitCallback();
@@ -377,9 +378,8 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
   // timeout/failure).
   if (status != X_STATUS_TIMEOUT && status != X_STATUS_UNSUCCESSFUL &&
       status != X_STATUS_ABANDONED_WAIT_0) {
-    auto current_thread = XThread::GetCurrentThread();
-    if (current_thread) {
-      current_thread->BoostOnWake(boost_increment);
+    if (XThread::IsInThread()) {
+      XThread::GetCurrentThread()->BoostOnWake(boost_increment);
     }
   }
   WaitExit(kthread, status);
