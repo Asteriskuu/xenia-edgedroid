@@ -38,6 +38,7 @@
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_driver.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/title_id_utils.h"
 #include "xenia/kernel/user_module.h"
@@ -47,6 +48,7 @@
 #include "xenia/kernel/xam/xdbf/spa_info.h"
 #include "xenia/kernel/xbdm/xbdm_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/memory.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -1358,6 +1360,12 @@ void Emulator::ResetTitle() {
 
   kernel_state_->ShutdownDispatchThread();
 
+  // Stop the dispatch thread before tearing down guest threads. Their fibers
+  // run on it, so terminating one from this host thread while the dispatcher is
+  // executing it would free the fiber out from under it. No-op if the scheduler
+  // never started.
+  kernel_state_->guest_scheduler()->Shutdown();
+
   {
     auto threads =
         kernel_state()->object_table()->GetObjectsByType<kernel::XThread>(
@@ -1600,6 +1608,27 @@ bool Emulator::ExceptionCallbackThunk(Exception* ex, void* data) {
   return reinterpret_cast<Emulator*>(data)->ExceptionCallback(ex);
 }
 
+// VEH-resume target for a crashed fiber. We can't yield from inside the
+// vectored exception handler, so we tell the OS to resume here, then the fiber
+// detaches from the scheduler and yields forever. Other fibers keep running,
+// only the crashed one is parked.
+[[noreturn]] static void HaltCrashedFiberThunk() {
+  auto* self = kernel::XThread::GetCurrentFiberThread();
+  if (self) {
+    self->guest_object<kernel::X_KTHREAD>()->thread_state =
+        kernel::KTHREAD_STATE_TERMINATED;
+    auto* scheduler = self->kernel_state()->guest_scheduler();
+    scheduler->ForgetThread(self);
+    while (true) {
+      scheduler->YieldToScheduler();  // never returns
+    }
+  }
+  // Defend against a missing TLS or scheduler, should never happen.
+  while (true) {
+    xe::threading::NanoSleep(int64_t(1'000'000'000));  // 1 second
+  }
+}
+
 bool Emulator::ExceptionCallback(Exception* ex) {
   // Check to see if the exception occurred in guest code.
   auto code_cache = processor()->backend()->code_cache();
@@ -1617,7 +1646,19 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   }
 
   if (!(ex->pc() >= code_base && ex->pc() < code_end)) {
-    // Didn't occur in guest code. Let it pass.
+    // Not in JIT'd guest code. In host-thread mode let the OS default handler
+    // deal with it. In fiber mode the faulting thread is the shared dispatch
+    // loop, so if a fiber is current halt just that fiber to keep the
+    // dispatcher and the other fibers alive.
+    if (auto* fiber_self = kernel::XThread::GetCurrentFiberThread()) {
+      XELOGE(
+          "Host-side crash on fiber thread (handle 0x{:08X}, guest tid "
+          "0x{:08X}) at host PC 0x{:016X}. Halting fiber to keep the "
+          "dispatcher alive.",
+          fiber_self->handle(), fiber_self->thread_id(), ex->pc());
+      ex->set_resume_pc(reinterpret_cast<uint64_t>(&HaltCrashedFiberThunk));
+      return true;
+    }
     return false;
   }
 
@@ -1638,9 +1679,12 @@ bool Emulator::ExceptionCallback(Exception* ex) {
 
   std::string crash_msg;
   crash_msg.append("==== CRASH DUMP ====\n");
-  crash_msg.append(fmt::format("Thread ID (Host: 0x{:08X} / Guest: 0x{:08X})\n",
-                               current_thread->thread()->system_id(),
-                               current_thread->thread_id()));
+  // Fiber-backed guest threads have no host thread, so report 0 for the host id
+  // and avoid null-dereferencing thread() inside the crash handler.
+  crash_msg.append(fmt::format(
+      "Thread ID (Host: 0x{:08X} / Guest: 0x{:08X})\n",
+      current_thread->thread() ? current_thread->thread()->system_id() : 0,
+      current_thread->thread_id()));
   crash_msg.append(
       fmt::format("Thread Handle: 0x{:08X}\n", current_thread->handle()));
   crash_msg.append(
@@ -1690,7 +1734,13 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     });
   }
 
-  // Now suspend ourself (we should be a guest thread).
+  // Halt the crashed thread without unwinding the rest of the emulator. Host
+  // mode suspends self. Fiber mode diverts the resume PC to a halt thunk, since
+  // calling Suspend here would yield from inside the exception handler.
+  if (current_thread->fiber()) {
+    ex->set_resume_pc(reinterpret_cast<uint64_t>(&HaltCrashedFiberThunk));
+    return true;
+  }
   current_thread->Suspend(nullptr);
 
   // We should not arrive here!

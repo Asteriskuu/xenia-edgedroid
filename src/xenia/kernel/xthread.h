@@ -522,9 +522,9 @@ class XThread : public XObject, public cpu::Thread {
   // allocation-free. A thread is in at most one of the ready or blocked lists.
   struct SchedulerLinks {
     XThread* ready_next = nullptr;  // link for the ready OR blocked list
-    uint64_t wait_deadline_ms = 0;  // absolute host-uptime deadline, 0 = none
     bool queued = false;            // in the ready list
     bool blocked = false;           // parked in the blocked (waiting) list
+    bool has_run = false;           // diagnostic: dispatched at least once
   };
   SchedulerLinks& scheduler_links() { return scheduler_links_; }
 
@@ -555,9 +555,9 @@ class XThread : public XObject, public cpu::Thread {
   void RundownAPCs();
 
   xe::threading::WaitHandle* GetWaitHandle() override {
-    // Under the cooperative scheduler there is no host thread; a fiber-backed
-    // thread exposes an event that is signaled when it exits so other threads
-    // can wait on it.
+    // Under the cooperative scheduler there is no host thread, so a
+    // fiber-backed thread exposes an event signaled on exit for other threads
+    // to wait on.
     if (thread_) {
       return thread_.get();
     }

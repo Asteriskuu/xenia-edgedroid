@@ -439,8 +439,8 @@ X_STATUS XThread::Create() {
     // multiplexes onto its dispatch host thread instead of its own host OS
     // thread. The scheduler binds our TLS (SetCurrentThread) before switching
     // to this fiber, so the entry doesn't repeat it. Host-routine threads
-    // (XHostThread) stay real host threads -- they run host loops/blocking and
-    // their thread() is dereferenced elsewhere.
+    // (XHostThread) stay real host threads, since they run host loops and
+    // blocking calls and their thread() is used elsewhere.
     fiber_exit_event_ = xe::threading::Event::CreateManualResetEvent(false);
     xe::threading::Fiber::CreationParameters fiber_params;
     fiber_params.stack_size = 16_MiB;
@@ -522,6 +522,16 @@ X_STATUS XThread::Create() {
     }
   }
 
+  if (fiber_) {
+    XELOGI(
+        "GuestScheduler: created tid={:08X} '{}' prio={} cpu={} entry={:08X} "
+        "ctx={:08X} suspended={}",
+        thread_id_, thread_name_, priority_,
+        static_cast<uint32_t>(guest_object<X_KTHREAD>()->current_cpu),
+        creation_params_.start_address, creation_params_.start_context,
+        (creation_params_.creation_flags & X_CREATE_SUSPENDED) ? 1 : 0);
+  }
+
   return X_STATUS_SUCCESS;
 }
 
@@ -563,16 +573,9 @@ X_STATUS XThread::Exit(int exit_code) {
   emulator()->processor()->OnThreadExit(thread_id_);
 
   if (fiber_) {
-    // Cooperative fiber path: this runs on the dispatch host thread.
-    // threading::Thread::Exit() would terminate that dispatch loop, hanging
-    // every other guest fiber. Instead wake our waiters, hand ourselves to the
-    // scheduler, and yield to the idle fiber forever; the dispatcher releases
-    // our handle once it is back on the idle fiber. The final yield never
-    // returns -- it hands control to the idle fiber while our fiber stays
-    // suspended on its YieldToScheduler frame. The dispatcher's ReleaseHandle()
-    // then drops the last reference and (if no other handle outlives us)
-    // destroys this XThread and its Fiber -- the fiber we just switched away
-    // from, never the one currently executing.
+    // On a fiber, Thread::Exit() would kill the shared dispatch thread. Wake
+    // our waiters, hand ourselves to the scheduler, and yield forever. The
+    // dispatcher drops our last handle once it is back on the idle fiber.
     running_ = false;
     fiber_exit_event_->Set();
     auto* scheduler = kernel_state()->guest_scheduler();
@@ -614,8 +617,8 @@ X_STATUS XThread::Terminate(int exit_code) {
   running_ = false;
   if (XThread::IsInThread(this)) {
     if (fiber_) {
-      // Self-terminate on our fiber: same teardown as Exit() -- yield to the
-      // dispatcher forever; it reclaims our handle from the idle fiber.
+      // Self-terminate on our fiber, same as Exit(), yielding forever so the
+      // dispatcher reclaims our handle from the idle fiber.
       fiber_exit_event_->Set();
       auto* scheduler = kernel_state()->guest_scheduler();
       scheduler->NotifyThreadExited(this);
@@ -814,7 +817,8 @@ void XThread::RundownAPCs() {
 }
 
 int32_t XThread::QueryPriority() {
-  // Fiber-backed guest threads have no host thread; report the guest priority.
+  // Fiber-backed guest threads have no host thread, so report the guest
+  // priority.
   return thread_ ? thread_->priority() : priority_;
 }
 
@@ -845,8 +849,8 @@ void XThread::SetPriority(int32_t increment) {
   priority_ = clamped;
   base_priority_ = clamped;
   quantum_start_ms_ = Clock::QueryHostUptimeMillis();
-  // No host thread under the cooperative scheduler; the scheduler orders by the
-  // guest priority_ we just set.
+  // No host thread under the cooperative scheduler, which orders by the guest
+  // priority_ we just set.
   if (!cvars::ignore_thread_priorities && thread_) {
     thread_->set_priority(GuestPriorityToHost(clamped));
   }
@@ -979,8 +983,8 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
   }
 
   if (xe::threading::logical_processor_count() >= 6) {
-    // No host thread under the cooperative scheduler (guest runs on a fiber);
-    // host affinity does not apply there.
+    // No host thread under the cooperative scheduler (guest runs on a fiber),
+    // so host affinity does not apply.
     if (!cvars::ignore_thread_affinities && thread_) {
       thread_->set_affinity_mask(uint64_t(1) << cpu_index);
     }
@@ -1090,10 +1094,9 @@ X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
 
   if (fiber_) {
     // Cooperative: bump the guest suspend count. A self-suspend yields to the
-    // dispatcher without re-queueing; Resume re-readies us when the count drops
-    // to zero. A cross-thread suspend of a running fiber only bumps the count
-    // here -- it takes effect at the target's next yield (preemption, a later
-    // stage, makes that prompt).
+    // dispatcher without re-queueing, and Resume re-readies us when the count
+    // hits zero. A cross-thread suspend of another running fiber only records
+    // the count, since forcibly descheduling a running fiber isn't modeled.
     uint8_t previous =
         reinterpret_cast<std::atomic_uint8_t*>(&guest_thread->suspend_count)
             ->fetch_add(1);
@@ -1160,7 +1163,7 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
 
   if (fiber_) {
     // Cooperative path: yield/park the fiber instead of sleeping the dispatch
-    // host thread. A zero timeout is a plain yield; otherwise park until the
+    // host thread. A zero timeout is a plain yield, otherwise park until the
     // deadline, returning early on a user APC when alertable.
     auto* scheduler = kernel_state()->guest_scheduler();
     if (timeout_ms == 0) {
@@ -1172,7 +1175,7 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
       if (alertable && HasPendingUserApc()) {
         return X_STATUS_USER_APC;
       }
-      scheduler->BlockCurrentThread(deadline);
+      scheduler->BlockCurrentThread();
     }
     return X_STATUS_SUCCESS;
   }

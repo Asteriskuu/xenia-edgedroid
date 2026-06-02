@@ -227,14 +227,14 @@ void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
 // success / abandon / failure, or std::nullopt while not yet signaled),
 // yielding to the scheduler between attempts via BlockCurrentThread, until it
 // resolves, an alertable user APC is pending, or |deadline_ms| (absolute host
-// uptime; 0 = infinite) elapses. Polling the host primitive preserves its exact
-// acquire semantics; only the blocking is made cooperative.
+// uptime, 0 = infinite) elapses. Polling the host primitive preserves its exact
+// acquire semantics, only the blocking is made cooperative.
 template <typename PollFn>
 X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
                          bool alertable, uint64_t deadline_ms, PollFn&& poll) {
   while (true) {
     // Alertable waits return on a queued user APC (the cooperative equivalent
-    // of a host alertable-wait wake); the caller then runs xeProcessUserApcs.
+    // of a host alertable-wait wake), then the caller runs xeProcessUserApcs.
     if (alertable && XThread::GetCurrentThread()->HasPendingUserApc()) {
       WaitExit(kthread, X_STATUS_USER_APC);
       return X_STATUS_USER_APC;
@@ -248,7 +248,7 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
       WaitExit(kthread, X_STATUS_TIMEOUT);
       return X_STATUS_TIMEOUT;
     }
-    scheduler->BlockCurrentThread(deadline_ms);
+    scheduler->BlockCurrentThread();
   }
 }
 }  // namespace
@@ -262,9 +262,9 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
   }
 
   if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
-    // Cooperative path: poll the host primitive (so its exact semantics are
-    // preserved) and yield the fiber between polls instead of blocking the
-    // dispatch host thread. Only fiber-backed guest threads take this path.
+    // Cooperative path: poll the host primitive (preserving its exact
+    // semantics) and yield the fiber between polls instead of blocking the
+    // dispatch host thread.
     auto* scheduler = kernel_state()->guest_scheduler();
     X_KTHREAD* kthread = WaitEnter(wait_reason, processor_mode, alertable);
     uint64_t deadline_ms = opt_timeout ? Clock::QueryHostUptimeMillis() +

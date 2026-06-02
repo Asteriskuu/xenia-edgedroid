@@ -9,7 +9,6 @@
 
 #include "xenia/kernel/guest_scheduler.h"
 
-#include <algorithm>
 #include <string>
 
 #include "xenia/base/assert.h"
@@ -57,8 +56,8 @@ void GuestScheduler::Shutdown() {
 
 void GuestScheduler::MarkReady(XThread* thread) {
   assert_not_null(thread);
-  // Refuse to enqueue a terminated thread: a stray Resume/Terminate race could
-  // otherwise put a zombie back on the ready queue after it has exited.
+  // Don't re-enqueue a terminated thread, or a stray Resume could revive a
+  // zombie.
   if (thread->guest_object<X_KTHREAD>()->thread_state ==
       KTHREAD_STATE_TERMINATED) {
     return;
@@ -66,8 +65,11 @@ void GuestScheduler::MarkReady(XThread* thread) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     auto& links = thread->scheduler_links();
+    // Blocked threads move via RereadyBlocked, not here, since ready and
+    // blocked share ready_next and a thread must be in only one list.
+    assert_false(links.blocked);
     if (links.queued) {
-      return;  // already ready; don't double-enqueue
+      return;
     }
     links.queued = true;
     links.ready_next = nullptr;
@@ -132,12 +134,16 @@ void GuestScheduler::ForgetThread(XThread* thread) {
 void GuestScheduler::SwitchTo(XThread* next) {
   assert_not_null(next);
   assert_not_null(next->fiber());
-  current_thread_ = next;
+  auto& links = next->scheduler_links();
+  if (!links.has_run) {
+    links.has_run = true;
+    XELOGI("GuestScheduler: first run tid={:08X} '{}'", next->thread_id(),
+           next->thread_name());
+  }
   XThread::SetCurrentThread(next);
   next->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_RUNNING;
   next->fiber()->SwitchTo();
-  // Back on the idle fiber: the guest yielded or exited.
-  current_thread_ = nullptr;
+  // Back on the idle fiber.
   XThread::SetCurrentThread(nullptr);
 }
 
@@ -153,19 +159,20 @@ void GuestScheduler::YieldCurrentThread() {
 }
 
 void GuestScheduler::NotifyThreadExited(XThread* thread) {
-  // Hand the finished thread to the dispatch loop to reclaim; we can't drop the
-  // final handle here because we're still running on its fiber.
+  XELOGI("GuestScheduler: exited tid={:08X} '{}'", thread->thread_id(),
+         thread->thread_name());
+  // The dispatch loop reclaims it, since we can't drop the last handle while
+  // running on its fiber.
   exited_thread_ = thread;
 }
 
-void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms) {
+void GuestScheduler::BlockCurrentThread() {
   XThread* self = XThread::GetCurrentThread();
   {
     std::lock_guard<std::mutex> lock(lock_);
     auto& links = self->scheduler_links();
-    // self is currently running (in no list); park it on the blocked list.
+    // Park self (running, in no list) on the blocked list.
     links.blocked = true;
-    links.wait_deadline_ms = deadline_ms;
     links.ready_next = nullptr;
     if (blocked_tail_) {
       blocked_tail_->scheduler_links().ready_next = self;
@@ -199,35 +206,29 @@ void GuestScheduler::RereadyBlocked() {
   blocked_tail_ = nullptr;
 }
 
-uint64_t GuestScheduler::ComputeBackoffLocked(uint64_t now_ms) const {
-  uint64_t backoff = kPollBackoffMs;
-  for (XThread* t = blocked_head_; t; t = t->scheduler_links().ready_next) {
-    uint64_t deadline = t->scheduler_links().wait_deadline_ms;
-    if (deadline == 0) {
-      continue;  // no timeout on this waiter
-    }
-    uint64_t remaining = deadline > now_ms ? deadline - now_ms : 0;
-    backoff = std::min(backoff, remaining);
-  }
-  return backoff;
-}
-
 void GuestScheduler::RunLoop() {
   // Adopt this host thread's stack as the dispatcher's idle fiber.
   idle_fiber_ = xe::threading::Fiber::CreateFromThread();
   XELOGI("GuestScheduler: dispatch loop started");
 
+  uint64_t next_repoll_ms = 0;
   while (!shutting_down_.load()) {
+    // Re-poll blocked waiters on a timer even while other fibers run, or a busy
+    // fiber that rarely waits would starve them.
+    uint64_t now = Clock::QueryHostUptimeMillis();
+    if (now >= next_repoll_ms) {
+      RereadyBlocked();
+      next_repoll_ms = now + kPollBackoffMs;
+    }
+
     XThread* next = DequeueReady();
     if (next) {
       exited_thread_ = nullptr;
       SwitchTo(next);
       if (exited_thread_) {
-        // Safe to drop the final reference (which may destroy the XThread, and
-        // with it its Fiber): control is back on the idle fiber, the exited
-        // thread's fiber is suspended on its terminal YieldToScheduler, and the
-        // dispatcher holds no other reference to it. The fiber being destroyed
-        // is the one we just switched away from, never the one executing.
+        // Safe to drop the last handle now, which may free the XThread and its
+        // fiber. We're on the idle fiber and the exited fiber is parked on its
+        // final yield, so we never free the running fiber.
         XThread* dead = exited_thread_;
         exited_thread_ = nullptr;
         dead->ReleaseHandle();
@@ -235,23 +236,21 @@ void GuestScheduler::RunLoop() {
       continue;
     }
 
-    // No thread is ready. If some are blocked in a cooperative wait, sleep
-    // briefly (woken early by any MarkReady) then re-poll them; otherwise idle
-    // until something becomes runnable.
-    uint64_t backoff_ms;
+    // Nothing ready, so sleep until the next re-poll if waiters are blocked (a
+    // MarkReady wakes us sooner), otherwise idle until something is runnable.
     bool have_blocked;
     {
       std::lock_guard<std::mutex> lock(lock_);
       have_blocked = blocked_head_ != nullptr;
-      backoff_ms = ComputeBackoffLocked(Clock::QueryHostUptimeMillis());
     }
     if (!have_blocked) {
       xe::threading::Wait(ready_event_.get(), false);
       continue;
     }
+    now = Clock::QueryHostUptimeMillis();
+    uint64_t sleep_ms = next_repoll_ms > now ? next_repoll_ms - now : 0;
     xe::threading::Wait(ready_event_.get(), false,
-                        std::chrono::milliseconds(backoff_ms));
-    RereadyBlocked();
+                        std::chrono::milliseconds(sleep_ms));
   }
   XELOGI("GuestScheduler: dispatch loop exited (shutting_down={})",
          shutting_down_.load());

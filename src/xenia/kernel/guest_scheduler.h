@@ -25,11 +25,11 @@ class XThread;
 // Cooperative, in-kernel scheduler for guest threads.
 //
 // First stage: all guest threads run as host fibers multiplexed onto a single
-// dispatch host thread, scheduled round-robin. A fiber yields control only at
-// explicit points -- thread exit and NtYieldExecution today; cooperative waits
-// and JIT timeslice preemption are layered on in later stages. Running on one
-// host thread makes scheduling deterministic: there are no cross-thread races
-// to reason about while the cooperative model is brought up. Parallelism across
+// dispatch host thread, scheduled round-robin. Scheduling is purely
+// cooperative. A fiber yields control only at explicit points (thread exit,
+// waits, delays, NtYieldExecution), with no forced preemption. Running on one
+// host thread makes scheduling deterministic, with no cross-thread races to
+// reason about while the cooperative model is brought up. Parallelism across
 // the guest's logical CPUs comes later.
 class GuestScheduler {
  public:
@@ -56,14 +56,14 @@ class GuestScheduler {
   void YieldCurrentThread();
 
   // Parks the running guest fiber in the blocked (waiting) list and yields.
-  // Returns once the dispatcher re-readies it -- after a short poll backoff or
-  // sooner if another thread becomes runnable -- so a cooperative wait can
-  // re-poll its host primitive. |deadline_ms| is an absolute host-uptime
-  // deadline used only to bound the dispatcher's idle sleep, or 0 for none.
-  void BlockCurrentThread(uint64_t deadline_ms);
+  // Returns once the dispatcher re-readies it, after a short poll backoff or
+  // sooner if another thread becomes runnable, so a cooperative wait can
+  // re-poll its host primitive. The deadline is owned by the caller's poll
+  // loop.
+  void BlockCurrentThread();
 
-  // Marks the running guest fiber finished; the dispatcher reclaims it (drops
-  // the final handle once control is back on the idle fiber). Call immediately
+  // Marks the running guest fiber finished so the dispatcher can reclaim it,
+  // dropping the final handle once control is back on the idle fiber. Call
   // before the final YieldToScheduler().
   void NotifyThreadExited(XThread* thread);
 
@@ -88,9 +88,6 @@ class GuestScheduler {
   void RereadyBlocked();
   // Unlinks |thread| from a singly-linked list (ready_next), fixing up tail.
   static void UnlinkLocked(XThread*& head, XThread*& tail, XThread* thread);
-  // ms the dispatcher should sleep before re-polling blocked threads, capped to
-  // the nearest blocked deadline. Caller must hold lock_.
-  uint64_t ComputeBackoffLocked(uint64_t now_ms) const;
 
   KernelState* kernel_state_;
 
@@ -103,8 +100,6 @@ class GuestScheduler {
   // same ready_next (a thread is in at most one list).
   XThread* blocked_head_ = nullptr;
   XThread* blocked_tail_ = nullptr;
-  // The fiber the dispatcher has switched into (null while on the idle fiber).
-  XThread* current_thread_ = nullptr;
   // A thread that exited on its fiber, awaiting reclaim by the dispatch loop
   // (its final handle is dropped once control is back on the idle fiber).
   XThread* exited_thread_ = nullptr;
