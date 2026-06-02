@@ -95,7 +95,7 @@ std::optional<StfsMetadata> ExtractStfsMetadata(
     }
     if (str.empty()) {
       for (uint32_t i = uint32_t(XLanguage::kEnglish);
-           i < uint32_t(XLanguage::kMaxLanguages); ++i) {
+           i <= content_meta.kNumLanguagesV2; ++i) {
         auto candidate = static_cast<XLanguage>(i);
         if (candidate == language || candidate == XLanguage::kEnglish) {
           continue;
