@@ -358,13 +358,6 @@ else()
 
     link_libraries(stdc++fs dl lz4 m pthread rt)
 
-    # Statically link the C++ runtime so the AppImage carries no GLIBCXX
-    # dependency: we build against a newer libstdc++ (g++-14, for Clang-
-    # compatible <ranges> and <chrono>) than the oldest target system ships,
-    # and baking it in keeps the only runtime floor glibc itself (from the
-    # jammy build host).
-    add_link_options(-static-libstdc++ -static-libgcc)
-
     # Link group so executables resolve circular static-lib deps.
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--start-group")
     set(CMAKE_CXX_STANDARD_LIBRARIES "${CMAKE_CXX_STANDARD_LIBRARIES} -Wl,--end-group")
