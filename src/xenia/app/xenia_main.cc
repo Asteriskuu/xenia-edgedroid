@@ -271,20 +271,23 @@ class EmulatorApp final : public xe::ui::WindowedApp {
         if (it != creators_.cend() && (*it).is_available()) {
           return (*it).instantiate(std::forward<Args>(args)...);
         }
-        return nullptr;
-      } else {
-        for (const auto& creator : creators_) {
-          if (!creator.is_available()) {
-            continue;
-          }
-          auto instance = creator.instantiate(std::forward<Args>(args)...);
-          if (!instance) {
-            continue;
-          }
-          return instance;
-        }
-        return nullptr;
+        XELOGW(
+            "No available backend named \"{}\", falling back to "
+            "auto-selection",
+            name);
       }
+      // Auto-select the first available backend.
+      for (const auto& creator : creators_) {
+        if (!creator.is_available()) {
+          continue;
+        }
+        auto instance = creator.instantiate(std::forward<Args>(args)...);
+        if (!instance) {
+          continue;
+        }
+        return instance;
+      }
+      return nullptr;
     }
 
     std::vector<std::unique_ptr<T>> CreateAll(const std::string_view name,
