@@ -36,7 +36,7 @@ DECLARE_bool(depth_bias_shader_offset);
 DECLARE_bool(submit_on_primary_buffer_end);
 DECLARE_int32(occlusion_query_fake_lower_threshold);
 DECLARE_int32(occlusion_query_fake_upper_threshold);
-DECLARE_double(occlusion_query_sample_count_saturation);
+DECLARE_double(occlusion_query_saturation);
 DECLARE_string(occlusion_query);
 DECLARE_bool(present_letterbox);
 DECLARE_bool(draw_resolution_scaled_texture_offsets);
@@ -291,8 +291,7 @@ void ImGuiDebugDialog::LoadCurrentSettings() {
       cvars::occlusion_query_fake_lower_threshold;
   occlusion_query_fake_upper_threshold_ =
       cvars::occlusion_query_fake_upper_threshold;
-  occlusion_query_sample_count_saturation_ =
-      cvars::occlusion_query_sample_count_saturation;
+  occlusion_query_saturation_ = cvars::occlusion_query_saturation;
 
   present_letterbox_ = cvars::present_letterbox;
 
@@ -431,12 +430,12 @@ void ImGuiDebugDialog::ApplyOQSaturation(double value) {
     value = 1.0;
   }
 
-  if (value == occlusion_query_sample_count_saturation_) {
+  if (value == occlusion_query_saturation_) {
     return;
   }
 
-  occlusion_query_sample_count_saturation_ = value;
-  ApplyDoubleSetting("GPU", "occlusion_query_sample_count_saturation", value);
+  occlusion_query_saturation_ = value;
+  ApplyDoubleSetting("GPU", "occlusion_query_saturation", value);
 }
 
 void ImGuiDebugDialog::ApplyOQLowerThreshold() {
@@ -618,7 +617,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
       "submit_on_primary_buffer_end",
       "occlusion_query_fake_lower_threshold",
       "occlusion_query_fake_upper_threshold",
-      "occlusion_query_sample_count_saturation",
+      "occlusion_query_saturation",
   });
   bool show_display = AnyMatchesFilter({"present_letterbox"});
   bool show_scaling = AnyMatchesFilter({
@@ -801,15 +800,15 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             ImGui::EndDisabled();
           }
 
-          if (MatchesFilter("occlusion_query_sample_count_saturation")) {
+          if (MatchesFilter("occlusion_query_saturation")) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            DrawLabelCell("occlusion_query_sample_count_saturation");
+            DrawLabelCell("occlusion_query_saturation");
             ImGui::TableSetColumnIndex(1);
             float slider_value =
-                static_cast<float>(occlusion_query_sample_count_saturation_);
+                static_cast<float>(occlusion_query_saturation_);
             RightAlignNextItem(kTextInputWidth);
-            if (ImGui::SliderFloat("##occlusion_query_sample_count_saturation",
+            if (ImGui::SliderFloat("##occlusion_query_saturation",
                                    &slider_value, 0.0f, 1.0f, "%.2f",
                                    ImGuiSliderFlags_AlwaysClamp)) {
               ApplyOQSaturation(slider_value);

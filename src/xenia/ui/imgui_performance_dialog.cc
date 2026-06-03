@@ -52,12 +52,14 @@ void ImGuiPerformanceDialog::LoadCurrentSettings() {
   // Load Emulated Display Uncapped (inverted from guest_display_refresh_cap)
   display_uncapped_ = !cvars::guest_display_refresh_cap;
 
-  // Load Occlusion Query setting (0=fake, 1=fast, 2=strict)
+  // Load Occlusion Query setting (0=fake, 1=fast, 2=fast-alt, 3=strict)
   const std::string& oq_mode = cvars::occlusion_query;
   if (oq_mode == "fast") {
     occlusion_query_mode_ = 1;
-  } else if (oq_mode == "strict") {
+  } else if (oq_mode == "fast-alt") {
     occlusion_query_mode_ = 2;
+  } else if (oq_mode == "strict") {
+    occlusion_query_mode_ = 3;
   } else {
     occlusion_query_mode_ = 0;  // Default to "fake"
   }
@@ -190,6 +192,9 @@ void ImGuiPerformanceDialog::OnOcclusionQueryChanged(int value) {
       mode = gpu::ZPDMode::kFast;
       break;
     case 2:
+      mode = gpu::ZPDMode::kFastAlt;
+      break;
+    case 3:
       mode = gpu::ZPDMode::kStrict;
       break;
     default:
@@ -199,7 +204,7 @@ void ImGuiPerformanceDialog::OnOcclusionQueryChanged(int value) {
 
   command_processor->SetZPDMode(mode);
 
-  const char* mode_names[] = {"Fake", "Fast", "Strict"};
+  const char* mode_names[] = {"Fake", "Fast", "Fast-Alt", "Strict"};
   ShowNotification("Occlusion Query Mode", mode_names[static_cast<int>(mode)]);
 }
 
@@ -342,8 +347,8 @@ void ImGuiPerformanceDialog::OnDraw(ImGuiIO& io) {
 
     ImGui::Indent(10);
     ImGui::PushID("occlusion_query");
-    const char* oq_labels[] = {"Fake", "Fast", "Strict"};
-    for (int i = 0; i < 3; i++) {
+    const char* oq_labels[] = {"Fake", "Fast", "Fast-Alt", "Strict"};
+    for (int i = 0; i < 4; i++) {
       bool is_selected = (occlusion_query_mode_ == i);
       bool is_highlighted = (occlusion_query_highlight_ == i);
 
@@ -363,7 +368,7 @@ void ImGuiPerformanceDialog::OnDraw(ImGuiIO& io) {
         ImGui::PopStyleColor();
       }
 
-      if (i < 2) {
+      if (i < 3) {
         ImGui::SameLine();
       }
     }
