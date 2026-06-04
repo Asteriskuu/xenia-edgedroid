@@ -28,12 +28,85 @@
 namespace xe {
 namespace gpu {
 
+namespace {
+
+std::string HlslFloatLiteral(float value) {
+  if (std::isnan(value)) {
+    return "asfloat(0x7FC00000u)";
+  }
+  if (std::isinf(value)) {
+    return value < 0.0f ? "-asfloat(0x7F800000u)" : "asfloat(0x7F800000u)";
+  }
+  std::string text = fmt::format("{:.9g}", value);
+  if (text.find_first_of(".eE") == std::string::npos) {
+    text += ".0";
+  }
+  text += "f";
+  return text;
+}
+
+bool IsMemExportTarget(const InstructionResult& result) {
+  return result.storage_target == InstructionStorageTarget::kExportAddress ||
+         result.storage_target == InstructionStorageTarget::kExportData;
+}
+
+const char* GetMemExportTargetName(const InstructionResult& result) {
+  return result.storage_target == InstructionStorageTarget::kExportAddress
+             ? "eA"
+             : "eM";
+}
+
+void LogUnimplementedMemExportResult(const char* operation,
+                                     const InstructionResult& result) {
+  if (!IsMemExportTarget(result)) {
+    return;
+  }
+  XELOGE(
+      "HLSL: UNIMPLEMENTED memexport {} write: target {}{} mask 0x{:X}; "
+      "dropping write",
+      operation, GetMemExportTargetName(result), result.storage_index,
+      result.GetUsedWriteMask());
+}
+
+bool IsVectorKillOpcode(ucode::AluVectorOpcode opcode) {
+  switch (opcode) {
+    case ucode::AluVectorOpcode::kKillEq:
+    case ucode::AluVectorOpcode::kKillGt:
+    case ucode::AluVectorOpcode::kKillGe:
+    case ucode::AluVectorOpcode::kKillNe:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsScalarKillOpcode(ucode::AluScalarOpcode opcode) {
+  switch (opcode) {
+    case ucode::AluScalarOpcode::kKillsEq:
+    case ucode::AluScalarOpcode::kKillsGt:
+    case ucode::AluScalarOpcode::kKillsGe:
+    case ucode::AluScalarOpcode::kKillsNe:
+    case ucode::AluScalarOpcode::kKillsOne:
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 HlslShaderTranslator::HlslShaderTranslator(
     ui::GraphicsProvider::GpuVendorID vendor_id, bool bindless_resources_used,
-    bool edram_rov_used, bool /*use_shader_model_6_6*/)
+    bool edram_rov_used, bool use_shader_model_6_6,
+    uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y)
     : vendor_id_(vendor_id),
       bindless_resources_used_(bindless_resources_used),
-      edram_rov_used_(edram_rov_used) {}
+      edram_rov_used_(edram_rov_used),
+      use_shader_model_6_6_(use_shader_model_6_6),
+      draw_resolution_scale_x_(draw_resolution_scale_x ? draw_resolution_scale_x
+                                                       : UINT32_C(1)),
+      draw_resolution_scale_y_(draw_resolution_scale_y ? draw_resolution_scale_y
+                                                       : UINT32_C(1)) {}
 
 HlslShaderTranslator::~HlslShaderTranslator() = default;
 
@@ -67,6 +140,13 @@ uint64_t HlslShaderTranslator::GetDefaultPixelShaderModification(
   modification.pixel.depth_stencil_mode =
       Modification::DepthStencilMode::kNoModifiers;
   return modification.value;
+}
+
+uint32_t HlslShaderTranslator::GetModificationRegisterCount() const {
+  Modification modification = GetHlslShaderModification();
+  return is_vertex_shader()
+             ? modification.vertex.dynamic_addressable_register_count
+             : modification.pixel.dynamic_addressable_register_count;
 }
 
 void HlslShaderTranslator::Reset() {
@@ -164,13 +244,8 @@ void HlslShaderTranslator::PostTranslation() {
   // Copy bindings to the DxbcShader object (D3D12 uses DxbcShader for all
   // shaders, even when using HLSL/DXIL).
   DxbcShader* dxbc_shader = dynamic_cast<DxbcShader*>(&translation.shader());
-  XELOGI(
-      "HLSL PostTranslation: dxbc_shader={}, tex_bindings={}, smp_bindings={}",
-      dxbc_shader != nullptr, texture_bindings_.size(),
-      sampler_bindings_.size());
   if (dxbc_shader && !dxbc_shader->bindings_setup_entered_.test_and_set(
                          std::memory_order_relaxed)) {
-    XELOGI("HLSL PostTranslation: Setting up bindings (flag was not set)");
     dxbc_shader->texture_bindings_.clear();
     dxbc_shader->texture_bindings_.reserve(texture_bindings_.size());
     dxbc_shader->used_texture_mask_ = 0;
@@ -200,16 +275,6 @@ void HlslShaderTranslator::PostTranslation() {
       shader_binding.mip_filter = translator_binding.mip_filter;
       shader_binding.aniso_filter = translator_binding.aniso_filter;
     }
-    XELOGI(
-        "HLSL PostTranslation: Done - shader now has {} tex, {} smp bindings",
-        dxbc_shader->texture_bindings_.size(),
-        dxbc_shader->sampler_bindings_.size());
-  } else if (dxbc_shader) {
-    XELOGI(
-        "HLSL PostTranslation: Flag already set, skipping. Shader has {} tex, "
-        "{} smp",
-        dxbc_shader->texture_bindings_.size(),
-        dxbc_shader->sampler_bindings_.size());
   }
 }
 
@@ -343,9 +408,9 @@ void HlslShaderTranslator::EmitResourceDeclarations() {
     EmitLine("// Descriptor indices constant buffer for bindless resources.");
     EmitLine("cbuffer xe_descriptor_indices : register(b4) {");
     Indent();
-    // The buffer contains uint indices packed into uint4 vectors.
-    // Each shader can have up to 32 texture bindings * 2 (signed/unsigned).
-    EmitLine("uint4 xe_descriptor_indices_data[32];");
+    // The buffer contains uint indices packed into uint4 vectors. Sized for
+    // up to a 4096-byte descriptor-indices CBV.
+    EmitLine("uint4 xe_descriptor_indices_data[256];");
     Outdent();
     EmitLine("};");
     EmitLine("");
@@ -434,6 +499,27 @@ void HlslShaderTranslator::EmitOutputDeclarations() {
   Modification modification = GetHlslShaderModification();
 
   if (is_vertex_shader()) {
+    auto hlsl_float_vector_type = [](uint32_t component_count) {
+      return component_count == 1
+                 ? std::string("float")
+                 : std::string("float") + std::to_string(component_count);
+    };
+    auto emit_distance_declarations = [&](const char* name,
+                                          const char* semantic,
+                                          uint32_t distance_count) {
+      if (!distance_count) {
+        return;
+      }
+      if (distance_count <= 4) {
+        EmitLine(hlsl_float_vector_type(distance_count) + " " + name + " : " +
+                 semantic + "0;");
+      } else {
+        EmitLine("float4 " + std::string(name) + "_0123 : " + semantic + "0;");
+        EmitLine(hlsl_float_vector_type(distance_count - 4) + " " + name +
+                 "_45 : " + semantic + "1;");
+      }
+    };
+
     // Vertex shader output - only declare interpolators in the mask.
     // Must match pixel shader input signature (packed contiguously).
     uint32_t interpolator_mask = modification.vertex.interpolator_mask;
@@ -455,17 +541,10 @@ void HlslShaderTranslator::EmitOutputDeclarations() {
                std::to_string(texcoord_index) + ";");
     }
     EmitLine("float4 xe_position : SV_Position;");
-    uint32_t clip_distance_count = modification.GetVertexClipDistanceCount();
-    if (clip_distance_count > 0) {
-      if (clip_distance_count <= 4) {
-        EmitLine("float" + std::to_string(clip_distance_count) +
-                 " xe_clip_distance : SV_ClipDistance0;");
-      } else {
-        EmitLine("float4 xe_clip_distance_0123 : SV_ClipDistance0;");
-        EmitLine("float" + std::to_string(clip_distance_count - 4) +
-                 " xe_clip_distance_45 : SV_ClipDistance1;");
-      }
-    }
+    emit_distance_declarations("xe_clip_distance", "SV_ClipDistance",
+                               modification.GetVertexClipDistanceCount());
+    emit_distance_declarations("xe_cull_distance", "SV_CullDistance",
+                               modification.GetVertexCullDistanceCount());
     Outdent();
     EmitLine("};");
     EmitLine("");
@@ -480,9 +559,18 @@ void HlslShaderTranslator::EmitOutputDeclarations() {
                  std::to_string(i) + ";");
       }
     }
+    if (PixelShaderNeedsCoverageOutput()) {
+      EmitLine("uint xe_coverage : SV_Coverage;");
+    }
     // Depth output if needed.
-    if (current_shader().writes_depth()) {
-      EmitLine("float xe_depth : SV_Depth;");
+    if (PixelShaderWritesDepthOutput()) {
+      std::string depth_semantic = "SV_Depth";
+      if (!current_shader().writes_depth() &&
+          GetHlslShaderModification().pixel.depth_stencil_mode ==
+              Modification::DepthStencilMode::kFloat24Truncating) {
+        depth_semantic = "SV_DepthLessEqual";
+      }
+      EmitLine("float xe_depth : " + depth_semantic + ";");
     }
     Outdent();
     EmitLine("};");
@@ -606,6 +694,13 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   EmitLine("}");
   EmitLine("");
 
+  EmitLine("float XeSetFloatSignBit(float value) {");
+  Indent();
+  EmitLine("return asfloat(asuint(value) | 0x80000000u);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
   // SM3-compliant multiply: 0 * anything = 0 (handles infinity/NaN edge cases).
   EmitLine("float XeMulSM3(float a, float b) {");
   Indent();
@@ -618,7 +713,7 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   Indent();
   EmitLine("float2 result = a * b;");
   EmitLine("bool2 isZero = (min(abs(a), abs(b)) == float2(0.0, 0.0));");
-  EmitLine("return select(result, float2(0.0, 0.0), isZero);");
+  EmitLine("return select(isZero, float2(0.0, 0.0), result);");
   Outdent();
   EmitLine("}");
   EmitLine("");
@@ -627,7 +722,7 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   Indent();
   EmitLine("float3 result = a * b;");
   EmitLine("bool3 isZero = (min(abs(a), abs(b)) == float3(0.0, 0.0, 0.0));");
-  EmitLine("return select(result, float3(0.0, 0.0, 0.0), isZero);");
+  EmitLine("return select(isZero, float3(0.0, 0.0, 0.0), result);");
   Outdent();
   EmitLine("}");
   EmitLine("");
@@ -637,7 +732,7 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   EmitLine("float4 result = a * b;");
   EmitLine(
       "bool4 isZero = (min(abs(a), abs(b)) == float4(0.0, 0.0, 0.0, 0.0));");
-  EmitLine("return select(result, float4(0.0, 0.0, 0.0, 0.0), isZero);");
+  EmitLine("return select(isZero, float4(0.0, 0.0, 0.0, 0.0), result);");
   Outdent();
   EmitLine("}");
   EmitLine("");
@@ -660,7 +755,7 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   EmitLine(
       "                     (packed >> 16u) & 0xFFu, (packed >> 24u) & "
       "0xFFu);");
-  EmitLine("unpacked = select(unpacked, unpacked - 256, unpacked >= 128);");
+  EmitLine("unpacked = select(unpacked >= 128, unpacked - 256, unpacked);");
   EmitLine(
       "return max(float4(unpacked) / 127.0, float4(-1.0, -1.0, -1.0, -1.0));");
   Outdent();
@@ -685,8 +780,8 @@ void HlslShaderTranslator::EmitHelperFunctions() {
       "                     (packed >> 20u) & 0x3FFu, (packed >> 30u) & "
       "0x3u);");
   EmitLine(
-      "unpacked.xyz = select(unpacked.xyz, unpacked.xyz - 1024, unpacked.xyz "
-      ">= 512);");
+      "unpacked.xyz = select(unpacked.xyz >= 512, unpacked.xyz - 1024, "
+      "unpacked.xyz);");
   EmitLine("unpacked.w = (unpacked.w >= 2) ? (unpacked.w - 4) : unpacked.w;");
   EmitLine("return max(float4(unpacked) / float4(511.0, 511.0, 511.0, 1.0),");
   EmitLine("           float4(-1.0, -1.0, -1.0, -1.0));");
@@ -730,7 +825,7 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   Indent();
   EmitLine(
       "int2 unpacked = int2(packed & 0xFFFFu, (packed >> 16u) & 0xFFFFu);");
-  EmitLine("unpacked = select(unpacked, unpacked - 65536, unpacked >= 32768);");
+  EmitLine("unpacked = select(unpacked >= 32768, unpacked - 65536, unpacked);");
   EmitLine("return max(float2(unpacked) / 32767.0, float2(-1.0, -1.0));");
   Outdent();
   EmitLine("}");
@@ -752,13 +847,282 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   EmitLine("}");
   EmitLine("");
 
+  EmitLine("int XeSignExtend(uint value, uint bits) {");
+  Indent();
+  EmitLine("uint mask = (1u << bits) - 1u;");
+  EmitLine("uint sign_bit = 1u << (bits - 1u);");
+  EmitLine("value &= mask;");
+  EmitLine(
+      "return ((value & sign_bit) != 0u) ? (int(value) - int(1u << bits)) : "
+      "int(value);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeNormalizeUnsigned(uint value, uint bits) {");
+  Indent();
+  EmitLine("if (bits == 32u) { return float(value) * (1.0 / 4294967295.0); }");
+  EmitLine("return float(value) / float((1u << bits) - 1u);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeNormalizeSignedZeroClampMinusOne(int value, uint bits) {");
+  Indent();
+  EmitLine(
+      "float scale = (bits == 32u) ? (1.0 / 2147483647.0) : "
+      "(1.0 / float((1u << (bits - 1u)) - 1u));");
+  EmitLine("return max(float(value) * scale, -1.0);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeNormalizeSignedNoZero(int value, uint bits) {");
+  Indent();
+  EmitLine(
+      "if (bits == 32u) { return float(value) * (1.0 / 2147483647.5) + "
+      "(0.5 / 2147483647.5); }");
+  EmitLine("float denom = float((1u << bits) - 1u);");
+  EmitLine("return float(value) * (2.0 / denom) + (1.0 / denom);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine(
+      "uint XeGetTextureFetchConstantWord(uint fetch_constant, uint word) {");
+  Indent();
+  EmitLine("uint dword_index = fetch_constant * 6u + word;");
+  EmitLine(
+      "return xe_fetch_constants_data[dword_index >> 2u][dword_index & 3u];");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("bool XeTextureFetchConstantIs3D(uint fetch_constant) {");
+  Indent();
+  EmitLine(
+      "return (((XeGetTextureFetchConstantWord(fetch_constant, 5u) >> 9u) & "
+      "3u) == 2u);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("uint XeGetTextureFetchDimension(uint fetch_constant) {");
+  Indent();
+  EmitLine(
+      "return (XeGetTextureFetchConstantWord(fetch_constant, 5u) >> 9u) & 3u;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeGetTextureFetchSize1D(uint fetch_constant) {");
+  Indent();
+  EmitLine("uint word2 = XeGetTextureFetchConstantWord(fetch_constant, 2u);");
+  EmitLine("return float((word2 & 0xFFFFFFu) + 1u);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float2 XeGetTextureFetchSize2D(uint fetch_constant) {");
+  Indent();
+  EmitLine("uint word2 = XeGetTextureFetchConstantWord(fetch_constant, 2u);");
+  EmitLine(
+      "return float2(float((word2 & 0x1FFFu) + 1u), "
+      "float(((word2 >> 13u) & 0x1FFFu) + 1u));");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float3 XeGetTextureFetchSize3DOrStacked(uint fetch_constant) {");
+  Indent();
+  EmitLine("uint word2 = XeGetTextureFetchConstantWord(fetch_constant, 2u);");
+  EmitLine("if (XeTextureFetchConstantIs3D(fetch_constant)) {");
+  Indent();
+  EmitLine(
+      "return float3(float((word2 & 0x7FFu) + 1u), "
+      "float(((word2 >> 11u) & 0x7FFu) + 1u), "
+      "float(((word2 >> 22u) & 0x3FFu) + 1u));");
+  Outdent();
+  EmitLine("}");
+  EmitLine(
+      "return float3(float((word2 & 0x1FFFu) + 1u), "
+      "float(((word2 >> 13u) & 0x1FFFu) + 1u), "
+      "float(((word2 >> 26u) & 0x3Fu) + 1u));");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float3 XeTextureCubeDirection(float3 coord) {");
+  Indent();
+  EmitLine("float2 st = coord.xy * 2.0f - 3.0f;");
+  EmitLine("uint face = min(uint(coord.z), 5u);");
+  EmitLine("uint axis = face >> 1u;");
+  EmitLine("bool negative = (face & 1u) != 0u;");
+  EmitLine("if (axis == 0u) {");
+  Indent();
+  EmitLine(
+      "return float3(negative ? -1.0f : 1.0f, -st.y, "
+      "negative ? st.x : -st.x);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("if (axis == 1u) {");
+  Indent();
+  EmitLine(
+      "return float3(st.x, negative ? -1.0f : 1.0f, "
+      "negative ? -st.y : st.y);");
+  Outdent();
+  EmitLine("}");
+  EmitLine(
+      "return float3(negative ? -st.x : st.x, -st.y, "
+      "negative ? -1.0f : 1.0f);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeGetTextureFetchLodBias(uint fetch_constant) {");
+  Indent();
+  EmitLine("uint word4 = XeGetTextureFetchConstantWord(fetch_constant, 4u);");
+  EmitLine(
+      "return float(XeSignExtend((word4 >> 12u) & 0x3FFu, 10u)) * (1.0f / "
+      "32.0f);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeGetTextureFetchExpAdjust(uint fetch_constant) {");
+  Indent();
+  EmitLine("uint word3 = XeGetTextureFetchConstantWord(fetch_constant, 3u);");
+  EmitLine("return exp2(float(XeSignExtend((word3 >> 13u) & 0x3Fu, 6u)));");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeSaturateNoNaN(float value) {");
+  Indent();
+  EmitLine("float clamped = clamp(value, 0.0f, 1.0f);");
+  EmitLine("return (clamped == clamped) ? clamped : 0.0f;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine(
+      "uint XePreClampedDepthTo20e4(float depth, bool round_to_nearest_even, "
+      "bool remap_from_0_to_0_5) {");
+  Indent();
+  EmitLine("uint f32 = asuint(depth);");
+  EmitLine("uint remap_bias = remap_from_0_to_0_5 ? 1u : 0u;");
+  EmitLine("uint biased_f32;");
+  EmitLine("if (f32 < (0x38800000u - (remap_bias << 23u))) {");
+  Indent();
+  EmitLine("uint shift = min((113u - remap_bias) - (f32 >> 23u), 24u);");
+  EmitLine("biased_f32 = (((f32 & 0x7FFFFFu) | 0x800000u) >> shift);");
+  Outdent();
+  EmitLine("} else {");
+  Indent();
+  EmitLine("biased_f32 = f32 + (0xC8000000u + (remap_bias << 23u));");
+  Outdent();
+  EmitLine("}");
+  EmitLine("if (round_to_nearest_even) {");
+  Indent();
+  EmitLine("biased_f32 += 3u + ((biased_f32 >> 3u) & 1u);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("return (biased_f32 >> 3u) & 0xFFFFFFu;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeDepth20e4To32(uint f24, bool remap_to_0_to_0_5) {");
+  Indent();
+  EmitLine("uint remap_bias = remap_to_0_to_0_5 ? 1u : 0u;");
+  EmitLine("uint exponent = (f24 >> 20u) & 0xFu;");
+  EmitLine("uint mantissa = f24 & 0xFFFFFu;");
+  EmitLine("int exponent_signed = int(exponent);");
+  EmitLine("if (exponent == 0u) {");
+  Indent();
+  EmitLine("if (mantissa != 0u) {");
+  Indent();
+  EmitLine("int shift = 20 - int(firstbithigh(mantissa));");
+  EmitLine("mantissa <<= uint(shift);");
+  EmitLine("exponent_signed = 1 - shift;");
+  Outdent();
+  EmitLine("} else {");
+  Indent();
+  EmitLine("exponent_signed = -int(112u - remap_bias);");
+  Outdent();
+  EmitLine("}");
+  Outdent();
+  EmitLine("}");
+  EmitLine(
+      "uint exponent_bits = uint(exponent_signed + int(112u - remap_bias)) << "
+      "23u;");
+  EmitLine("return asfloat(exponent_bits | ((mantissa & 0xFFFFFu) << 3u));");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeDepthFloat24TruncateToHost(float depth) {");
+  Indent();
+  EmitLine("depth = XeSaturateNoNaN(depth);");
+  EmitLine("uint depth_uint = asuint(depth);");
+  EmitLine("if (depth_uint < 0x2E800000u) { return 0.0f; }");
+  EmitLine("uint exponent = (depth_uint >> 23u) & 0xFFu;");
+  EmitLine("int trunc_bits_signed = max(116 - int(exponent), 3);");
+  EmitLine("uint trunc_bits = uint(trunc_bits_signed);");
+  EmitLine("uint trunc_mask = ~((1u << trunc_bits) - 1u);");
+  EmitLine("return asfloat(depth_uint & trunc_mask) * 0.5f;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XeDepthFloat24RoundToHost(float depth) {");
+  Indent();
+  EmitLine("depth = XeSaturateNoNaN(depth);");
+  EmitLine("uint f24 = XePreClampedDepthTo20e4(depth, true, false);");
+  EmitLine("return XeDepth20e4To32(f24, true);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float XePWLGammaToLinear(float value) {");
+  Indent();
+  EmitLine("float clamped = XeSaturateNoNaN(value);");
+  EmitLine("bool piece_at_least_2 = clamped >= (96.0f / 255.0f);");
+  EmitLine("bool piece_at_least_3 = clamped >= (192.0f / 255.0f);");
+  EmitLine("bool piece_at_least_1 = clamped >= (64.0f / 255.0f);");
+  EmitLine(
+      "float scale = piece_at_least_2 ? (piece_at_least_3 ? (8.0f / "
+      "1024.0f) : (4.0f / 1024.0f)) : (piece_at_least_1 ? (2.0f / "
+      "1024.0f) : (1.0f / 1024.0f));");
+  EmitLine(
+      "float offset = piece_at_least_2 ? (piece_at_least_3 ? -1024.0f : "
+      "-256.0f) : (piece_at_least_1 ? -64.0f : 0.0f);");
+  EmitLine(
+      "float linear_value = clamped * (255.0f * 1024.0f) * scale + offset;");
+  EmitLine("linear_value += trunc(linear_value * scale);");
+  EmitLine("return linear_value * (1.0f / 1023.0f);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine(
+      "float XeApplyTextureSign(float unsigned_value, float signed_value, uint "
+      "sign) {");
+  Indent();
+  EmitLine("if (sign == 1u) { return signed_value; }");
+  EmitLine("if (sign == 2u) { return unsigned_value * 2.0f - 1.0f; }");
+  EmitLine("if (sign == 3u) { return XePWLGammaToLinear(unsigned_value); }");
+  EmitLine("return unsigned_value;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
   // Bindless resource helper functions.
   if (bindless_resources_used_) {
-    // Offset for texture SRVs in the view heap. The descriptor indices buffer
-    // stores relative indices; we need absolute heap indices for SM 6.6.
-    // This must match
-    // D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart.
-    EmitLine("static const uint kXeUnboundedSRVsStart = 20u;");
+    // Guest texture SRVs start after the system descriptors in the view heap.
+    // The command processor stores relative indices so add the offset back.
+    EmitLine("static const uint kXeResourceDescriptorHeapStart = " +
+             std::to_string(bindless_srv_heap_offset_) + "u;");
     EmitLine("");
 
     // Helper to get descriptor index from the descriptor indices constant
@@ -786,17 +1150,32 @@ void HlslShaderTranslator::EmitEntryPointBegin() {
   // Declare output variable.
   if (is_vertex_shader()) {
     EmitLine("VSOutput output = (VSOutput)0;");
+    Modification modification = GetHlslShaderModification();
+    if (modification.vertex.output_point_size) {
+      // Negative X means the point-list expansion shader should use the
+      // constant point size unless the guest shader overwrites it.
+      EmitLine("output.xe_point_parameters = float3(-1.0, 0.0, 0.0);");
+    }
+    if (current_shader().writes_point_size_edge_flag_kill_vertex()) {
+      EmitLine(
+          "float4 xe_point_size_edge_flag_kill_vertex = float4(-1.0, 0.0, "
+          "0.0, 0.0);");
+    }
   } else {
     EmitLine("PSOutput output = (PSOutput)0;");
+    if (PixelShaderNeedsCoverageOutput()) {
+      EmitLine("output.xe_coverage = 0xFFFFFFFFu;");
+    }
   }
   EmitLine("");
 
   // Declare temporary registers.
   uint32_t reg_count = register_count();
   if (reg_count > 0) {
+    EmitLine("float4 xe_gprs[" + std::to_string(reg_count) + "];");
     for (uint32_t i = 0; i < reg_count; ++i) {
-      EmitLine("float4 r" + std::to_string(i) +
-               " = float4(0.0, 0.0, 0.0, 0.0);");
+      EmitLine("xe_gprs[" + std::to_string(i) +
+               "] = float4(0.0, 0.0, 0.0, 0.0);");
     }
     EmitLine("");
   }
@@ -810,6 +1189,13 @@ void HlslShaderTranslator::EmitEntryPointBegin() {
   EmitLine("uint4 xe_loop_count = uint4(0u, 0u, 0u, 0u); // Loop count stack");
   EmitLine(
       "uint xe_vfetch_address = 0u; // Vertex fetch address for mini-fetch");
+  EmitLine("float xe_texture_lod = 0.0; // Explicit texture LOD state");
+  EmitLine(
+      "float3 xe_texture_grad_h = float3(0.0, 0.0, 0.0); // Explicit "
+      "horizontal texture gradient");
+  EmitLine(
+      "float3 xe_texture_grad_v = float3(0.0, 0.0, 0.0); // Explicit vertical "
+      "texture gradient");
   EmitLine("");
 }
 
@@ -851,16 +1237,100 @@ void HlslShaderTranslator::EmitEntryPointEnd() {
     Outdent();
     EmitLine("}");
 
+    Modification modification = GetHlslShaderModification();
+    auto distance_component = [](bool cull, uint32_t distance_count,
+                                 uint32_t index) {
+      const char* components = "xyzw";
+      std::string field =
+          cull ? "output.xe_cull_distance" : "output.xe_clip_distance";
+      if (distance_count <= 4) {
+        if (distance_count == 1) {
+          return field;
+        }
+        return field + "." + components[index];
+      }
+      if (index < 4) {
+        return field + "_0123." + components[index];
+      }
+      uint32_t tail_index = index - 4;
+      if (distance_count - 4 == 1) {
+        return field + "_45";
+      }
+      return field + "_45." + components[tail_index];
+    };
+    auto emit_distance_assignment = [&](bool cull, uint32_t index,
+                                        const std::string& value) {
+      uint32_t distance_count = cull
+                                    ? modification.GetVertexCullDistanceCount()
+                                    : modification.GetVertexClipDistanceCount();
+      EmitLine(distance_component(cull, distance_count, index) + " = " + value +
+               ";");
+    };
+
+    uint32_t clip_distance_next_component = 0;
+    uint32_t cull_distance_next_component = 0;
+    if (modification.vertex.user_clip_plane_count) {
+      EmitLine("// Emit user clip/cull distances before NDC transform");
+      EmitLine("float4 xe_guest_clip_position = output.xe_position;");
+      for (uint32_t i = 0; i < modification.vertex.user_clip_plane_count; ++i) {
+        std::string distance =
+            "dot(xe_guest_clip_position, xe_user_clip_planes[" +
+            std::to_string(i) + "])";
+        if (modification.vertex.user_clip_plane_cull) {
+          emit_distance_assignment(true, cull_distance_next_component++,
+                                   distance);
+        } else {
+          emit_distance_assignment(false, clip_distance_next_component++,
+                                   distance);
+        }
+      }
+      EmitLine("");
+    }
+
     // Apply NDC scale and offset for viewport transformation.
     EmitLine("// Apply NDC scale and offset for viewport transformation");
     EmitLine("output.xe_position.xyz *= xe_ndc_scale;");
     EmitLine("output.xe_position.xyz += xe_ndc_offset * output.xe_position.w;");
     EmitLine("");
+
+    bool shader_writes_vertex_kill =
+        (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b100) !=
+        0;
+    if (shader_writes_vertex_kill) {
+      EmitLine(
+          "uint xe_vertex_kill_bits = "
+          "asuint(xe_point_size_edge_flag_kill_vertex.z) & 0x7FFFFFFFu;");
+    }
+    if (modification.vertex.vertex_kill_and) {
+      emit_distance_assignment(true, cull_distance_next_component++,
+                               shader_writes_vertex_kill
+                                   ? "(xe_vertex_kill_bits != 0u) ? -1.0 : 0.0"
+                                   : "0.0");
+      EmitLine("");
+    } else if (shader_writes_vertex_kill) {
+      EmitLine("if (xe_vertex_kill_bits != 0u) {");
+      Indent();
+      EmitLine("output.xe_position.w = asfloat(0x7FC00000u);");
+      Outdent();
+      EmitLine("}");
+      EmitLine("");
+    }
+
+    if (modification.vertex.output_point_size &&
+        (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b001)) {
+      EmitLine(
+          "output.xe_point_parameters.x = "
+          "xe_point_size_edge_flag_kill_vertex.x;");
+      EmitLine("");
+    }
   }
 
   // For pixel shaders, apply color exponent bias to color outputs.
   // This matches DXBC: mul r2.xyzw, r2.xyzw, CB0[0][15].xxxx
   if (is_pixel_shader()) {
+    EmitPixelShaderAlphaTest();
+    EmitPixelShaderAlphaToCoverage();
+
     uint32_t color_targets_written = current_shader().writes_color_targets();
     if (color_targets_written) {
       EmitLine("// Apply color exponent bias");
@@ -876,6 +1346,34 @@ void HlslShaderTranslator::EmitEntryPointEnd() {
       if (color_targets_written & (1u << 3)) {
         EmitLine("output.xe_color_3 *= xe_color_exp_bias.w;");
       }
+      EmitLine("");
+    }
+
+    Modification modification = GetHlslShaderModification();
+    bool needs_float24_depth = PixelShaderNeedsFloat24DepthOutput();
+    if (needs_float24_depth) {
+      if (current_shader().writes_depth()) {
+        EmitLine("float xe_depth_guest = output.xe_depth;");
+      } else {
+        EmitLine(
+            "float xe_depth_guest = XeSaturateNoNaN(input.xe_position.z * "
+            "2.0f);");
+      }
+      if (modification.pixel.depth_stencil_mode ==
+          Modification::DepthStencilMode::kFloat24Truncating) {
+        EmitLine(
+            "output.xe_depth = XeDepthFloat24TruncateToHost(xe_depth_guest);");
+      } else {
+        EmitLine(
+            "output.xe_depth = XeDepthFloat24RoundToHost(xe_depth_guest);");
+      }
+      EmitLine("");
+    } else if (current_shader().writes_depth()) {
+      EmitLine("if ((xe_flags & 64u) != 0u) {");
+      Indent();
+      EmitLine("output.xe_depth *= 0.5f;");
+      Outdent();
+      EmitLine("}");
       EmitLine("");
     }
   }
@@ -904,6 +1402,9 @@ void HlslShaderTranslator::StartTranslation() {
     EmitLine("// Load vertex index into r0.x");
     EmitLine("uint xe_vertex_index = input.xe_vertex_id;");
     EmitLine(
+        "xe_vertex_index = (xe_vertex_index != xe_line_loop_closing_index) ? "
+        "xe_vertex_index : 0u;");
+    EmitLine(
         "xe_vertex_index = XeEndianSwap(xe_vertex_index, "
         "xe_vertex_index_endian);");
     EmitLine(
@@ -912,7 +1413,10 @@ void HlslShaderTranslator::StartTranslation() {
     EmitLine(
         "xe_vertex_index = clamp(xe_vertex_index, xe_vertex_index_min_max.x, "
         "xe_vertex_index_min_max.y);");
-    EmitLine("r0.x = float(xe_vertex_index);");
+    if (register_count()) {
+      EmitLine(RegisterToHlsl(0, InstructionStorageAddressingMode::kAbsolute) +
+               ".x = float(xe_vertex_index);");
+    }
     EmitLine("");
   } else {
     // Pixel shader: Load interpolated values from input struct into registers.
@@ -920,16 +1424,26 @@ void HlslShaderTranslator::StartTranslation() {
     // Interpolator N in the VS output -> register N in the PS.
     Modification modification = GetHlslShaderModification();
     uint32_t interpolator_mask = modification.pixel.interpolator_mask;
+    uint32_t param_gen_interpolator =
+        (modification.pixel.param_gen_enable &&
+         modification.pixel.param_gen_interpolator < register_count())
+            ? modification.pixel.param_gen_interpolator
+            : UINT32_MAX;
     bool any_loaded = false;
     for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
       if (interpolator_mask & (1u << i)) {
         if (i < register_count()) {
-          EmitLine("r" + std::to_string(i) + " = input.xe_interpolator_" +
-                   std::to_string(i) + ";");
+          if (i == param_gen_interpolator) {
+            continue;
+          }
+          EmitLine(
+              RegisterToHlsl(i, InstructionStorageAddressingMode::kAbsolute) +
+              " = input.xe_interpolator_" + std::to_string(i) + ";");
           any_loaded = true;
         }
       }
     }
+    EmitPixelShaderParamGen();
     if (any_loaded) {
       EmitLine("");
     }
@@ -1035,7 +1549,8 @@ std::string HlslShaderTranslator::OperandToHlsl(
   // Get base register reference.
   switch (operand.storage_source) {
     case InstructionStorageSource::kRegister:
-      result = "r" + std::to_string(operand.storage_index);
+      result = RegisterToHlsl(operand.storage_index,
+                              operand.storage_addressing_mode);
       break;
     case InstructionStorageSource::kConstantFloat: {
       const Shader::ConstantRegisterMap& constant_map =
@@ -1093,7 +1608,8 @@ std::string HlslShaderTranslator::ResultToHlsl(
 
   switch (result.storage_target) {
     case InstructionStorageTarget::kRegister:
-      output = "r" + std::to_string(result.storage_index);
+      output =
+          RegisterToHlsl(result.storage_index, result.storage_addressing_mode);
       break;
     case InstructionStorageTarget::kInterpolator: {
       // Only write to interpolators that are in the mask.
@@ -1111,6 +1627,9 @@ std::string HlslShaderTranslator::ResultToHlsl(
     case InstructionStorageTarget::kPosition:
       output = "output.xe_position";
       break;
+    case InstructionStorageTarget::kPointSizeEdgeFlagKillVertex:
+      output = "xe_point_size_edge_flag_kill_vertex";
+      break;
     case InstructionStorageTarget::kColor:
       output = "output.xe_color_" + std::to_string(result.storage_index);
       break;
@@ -1121,6 +1640,10 @@ std::string HlslShaderTranslator::ResultToHlsl(
       return "";
   }
 
+  if (output.empty()) {
+    return "";
+  }
+
   // Apply write mask.
   uint32_t write_mask = result.GetUsedWriteMask();
   if (write_mask != 0b1111) {
@@ -1128,6 +1651,58 @@ std::string HlslShaderTranslator::ResultToHlsl(
   }
 
   return output;
+}
+
+std::string HlslShaderTranslator::RegisterToHlsl(
+    uint32_t storage_index, InstructionStorageAddressingMode mode) const {
+  switch (mode) {
+    case InstructionStorageAddressingMode::kAbsolute:
+      return "xe_gprs[" + std::to_string(storage_index) + "]";
+    case InstructionStorageAddressingMode::kAddressRegisterRelative:
+      return "xe_gprs[" + std::to_string(storage_index) + " + xe_a0]";
+    case InstructionStorageAddressingMode::kLoopRelative:
+      return "xe_gprs[" + std::to_string(storage_index) + " + xe_aL.x]";
+  }
+  return "xe_gprs[" + std::to_string(storage_index) + "]";
+}
+
+bool HlslShaderTranslator::PixelShaderNeedsFloat24DepthOutput() const {
+  if (!is_pixel_shader()) {
+    return false;
+  }
+  Modification::DepthStencilMode mode =
+      GetHlslShaderModification().pixel.depth_stencil_mode;
+  return mode == Modification::DepthStencilMode::kFloat24Truncating ||
+         mode == Modification::DepthStencilMode::kFloat24Rounding;
+}
+
+bool HlslShaderTranslator::PixelShaderWritesDepthOutput() const {
+  return is_pixel_shader() && (current_shader().writes_depth() ||
+                               PixelShaderNeedsFloat24DepthOutput());
+}
+
+bool HlslShaderTranslator::IsForceEarlyDepthStencilEnabled() const {
+  return is_pixel_shader() &&
+         GetHlslShaderModification().pixel.depth_stencil_mode ==
+             Modification::DepthStencilMode::kEarlyHint &&
+         !edram_rov_used_ && current_shader().implicit_early_z_write_allowed();
+}
+
+bool HlslShaderTranslator::PixelShaderNeedsCoverageOutput() const {
+  return is_pixel_shader() && current_shader().writes_color_target(0) &&
+         !IsForceEarlyDepthStencilEnabled();
+}
+
+bool HlslShaderTranslator::ResultNeedsSaturation(
+    const InstructionResult& result) const {
+  return result.is_clamped ||
+         result.storage_target == InstructionStorageTarget::kDepth;
+}
+
+std::string HlslShaderTranslator::SaturateExpressionIfNeeded(
+    const InstructionResult& result, const std::string& expression) const {
+  return ResultNeedsSaturation(result) ? "saturate(" + expression + ")"
+                                       : expression;
 }
 
 std::string HlslShaderTranslator::GetSwizzleString(
@@ -1141,10 +1716,18 @@ std::string HlslShaderTranslator::GetSwizzleString(
 
 std::string HlslShaderTranslator::GetWriteMaskString(uint32_t write_mask) {
   std::string mask = ".";
-  if (write_mask & 0b0001) mask += "x";
-  if (write_mask & 0b0010) mask += "y";
-  if (write_mask & 0b0100) mask += "z";
-  if (write_mask & 0b1000) mask += "w";
+  if (write_mask & 0b0001) {
+    mask += "x";
+  }
+  if (write_mask & 0b0010) {
+    mask += "y";
+  }
+  if (write_mask & 0b0100) {
+    mask += "z";
+  }
+  if (write_mask & 0b1000) {
+    mask += "w";
+  }
   return mask;
 }
 
@@ -1162,7 +1745,8 @@ void HlslShaderTranslator::EmitVectorResultAssignment(
   std::string dest_base;
   switch (result.storage_target) {
     case InstructionStorageTarget::kRegister:
-      dest_base = "r" + std::to_string(result.storage_index);
+      dest_base =
+          RegisterToHlsl(result.storage_index, result.storage_addressing_mode);
       break;
     case InstructionStorageTarget::kInterpolator: {
       Modification modification = GetHlslShaderModification();
@@ -1177,6 +1761,9 @@ void HlslShaderTranslator::EmitVectorResultAssignment(
     case InstructionStorageTarget::kPosition:
       dest_base = "output.xe_position";
       break;
+    case InstructionStorageTarget::kPointSizeEdgeFlagKillVertex:
+      dest_base = "xe_point_size_edge_flag_kill_vertex";
+      break;
     case InstructionStorageTarget::kColor:
       dest_base = "output.xe_color_" + std::to_string(result.storage_index);
       break;
@@ -1188,10 +1775,12 @@ void HlslShaderTranslator::EmitVectorResultAssignment(
   }
 
   if (dest_base.empty()) {
+    LogUnimplementedMemExportResult("vector", result);
     return;  // No output target.
   }
 
   const char* comp_chars = "xyzw";
+  const std::string source = SaturateExpressionIfNeeded(result, source_expr);
 
   // Check if this is a standard swizzle (identity) - if so we can use a single
   // assignment with matching swizzles.
@@ -1211,19 +1800,26 @@ void HlslShaderTranslator::EmitVectorResultAssignment(
   if (is_standard_swizzle) {
     // Standard swizzle - use single assignment with matching write mask.
     std::string dest_swizzle = ".";
-    std::string src_swizzle = ".";
+    std::string vector_expr;
+    uint32_t written_component_count = 0;
     for (uint32_t i = 0; i < 4; ++i) {
       if (write_mask & (1 << i)) {
         dest_swizzle += comp_chars[i];
-        src_swizzle += comp_chars[i];
+        if (!vector_expr.empty()) {
+          vector_expr += ", ";
+        }
+        vector_expr += "(" + source + ").";
+        vector_expr += comp_chars[i];
+        ++written_component_count;
       }
     }
     if (write_mask == 0b1111) {
       // All components - no swizzle needed.
-      EmitLine(dest_base + " = " + source_expr + ";");
+      EmitLine(dest_base + " = " + source + ";");
     } else {
-      EmitLine(dest_base + dest_swizzle + " = (" + source_expr + ")" +
-               src_swizzle + ";");
+      EmitLine(dest_base + dest_swizzle + " = float" +
+               std::to_string(written_component_count) + "(" + vector_expr +
+               ");");
     }
   } else {
     // Non-standard swizzle - write each component separately.
@@ -1236,12 +1832,19 @@ void HlslShaderTranslator::EmitVectorResultAssignment(
           src_component <= SwizzleSource::kW) {
         uint32_t src_idx = static_cast<uint32_t>(src_component) -
                            static_cast<uint32_t>(SwizzleSource::kX);
-        EmitLine(dest_base + "." + comp_chars[i] + " = (" + source_expr + ")." +
+        EmitLine(dest_base + "." + comp_chars[i] + " = (" + source + ")." +
                  comp_chars[src_idx] + ";");
       }
       // Constants (k0, k1) are handled by StoreConstantComponents.
     }
   }
+
+  uint32_t point_size_write_mask = 0;
+  if ((write_mask & 0b0001) && result.components[0] >= SwizzleSource::kX &&
+      result.components[0] <= SwizzleSource::kW) {
+    point_size_write_mask = 0b0001;
+  }
+  EmitPointSizeClampIfNeeded(result, point_size_write_mask);
 }
 
 // Emit a scalar result assignment. Scalar values need to be replicated
@@ -1250,6 +1853,7 @@ void HlslShaderTranslator::EmitScalarResultAssignment(
     const InstructionResult& result, const std::string& scalar_expr) {
   std::string dest = ResultToHlsl(result);
   if (dest.empty()) {
+    LogUnimplementedMemExportResult("scalar", result);
     return;  // No output target.
   }
 
@@ -1260,22 +1864,52 @@ void HlslShaderTranslator::EmitScalarResultAssignment(
 
   // Count how many components are written.
   uint32_t component_count = 0;
-  if (write_mask & 0b0001) component_count++;
-  if (write_mask & 0b0010) component_count++;
-  if (write_mask & 0b0100) component_count++;
-  if (write_mask & 0b1000) component_count++;
+  if (write_mask & 0b0001) {
+    component_count++;
+  }
+  if (write_mask & 0b0010) {
+    component_count++;
+  }
+  if (write_mask & 0b0100) {
+    component_count++;
+  }
+  if (write_mask & 0b1000) {
+    component_count++;
+  }
 
+  const std::string source = SaturateExpressionIfNeeded(result, scalar_expr);
   if (component_count == 1) {
     // Single component - assign scalar directly.
-    EmitLine(dest + " = " + scalar_expr + ";");
+    EmitLine(dest + " = " + source + ";");
   } else {
     // Multiple components - replicate scalar into a vector.
-    std::string replicated = "(" + scalar_expr + ").";
+    std::string replicated = "float" + std::to_string(component_count) + "(";
     for (uint32_t i = 0; i < component_count; ++i) {
-      replicated += "x";  // Use .x, .xx, .xxx, .xxxx for replication
+      if (i != 0) {
+        replicated += ", ";
+      }
+      replicated += source;
     }
+    replicated += ")";
     EmitLine(dest + " = " + replicated + ";");
   }
+
+  EmitPointSizeClampIfNeeded(result, write_mask);
+}
+
+void HlslShaderTranslator::EmitPointSizeClampIfNeeded(
+    const InstructionResult& result, uint32_t write_mask) {
+  if (result.storage_target !=
+          InstructionStorageTarget::kPointSizeEdgeFlagKillVertex ||
+      !(write_mask & 0b0001)) {
+    return;
+  }
+
+  EmitLine(
+      "xe_point_size_edge_flag_kill_vertex.x = "
+      "asfloat(min(asint(xe_point_vertex_diameter_max), "
+      "max(asint(xe_point_vertex_diameter_min), "
+      "asint(xe_point_size_edge_flag_kill_vertex.x))));");
 }
 
 // Store constant components (0 or 1) to the result destination.
@@ -1291,6 +1925,7 @@ void HlslShaderTranslator::StoreConstantComponents(
 
   std::string dest = ResultToHlsl(result);
   if (dest.empty()) {
+    LogUnimplementedMemExportResult("constant", result);
     return;  // No output target.
   }
 
@@ -1318,10 +1953,18 @@ void HlslShaderTranslator::StoreConstantComponents(
   // Build the constant value expression.
   // For each component in the mask, write 0.0 or 1.0 based on constant_1_mask.
   uint32_t component_count = 0;
-  if (constant_mask & 0b0001) component_count++;
-  if (constant_mask & 0b0010) component_count++;
-  if (constant_mask & 0b0100) component_count++;
-  if (constant_mask & 0b1000) component_count++;
+  if (constant_mask & 0b0001) {
+    component_count++;
+  }
+  if (constant_mask & 0b0010) {
+    component_count++;
+  }
+  if (constant_mask & 0b0100) {
+    component_count++;
+  }
+  if (constant_mask & 0b1000) {
+    component_count++;
+  }
 
   std::string value_expr;
   if (component_count == 1) {
@@ -1338,7 +1981,9 @@ void HlslShaderTranslator::StoreConstantComponents(
     bool first = true;
     for (uint32_t i = 0; i < 4; ++i) {
       if (constant_mask & (1 << i)) {
-        if (!first) value_expr += ", ";
+        if (!first) {
+          value_expr += ", ";
+        }
         value_expr += (constant_1_mask & (1 << i)) ? "1.0" : "0.0";
         first = false;
       }
@@ -1348,10 +1993,18 @@ void HlslShaderTranslator::StoreConstantComponents(
 
   // Build the write mask for the constant components only.
   std::string write_mask_str = ".";
-  if (constant_mask & 0b0001) write_mask_str += "x";
-  if (constant_mask & 0b0010) write_mask_str += "y";
-  if (constant_mask & 0b0100) write_mask_str += "z";
-  if (constant_mask & 0b1000) write_mask_str += "w";
+  if (constant_mask & 0b0001) {
+    write_mask_str += "x";
+  }
+  if (constant_mask & 0b0010) {
+    write_mask_str += "y";
+  }
+  if (constant_mask & 0b0100) {
+    write_mask_str += "z";
+  }
+  if (constant_mask & 0b1000) {
+    write_mask_str += "w";
+  }
 
   // Get the base destination without any existing write mask.
   // ResultToHlsl might already include a write mask, so we need to strip it.
@@ -1374,6 +2027,153 @@ void HlslShaderTranslator::StoreConstantComponents(
   }
 
   EmitLine(dest_base + write_mask_str + " = " + value_expr + ";");
+  EmitPointSizeClampIfNeeded(result, constant_mask);
+}
+
+void HlslShaderTranslator::EmitPixelShaderParamGen() {
+  if (!is_pixel_shader()) {
+    return;
+  }
+  Modification modification = GetHlslShaderModification();
+  if (!modification.pixel.param_gen_enable ||
+      modification.pixel.param_gen_interpolator >= register_count()) {
+    return;
+  }
+
+  std::string dest =
+      RegisterToHlsl(modification.pixel.param_gen_interpolator,
+                     InstructionStorageAddressingMode::kAbsolute);
+  EmitLine("// Generate PsParamGen pseudo-interpolator");
+  EmitLine("{");
+  Indent();
+  EmitLine("float2 xe_param_xy = floor(input.xe_position.xy);");
+  if (draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1) {
+    EmitLine("xe_param_xy *= float2(" +
+             HlslFloatLiteral(1.0f / float(draw_resolution_scale_x_)) + ", " +
+             HlslFloatLiteral(1.0f / float(draw_resolution_scale_y_)) + ");");
+  }
+  EmitLine("float4 xe_param_gen = float4(abs(xe_param_xy), 0.0f, 0.0f);");
+  if (modification.pixel.param_gen_point) {
+    EmitLine("xe_param_gen.y = XeSetFloatSignBit(abs(xe_param_gen.y));");
+    EmitLine("xe_param_gen.zw = saturate(input.xe_point_parameters.xy);");
+  } else {
+    EmitLine("if ((xe_flags & 16u) != 0u && !input.xe_is_front_face) {");
+    Indent();
+    EmitLine("xe_param_gen.x = XeSetFloatSignBit(xe_param_gen.x);");
+    Outdent();
+    EmitLine("}");
+    EmitLine("if ((xe_flags & 32u) != 0u) {");
+    Indent();
+    EmitLine("xe_param_gen.z = asfloat(0x80000000u);");
+    Outdent();
+    EmitLine("}");
+  }
+  EmitLine(dest + " = xe_param_gen;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+}
+
+void HlslShaderTranslator::EmitPixelShaderAlphaTest() {
+  if (!is_pixel_shader() || !current_shader().writes_color_target(0) ||
+      IsForceEarlyDepthStencilEnabled()) {
+    return;
+  }
+
+  EmitLine("// Alpha test");
+  EmitLine("{");
+  Indent();
+  EmitLine("uint xe_alpha_test_function = (xe_flags >> 7u) & 7u;");
+  EmitLine("if (xe_alpha_test_function != 7u) {");
+  Indent();
+  EmitLine("float xe_alpha_test_alpha = output.xe_color_0.a;");
+  EmitLine("bool xe_alpha_test_pass = false;");
+  EmitLine("if (xe_alpha_test_function == 5u) {");
+  Indent();
+  EmitLine(
+      "xe_alpha_test_pass = xe_alpha_test_alpha != xe_alpha_test_reference;");
+  Outdent();
+  EmitLine("} else {");
+  Indent();
+  EmitLine(
+      "xe_alpha_test_pass = xe_alpha_test_pass || "
+      "(((xe_alpha_test_function & 1u) != 0u) && "
+      "(xe_alpha_test_alpha < xe_alpha_test_reference));");
+  EmitLine(
+      "xe_alpha_test_pass = xe_alpha_test_pass || "
+      "(((xe_alpha_test_function & 2u) != 0u) && "
+      "(xe_alpha_test_alpha == xe_alpha_test_reference));");
+  EmitLine(
+      "xe_alpha_test_pass = xe_alpha_test_pass || "
+      "(((xe_alpha_test_function & 4u) != 0u) && "
+      "(xe_alpha_test_reference < xe_alpha_test_alpha));");
+  Outdent();
+  EmitLine("}");
+  EmitLine("if (!xe_alpha_test_pass) { discard; }");
+  Outdent();
+  EmitLine("}");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+}
+
+void HlslShaderTranslator::EmitPixelShaderAlphaToCoverage() {
+  if (!PixelShaderNeedsCoverageOutput()) {
+    return;
+  }
+
+  EmitLine("// Alpha to coverage");
+  EmitLine("if (xe_alpha_to_mask != 0u) {");
+  Indent();
+  EmitLine("uint2 xe_atoc_pixel = uint2(input.xe_position.xy);");
+  EmitLine(
+      "uint xe_atoc_offset_index = ((xe_atoc_pixel.x & 1u) << 1u) | "
+      "(xe_atoc_pixel.y & 1u);");
+  EmitLine(
+      "float xe_atoc_offset = float((xe_alpha_to_mask >> "
+      "(xe_atoc_offset_index << 1u)) & 3u);");
+  EmitLine("float xe_atoc_alpha = output.xe_color_0.a;");
+  EmitLine("uint xe_atoc_coverage = 0u;");
+  EmitLine("if (xe_sample_count_log2.y != 0u) {");
+  Indent();
+  EmitLine("if (xe_sample_count_log2.x != 0u) {");
+  Indent();
+  EmitLine(
+      "xe_atoc_coverage |= (xe_atoc_alpha >= "
+      "(0.75f - xe_atoc_offset * (1.0f / 16.0f))) ? 1u : 0u;");
+  EmitLine(
+      "xe_atoc_coverage |= (xe_atoc_alpha >= "
+      "(0.25f - xe_atoc_offset * (1.0f / 16.0f))) ? 2u : 0u;");
+  EmitLine(
+      "xe_atoc_coverage |= (xe_atoc_alpha >= "
+      "(0.5f - xe_atoc_offset * (1.0f / 16.0f))) ? 4u : 0u;");
+  EmitLine(
+      "xe_atoc_coverage |= (xe_atoc_alpha >= "
+      "(1.0f - xe_atoc_offset * (1.0f / 16.0f))) ? 8u : 0u;");
+  Outdent();
+  EmitLine("} else {");
+  Indent();
+  EmitLine(
+      "xe_atoc_coverage |= (xe_atoc_alpha >= "
+      "(0.5f - xe_atoc_offset * (1.0f / 8.0f))) ? 1u : 0u;");
+  EmitLine(
+      "xe_atoc_coverage |= (xe_atoc_alpha >= "
+      "(1.0f - xe_atoc_offset * (1.0f / 8.0f))) ? 2u : 0u;");
+  Outdent();
+  EmitLine("}");
+  Outdent();
+  EmitLine("} else {");
+  Indent();
+  EmitLine(
+      "xe_atoc_coverage = (xe_atoc_alpha >= "
+      "(1.0f - xe_atoc_offset * (1.0f / 4.0f))) ? 1u : 0u;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("output.xe_coverage = xe_atoc_coverage;");
+  EmitLine("if (xe_atoc_coverage == 0u) { discard; }");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
 }
 
 void HlslShaderTranslator::ProcessLabel(uint32_t cf_index) {
@@ -1536,6 +2336,48 @@ void HlslShaderTranslator::ProcessLoopEndInstruction(
   EmitLine("}");
 }
 
+void HlslShaderTranslator::ProcessCallInstruction(
+    const ParsedCallInstruction& instr) {
+  CloseInstructionPredication();
+  CloseExecConditionals();
+
+  switch (instr.type) {
+    case ParsedCallInstruction::Type::kUnconditional:
+      XELOGE(
+          "HLSL: UNIMPLEMENTED control-flow call at CF {} to target {}; "
+          "subroutine execution is dropped",
+          instr.dword_index, instr.target_address);
+      break;
+    case ParsedCallInstruction::Type::kConditional:
+      XELOGE(
+          "HLSL: UNIMPLEMENTED conditional control-flow call at CF {} to "
+          "target {} using bool constant {} condition {}; subroutine execution "
+          "is dropped",
+          instr.dword_index, instr.target_address, instr.bool_constant_index,
+          instr.condition);
+      break;
+    case ParsedCallInstruction::Type::kPredicated:
+      XELOGE(
+          "HLSL: UNIMPLEMENTED predicated control-flow call at CF {} to target "
+          "{} condition {}; subroutine execution is dropped",
+          instr.dword_index, instr.target_address, instr.condition);
+      break;
+  }
+  EmitLine("// ERROR: Unimplemented call to CF " +
+           std::to_string(instr.target_address));
+}
+
+void HlslShaderTranslator::ProcessReturnInstruction(
+    const ParsedReturnInstruction& instr) {
+  CloseInstructionPredication();
+  CloseExecConditionals();
+  XELOGE(
+      "HLSL: UNIMPLEMENTED control-flow return at CF {}; subroutine execution "
+      "is dropped",
+      instr.dword_index);
+  EmitLine("// ERROR: Unimplemented return");
+}
+
 void HlslShaderTranslator::ProcessJumpInstruction(
     const ParsedJumpInstruction& instr) {
   // Close instruction-level predication before flow control.
@@ -1578,7 +2420,14 @@ void HlslShaderTranslator::ProcessJumpInstruction(
 
 void HlslShaderTranslator::ProcessAllocInstruction(
     const ParsedAllocInstruction& instr, uint8_t export_eM) {
-  // Memory export handling would go here.
+  const bool starts_memexport = instr.type == ucode::AllocType::kMemory &&
+                                current_shader().memexport_eM_written() != 0;
+  if (export_eM || starts_memexport) {
+    XELOGE(
+        "HLSL: UNIMPLEMENTED memexport alloc: count {} export_eM mask "
+        "0x{:02X}; continuing without memory export stores",
+        instr.count, export_eM);
+  }
   EmitLine("// Alloc: " + std::to_string(instr.count) + " exports");
 }
 
@@ -1587,10 +2436,7 @@ void HlslShaderTranslator::ProcessVertexFetchInstruction(
   uint32_t used_result_components = instr.result.GetUsedResultComponents();
   if (!used_result_components && instr.is_mini_fetch) {
     // Nothing to load.
-    std::string dest = ResultToHlsl(instr.result);
-    if (!dest.empty()) {
-      EmitLine(dest + " = float4(0.0, 0.0, 0.0, 0.0);");
-    }
+    EmitVectorResultAssignment(instr.result, "float4(0.0, 0.0, 0.0, 0.0)");
     return;
   }
 
@@ -1625,7 +2471,11 @@ void HlslShaderTranslator::ProcessVertexFetchInstruction(
   // Get vertex index from operand 0.
   if (!instr.is_mini_fetch) {
     std::string index_operand = OperandToHlsl(instr.operands[0], 1);
-    EmitLine("int xe_vf_index = int(floor(" + index_operand + "));");
+    if (instr.attributes.is_index_rounded) {
+      EmitLine("int xe_vf_index = int(floor(" + index_operand + " + 0.5));");
+    } else {
+      EmitLine("int xe_vf_index = int(floor(" + index_operand + "));");
+    }
     // Stride is in DWORDs (4-byte units), convert to bytes by multiplying by 4.
     // Store the vertex's base address for subsequent mini-fetches.
     EmitLine("xe_vfetch_address = xe_vf_base_addr + uint(xe_vf_index) * " +
@@ -1641,6 +2491,88 @@ void HlslShaderTranslator::ProcessVertexFetchInstruction(
 
   // Load data from shared memory based on format.
   xenos::VertexFormat format = instr.attributes.data_format;
+  uint32_t needed_words = 0;
+  bool known_format = true;
+  switch (format) {
+    case xenos::VertexFormat::k_8_8_8_8:
+    case xenos::VertexFormat::k_2_10_10_10:
+    case xenos::VertexFormat::k_10_11_11:
+    case xenos::VertexFormat::k_11_11_10:
+    case xenos::VertexFormat::k_16_16:
+    case xenos::VertexFormat::k_16_16_16_16:
+    case xenos::VertexFormat::k_16_16_FLOAT:
+    case xenos::VertexFormat::k_16_16_16_16_FLOAT:
+    case xenos::VertexFormat::k_32:
+    case xenos::VertexFormat::k_32_32:
+    case xenos::VertexFormat::k_32_32_32_32:
+    case xenos::VertexFormat::k_32_FLOAT:
+    case xenos::VertexFormat::k_32_32_FLOAT:
+    case xenos::VertexFormat::k_32_32_32_32_FLOAT:
+    case xenos::VertexFormat::k_32_32_32_FLOAT:
+      needed_words =
+          xenos::GetVertexFormatNeededWords(format, used_result_components);
+      break;
+    default:
+      known_format = false;
+      break;
+  }
+  if (known_format && !needed_words) {
+    EmitVectorResultAssignment(instr.result, "float4(0.0, 0.0, 0.0, 0.0)");
+    StoreConstantComponents(instr.result);
+    Outdent();
+    EmitLine("}");
+    return;
+  }
+
+  auto make_signed_int = [](const std::string& value_expr,
+                            uint32_t bits) -> std::string {
+    if (bits == 32) {
+      return "asint(" + value_expr + ")";
+    }
+    return "XeSignExtend(" + value_expr + ", " + std::to_string(bits) + "u)";
+  };
+  auto make_integer_component = [&](const std::string& value_expr,
+                                    uint32_t bits) -> std::string {
+    if (instr.attributes.is_signed) {
+      return "float(" + make_signed_int(value_expr, bits) + ")";
+    }
+    return "float(" + value_expr + ")";
+  };
+  auto make_normalized_component = [&](const std::string& value_expr,
+                                       uint32_t bits) -> std::string {
+    if (instr.attributes.is_signed) {
+      const std::string signed_value = make_signed_int(value_expr, bits);
+      if (instr.attributes.signed_rf_mode ==
+          xenos::SignedRepeatingFractionMode::kNoZero) {
+        return "XeNormalizeSignedNoZero(" + signed_value + ", " +
+               std::to_string(bits) + "u)";
+      }
+      return "XeNormalizeSignedZeroClampMinusOne(" + signed_value + ", " +
+             std::to_string(bits) + "u)";
+    }
+    return "XeNormalizeUnsigned(" + value_expr + ", " + std::to_string(bits) +
+           "u)";
+  };
+  auto make_fixed_component = [&](const std::string& value_expr,
+                                  uint32_t bits) -> std::string {
+    return instr.attributes.is_integer
+               ? make_integer_component(value_expr, bits)
+               : make_normalized_component(value_expr, bits);
+  };
+  auto make_packed_component = [&](const std::string& packed_expr,
+                                   uint32_t shift, uint32_t mask,
+                                   uint32_t bits) -> std::string {
+    std::string value_expr;
+    if (shift) {
+      value_expr = "((" + packed_expr + " >> " + std::to_string(shift) +
+                   "u) & 0x" + fmt::format("{:X}", mask) + "u)";
+    } else {
+      value_expr =
+          "(" + packed_expr + " & 0x" + fmt::format("{:X}", mask) + "u)";
+    }
+    return make_fixed_component(value_expr, bits);
+  };
+
   std::string result_value;
 
   switch (format) {
@@ -1658,67 +2590,68 @@ void HlslShaderTranslator::ProcessVertexFetchInstruction(
       EmitLine("xe_vf_raw.x = XeEndianSwap(xe_vf_raw.x, xe_vf_endian);");
       EmitLine("xe_vf_raw.y = XeEndianSwap(xe_vf_raw.y, xe_vf_endian);");
       EmitLine("xe_vf_raw.z = XeEndianSwap(xe_vf_raw.z, xe_vf_endian);");
-      result_value = "float4(asfloat(xe_vf_raw), 1.0)";
+      result_value = "float4(asfloat(xe_vf_raw), 0.0)";
       break;
 
     case xenos::VertexFormat::k_32_32_FLOAT:
       EmitLine("uint2 xe_vf_raw = XeSharedMemoryLoad2(xe_vf_byte_addr);");
       EmitLine("xe_vf_raw.x = XeEndianSwap(xe_vf_raw.x, xe_vf_endian);");
       EmitLine("xe_vf_raw.y = XeEndianSwap(xe_vf_raw.y, xe_vf_endian);");
-      result_value = "float4(asfloat(xe_vf_raw), 0.0, 1.0)";
+      result_value = "float4(asfloat(xe_vf_raw), 0.0, 0.0)";
       break;
 
     case xenos::VertexFormat::k_32_FLOAT:
       EmitLine("uint xe_vf_raw = XeSharedMemoryLoad(xe_vf_byte_addr);");
       EmitLine("xe_vf_raw = XeEndianSwap(xe_vf_raw, xe_vf_endian);");
-      result_value = "float4(asfloat(xe_vf_raw), 0.0, 0.0, 1.0)";
+      result_value = "float4(asfloat(xe_vf_raw), 0.0, 0.0, 0.0)";
       break;
 
     case xenos::VertexFormat::k_8_8_8_8:
       EmitLine("uint xe_vf_raw = XeSharedMemoryLoad(xe_vf_byte_addr);");
       EmitLine("xe_vf_raw = XeEndianSwap(xe_vf_raw, xe_vf_endian);");
-      if (instr.attributes.is_signed) {
-        result_value = "XeUnpack8888Signed(xe_vf_raw)";
-      } else {
-        result_value = "XeUnpack8888(xe_vf_raw)";
-      }
+      result_value = "float4(" +
+                     make_packed_component("xe_vf_raw", 0, 0xFF, 8) + ", " +
+                     make_packed_component("xe_vf_raw", 8, 0xFF, 8) + ", " +
+                     make_packed_component("xe_vf_raw", 16, 0xFF, 8) + ", " +
+                     make_packed_component("xe_vf_raw", 24, 0xFF, 8) + ")";
       break;
 
     case xenos::VertexFormat::k_2_10_10_10:
       EmitLine("uint xe_vf_raw = XeSharedMemoryLoad(xe_vf_byte_addr);");
       EmitLine("xe_vf_raw = XeEndianSwap(xe_vf_raw, xe_vf_endian);");
-      if (instr.attributes.is_signed) {
-        result_value = "XeUnpack2101010Signed(xe_vf_raw)";
-      } else {
-        result_value = "XeUnpack2101010(xe_vf_raw)";
-      }
+      result_value = "float4(" +
+                     make_packed_component("xe_vf_raw", 0, 0x3FF, 10) + ", " +
+                     make_packed_component("xe_vf_raw", 10, 0x3FF, 10) + ", " +
+                     make_packed_component("xe_vf_raw", 20, 0x3FF, 10) + ", " +
+                     make_packed_component("xe_vf_raw", 30, 0x3, 2) + ")";
       break;
 
     case xenos::VertexFormat::k_10_11_11: {
       EmitLine("uint xe_vf_raw = XeSharedMemoryLoad(xe_vf_byte_addr);");
       EmitLine("xe_vf_raw = XeEndianSwap(xe_vf_raw, xe_vf_endian);");
-      EmitLine("float3 xe_vf_xyz = XeUnpack101111(xe_vf_raw);");
-      result_value = "float4(xe_vf_xyz.x, xe_vf_xyz.y, xe_vf_xyz.z, 1.0)";
+      result_value =
+          "float4(" + make_packed_component("xe_vf_raw", 0, 0x7FF, 11) + ", " +
+          make_packed_component("xe_vf_raw", 11, 0x7FF, 11) + ", " +
+          make_packed_component("xe_vf_raw", 22, 0x3FF, 10) + ", 0.0)";
       break;
     }
 
     case xenos::VertexFormat::k_11_11_10: {
       EmitLine("uint xe_vf_raw = XeSharedMemoryLoad(xe_vf_byte_addr);");
       EmitLine("xe_vf_raw = XeEndianSwap(xe_vf_raw, xe_vf_endian);");
-      EmitLine("float3 xe_vf_xyz = XeUnpack111110(xe_vf_raw);");
-      result_value = "float4(xe_vf_xyz.x, xe_vf_xyz.y, xe_vf_xyz.z, 1.0)";
+      result_value =
+          "float4(" + make_packed_component("xe_vf_raw", 0, 0x3FF, 10) + ", " +
+          make_packed_component("xe_vf_raw", 10, 0x7FF, 11) + ", " +
+          make_packed_component("xe_vf_raw", 21, 0x7FF, 11) + ", 0.0)";
       break;
     }
 
     case xenos::VertexFormat::k_16_16: {
       EmitLine("uint xe_vf_raw = XeSharedMemoryLoad(xe_vf_byte_addr);");
       EmitLine("xe_vf_raw = XeEndianSwap(xe_vf_raw, xe_vf_endian);");
-      if (instr.attributes.is_signed) {
-        EmitLine("float2 xe_vf_xy = XeUnpack1616Signed(xe_vf_raw);");
-      } else {
-        EmitLine("float2 xe_vf_xy = XeUnpack1616(xe_vf_raw);");
-      }
-      result_value = "float4(xe_vf_xy.x, xe_vf_xy.y, 0.0, 1.0)";
+      result_value =
+          "float4(" + make_packed_component("xe_vf_raw", 0, 0xFFFF, 16) + ", " +
+          make_packed_component("xe_vf_raw", 16, 0xFFFF, 16) + ", 0.0, 0.0)";
       break;
     }
 
@@ -1726,21 +2659,18 @@ void HlslShaderTranslator::ProcessVertexFetchInstruction(
       EmitLine("uint2 xe_vf_raw = XeSharedMemoryLoad2(xe_vf_byte_addr);");
       EmitLine("xe_vf_raw.x = XeEndianSwap(xe_vf_raw.x, xe_vf_endian);");
       EmitLine("xe_vf_raw.y = XeEndianSwap(xe_vf_raw.y, xe_vf_endian);");
-      if (instr.attributes.is_signed) {
-        EmitLine("float2 xe_vf_xy = XeUnpack1616Signed(xe_vf_raw.x);");
-        EmitLine("float2 xe_vf_zw = XeUnpack1616Signed(xe_vf_raw.y);");
-      } else {
-        EmitLine("float2 xe_vf_xy = XeUnpack1616(xe_vf_raw.x);");
-        EmitLine("float2 xe_vf_zw = XeUnpack1616(xe_vf_raw.y);");
-      }
-      result_value = "float4(xe_vf_xy.x, xe_vf_xy.y, xe_vf_zw.x, xe_vf_zw.y)";
+      result_value =
+          "float4(" + make_packed_component("xe_vf_raw.x", 0, 0xFFFF, 16) +
+          ", " + make_packed_component("xe_vf_raw.x", 16, 0xFFFF, 16) + ", " +
+          make_packed_component("xe_vf_raw.y", 0, 0xFFFF, 16) + ", " +
+          make_packed_component("xe_vf_raw.y", 16, 0xFFFF, 16) + ")";
     } break;
 
     case xenos::VertexFormat::k_16_16_FLOAT: {
       EmitLine("uint xe_vf_raw = XeSharedMemoryLoad(xe_vf_byte_addr);");
       EmitLine("xe_vf_raw = XeEndianSwap(xe_vf_raw, xe_vf_endian);");
       EmitLine("float2 xe_vf_xy = XeUnpackFloat16x2(xe_vf_raw);");
-      result_value = "float4(xe_vf_xy.x, xe_vf_xy.y, 0.0, 1.0)";
+      result_value = "float4(xe_vf_xy.x, xe_vf_xy.y, 0.0, 0.0)";
     } break;
 
     case xenos::VertexFormat::k_16_16_16_16_FLOAT: {
@@ -1757,39 +2687,34 @@ void HlslShaderTranslator::ProcessVertexFetchInstruction(
     case xenos::VertexFormat::k_32_32_32_32: {
       // Integer formats.
       uint32_t component_count = 1;
-      if (format == xenos::VertexFormat::k_32_32)
+      if (format == xenos::VertexFormat::k_32_32) {
         component_count = 2;
-      else if (format == xenos::VertexFormat::k_32_32_32_32)
+      } else if (format == xenos::VertexFormat::k_32_32_32_32) {
         component_count = 4;
+      }
 
       if (component_count == 1) {
         EmitLine("uint xe_vf_raw = XeSharedMemoryLoad(xe_vf_byte_addr);");
         EmitLine("xe_vf_raw = XeEndianSwap(xe_vf_raw, xe_vf_endian);");
-        if (instr.attributes.is_signed) {
-          result_value = "float4(float(int(xe_vf_raw)), 0.0, 0.0, 1.0)";
-        } else {
-          result_value = "float4(float(xe_vf_raw), 0.0, 0.0, 1.0)";
-        }
+        result_value = "float4(" + make_fixed_component("xe_vf_raw", 32) +
+                       ", 0.0, 0.0, 0.0)";
       } else if (component_count == 2) {
         EmitLine("uint2 xe_vf_raw = XeSharedMemoryLoad2(xe_vf_byte_addr);");
         EmitLine("xe_vf_raw.x = XeEndianSwap(xe_vf_raw.x, xe_vf_endian);");
         EmitLine("xe_vf_raw.y = XeEndianSwap(xe_vf_raw.y, xe_vf_endian);");
-        if (instr.attributes.is_signed) {
-          result_value = "float4(float2(int2(xe_vf_raw)), 0.0, 1.0)";
-        } else {
-          result_value = "float4(float2(xe_vf_raw), 0.0, 1.0)";
-        }
+        result_value = "float4(" + make_fixed_component("xe_vf_raw.x", 32) +
+                       ", " + make_fixed_component("xe_vf_raw.y", 32) +
+                       ", 0.0, 0.0)";
       } else {
         EmitLine("uint4 xe_vf_raw = XeSharedMemoryLoad4(xe_vf_byte_addr);");
         EmitLine("xe_vf_raw.x = XeEndianSwap(xe_vf_raw.x, xe_vf_endian);");
         EmitLine("xe_vf_raw.y = XeEndianSwap(xe_vf_raw.y, xe_vf_endian);");
         EmitLine("xe_vf_raw.z = XeEndianSwap(xe_vf_raw.z, xe_vf_endian);");
         EmitLine("xe_vf_raw.w = XeEndianSwap(xe_vf_raw.w, xe_vf_endian);");
-        if (instr.attributes.is_signed) {
-          result_value = "float4(int4(xe_vf_raw))";
-        } else {
-          result_value = "float4(xe_vf_raw)";
-        }
+        result_value = "float4(" + make_fixed_component("xe_vf_raw.x", 32) +
+                       ", " + make_fixed_component("xe_vf_raw.y", 32) + ", " +
+                       make_fixed_component("xe_vf_raw.z", 32) + ", " +
+                       make_fixed_component("xe_vf_raw.w", 32) + ")";
       }
     } break;
 
@@ -1797,7 +2722,7 @@ void HlslShaderTranslator::ProcessVertexFetchInstruction(
       // Unsupported format - return zeros.
       XELOGW("HLSL: Unsupported vertex format: {}",
              static_cast<uint32_t>(format));
-      result_value = "float4(0.0, 0.0, 0.0, 1.0)";
+      result_value = "float4(0.0, 0.0, 0.0, 0.0)";
       break;
   }
 
@@ -1805,7 +2730,7 @@ void HlslShaderTranslator::ProcessVertexFetchInstruction(
   if (instr.attributes.exp_adjust != 0) {
     float exp_adjust_multiplier = std::ldexp(1.0f, instr.attributes.exp_adjust);
     EmitLine("float4 xe_vf_result = " + result_value + " * " +
-             std::to_string(exp_adjust_multiplier) + ";");
+             HlslFloatLiteral(exp_adjust_multiplier) + ";");
     result_value = "xe_vf_result";
   }
 
@@ -1824,7 +2749,6 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
     const ParsedTextureFetchInstruction& instr) {
   using FetchOpcode = ucode::FetchOpcode;
 
-  // Handle different texture fetch types.
   switch (instr.opcode) {
     case FetchOpcode::kTextureFetch:
     case FetchOpcode::kGetTextureBorderColorFrac:
@@ -1833,15 +2757,15 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
     case FetchOpcode::kGetTextureWeights:
       break;
     case FetchOpcode::kSetTextureLod:
-      // setTextureLod sets the LOD for subsequent texture fetches.
-      // Store LOD value from source operand.
-      EmitLine("// SetTextureLod - LOD hint stored");
+      EmitLine("xe_texture_lod = " + OperandToHlsl(instr.operands[0], 1) + ";");
       return;
     case FetchOpcode::kSetTextureGradientsHorz:
-      EmitLine("// SetTextureGradientsHorz - gradient stored");
+      EmitLine("xe_texture_grad_h = " + OperandToHlsl(instr.operands[0], 3) +
+               ";");
       return;
     case FetchOpcode::kSetTextureGradientsVert:
-      EmitLine("// SetTextureGradientsVert - gradient stored");
+      EmitLine("xe_texture_grad_v = " + OperandToHlsl(instr.operands[0], 3) +
+               ";");
       return;
     default:
       XELOGW("HLSL: Unhandled texture fetch opcode: {}", instr.opcode_name);
@@ -1857,247 +2781,565 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
   uint32_t fetch_constant_index = instr.operands[1].storage_index;
 
   // Get coordinates from source operand.
-  std::string coords = OperandToHlsl(instr.operands[0], 4);
-
-  // Create texture and sampler bindings. These track the descriptor indices
-  // that need to be populated at runtime.
-  // For simplicity, we assume unsigned textures (signed handling would require
-  // checking the fetch constant at runtime).
-  uint32_t texture_binding_index =
-      FindOrAddTextureBinding(fetch_constant_index, instr.dimension, false);
-  uint32_t sampler_binding_index = FindOrAddSamplerBinding(
-      fetch_constant_index, instr.attributes.mag_filter,
-      instr.attributes.min_filter, instr.attributes.mip_filter,
-      instr.attributes.aniso_filter);
+  std::string coords = "(" + OperandToHlsl(instr.operands[0], 4) + ")";
 
   EmitLine("{");
   Indent();
 
-  std::string result_value;
-
-  if (bindless_resources_used_) {
-    // Bindless mode: Get descriptor indices from the constant buffer.
-    // The indices are stored at the binding's bindless_descriptor_index.
-    // Texture indices are relative to kUnboundedSRVsStart, so we add the offset
-    // to get absolute heap indices for SM 6.6 ResourceDescriptorHeap.
-    uint32_t tex_desc_idx =
-        texture_bindings_[texture_binding_index].bindless_descriptor_index;
-    uint32_t smp_desc_idx =
-        sampler_bindings_[sampler_binding_index].bindless_descriptor_index;
-    EmitLine("// Bindless texture fetch - fetch constant " +
-             std::to_string(fetch_constant_index));
-    EmitLine("uint xe_tf_tex_idx = XeGetDescriptorIndex(" +
-             std::to_string(tex_desc_idx) + "u) + kXeUnboundedSRVsStart;");
-    EmitLine("uint xe_tf_smp_idx = XeGetDescriptorIndex(" +
-             std::to_string(smp_desc_idx) + "u);");
+  const std::string fetch_constant_literal =
+      std::to_string(fetch_constant_index) + "u";
+  const std::string instruction_lod_bias =
+      HlslFloatLiteral(instr.attributes.lod_bias);
+  const bool get_texture_weights =
+      instr.opcode == FetchOpcode::kGetTextureWeights;
+  float offset_x = 0.0f;
+  float offset_y = 0.0f;
+  float offset_z = 0.0f;
+  if (instr.opcode != FetchOpcode::kGetTextureComputedLod) {
+    constexpr float rounding_offset = 1.5f / 1024.0f;
+    offset_x = instr.attributes.offset_x + rounding_offset;
+    offset_y = instr.attributes.offset_y + rounding_offset;
+    offset_z = instr.attributes.offset_z + rounding_offset;
+    if (instr.dimension == xenos::FetchOpDimension::kCube) {
+      // Cube SC/TC get the same texel-center ambiguity fixup as 2D, but the
+      // face index is a discrete value, not a texture coordinate.
+      offset_z = get_texture_weights ? 0.0f : instr.attributes.offset_z;
+    }
+    if (get_texture_weights) {
+      offset_x -= 0.5f;
+      switch (instr.dimension) {
+        case xenos::FetchOpDimension::k2D:
+        case xenos::FetchOpDimension::kCube:
+          offset_y -= 0.5f;
+          break;
+        case xenos::FetchOpDimension::k3DOrStacked:
+          offset_y -= 0.5f;
+          offset_z -= 0.5f;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  const std::string offset_x_literal = HlslFloatLiteral(offset_x);
+  const std::string offset_y_literal = HlslFloatLiteral(offset_y);
+  const std::string offset_z_literal = HlslFloatLiteral(offset_z);
+  std::string result_value = "xe_tf_result";
+  EmitLine("float4 xe_tf_result = float4(0.0, 0.0, 0.0, 0.0);");
+  EmitLine("float3 xe_tf_weight_coord = float3(0.0, 0.0, 0.0);");
+  if (instr.opcode == FetchOpcode::kGetTextureBorderColorFrac) {
+    XELOGW("HLSL: getBCF is unimplemented; returning zero");
+    EmitVectorResultAssignment(instr.result, result_value);
+    StoreConstantComponents(instr.result);
+    Outdent();
+    EmitLine("}");
+    return;
+  }
+  if (instr.opcode == FetchOpcode::kGetTextureComputedLod &&
+      (!is_pixel_shader() || !instr.attributes.use_computed_lod ||
+       instr.attributes.use_register_lod ||
+       instr.attributes.use_register_gradients)) {
+    XELOGW(
+        "HLSL: getCompTexLOD used with explicit LOD/gradients or outside "
+        "pixel shader; returning zero");
+    EmitVectorResultAssignment(instr.result, result_value);
+    StoreConstantComponents(instr.result);
+    Outdent();
+    EmitLine("}");
+    return;
   }
 
-  // Determine dimension for texture access.
   switch (instr.dimension) {
-    case xenos::FetchOpDimension::k1D:
-    case xenos::FetchOpDimension::k2D: {
-      // Get UV coordinates.
-      EmitLine("float2 xe_tf_uv = " + coords + ".xy;");
-
-      // Apply offset if specified.
-      if (instr.attributes.offset_x != 0.0f ||
-          instr.attributes.offset_y != 0.0f) {
-        EmitLine("xe_tf_uv += float2(" +
-                 std::to_string(instr.attributes.offset_x) + ", " +
-                 std::to_string(instr.attributes.offset_y) + ");");
-      }
-
-      if (instr.opcode == FetchOpcode::kGetTextureGradients) {
-        // Return texture coordinate gradients.
-        EmitLine("float4 xe_tf_result = float4(ddx(xe_tf_uv), ddy(xe_tf_uv));");
-        result_value = "xe_tf_result";
-      } else if (instr.opcode == FetchOpcode::kGetTextureWeights) {
-        // Return texture coordinate weights (fractional part).
-        EmitLine("float4 xe_tf_result = float4(frac(xe_tf_uv), 0.0, 0.0);");
-        result_value = "xe_tf_result";
-      } else if (instr.opcode == FetchOpcode::kGetTextureBorderColorFrac) {
-        // Return border color fraction (placeholder).
-        result_value = "float4(0.0, 0.0, 0.0, 0.0)";
-      } else if (instr.opcode == FetchOpcode::kGetTextureComputedLod) {
-        // Return computed LOD (placeholder - would need
-        // CalculateLevelOfDetail).
-        result_value = "float4(0.0, 0.0, 0.0, 0.0)";
+    case xenos::FetchOpDimension::k1D: {
+      EmitLine("float xe_tf_width = XeGetTextureFetchSize1D(" +
+               fetch_constant_literal + ");");
+      if (instr.attributes.unnormalized_coordinates) {
+        EmitLine("xe_tf_weight_coord.x = " + coords + ".x + " +
+                 offset_x_literal + ";");
+        EmitLine(
+            "float2 xe_tf_uv = float2(xe_tf_weight_coord.x / "
+            "xe_tf_width, 0.0);");
       } else {
-        // Normal texture fetch.
-        if (bindless_resources_used_) {
-          // SM 6.6 bindless: 2D textures are bound as 2D arrays with layer 0.
-          EmitLine(
-              "Texture2DArray<float4> xe_tf_tex = "
-              "ResourceDescriptorHeap[xe_tf_tex_idx];");
-          EmitLine(
-              "SamplerState xe_tf_smp = SamplerDescriptorHeap[xe_tf_smp_idx];");
-          EmitLine("float3 xe_tf_uvl = float3(xe_tf_uv, 0.0);");
-          if (instr.attributes.use_register_lod) {
-            EmitLine(
-                "float4 xe_tf_result = xe_tf_tex.SampleLevel("
-                "xe_tf_smp, xe_tf_uvl, " +
-                std::to_string(instr.attributes.lod_bias) + ");");
-          } else if (instr.attributes.use_register_gradients) {
-            EmitLine(
-                "float4 xe_tf_result = xe_tf_tex.SampleGrad("
-                "xe_tf_smp, xe_tf_uvl, "
-                "float3(ddx(xe_tf_uv), 0.0), float3(ddy(xe_tf_uv), 0.0));");
-          } else {
-            if (instr.attributes.lod_bias != 0.0f) {
-              EmitLine(
-                  "float4 xe_tf_result = xe_tf_tex.SampleBias("
-                  "xe_tf_smp, xe_tf_uvl, " +
-                  std::to_string(instr.attributes.lod_bias) + ");");
-            } else {
-              EmitLine(
-                  "float4 xe_tf_result = xe_tf_tex.Sample("
-                  "xe_tf_smp, xe_tf_uvl);");
-            }
-          }
-        } else {
-          // Bindful: Use static texture names.
-          std::string tex_name =
-              "xe_texture2d_" + std::to_string(fetch_constant_index);
-          std::string sampler_name =
-              "xe_sampler_" + std::to_string(fetch_constant_index);
-          if (instr.attributes.use_register_lod) {
-            EmitLine("float4 xe_tf_result = " + tex_name + ".SampleLevel(" +
-                     sampler_name + ", xe_tf_uv, " +
-                     std::to_string(instr.attributes.lod_bias) + ");");
-          } else if (instr.attributes.use_register_gradients) {
-            EmitLine("float4 xe_tf_result = " + tex_name + ".SampleGrad(" +
-                     sampler_name +
-                     ", xe_tf_uv, ddx(xe_tf_uv), ddy(xe_tf_uv));");
-          } else {
-            if (instr.attributes.lod_bias != 0.0f) {
-              EmitLine("float4 xe_tf_result = " + tex_name + ".SampleBias(" +
-                       sampler_name + ", xe_tf_uv, " +
-                       std::to_string(instr.attributes.lod_bias) + ");");
-            } else {
-              EmitLine("float4 xe_tf_result = " + tex_name + ".Sample(" +
-                       sampler_name + ", xe_tf_uv);");
-            }
-          }
-        }
-        result_value = "xe_tf_result";
+        EmitLine("xe_tf_weight_coord.x = " + coords + ".x * xe_tf_width + " +
+                 offset_x_literal + ";");
+        EmitLine("float2 xe_tf_uv = float2(" + coords + ".x + (" +
+                 offset_x_literal + " / xe_tf_width), 0.0);");
+      }
+      EmitLine("if (XeGetTextureFetchDimension(" + fetch_constant_literal +
+               ") == 0u && uint(xe_tf_width - 1.0f) >= 8192u) {");
+      Indent();
+      EmitLine("float xe_tf_row_width = 8192.0f;");
+      EmitLine(
+          "float xe_tf_row = floor(xe_tf_weight_coord.x / "
+          "xe_tf_row_width);");
+      EmitLine("float xe_tf_rows = ceil(xe_tf_width / xe_tf_row_width);");
+      EmitLine("xe_tf_uv.x = frac(xe_tf_weight_coord.x / xe_tf_row_width);");
+      EmitLine("xe_tf_uv.y = xe_tf_row / xe_tf_rows;");
+      Outdent();
+      EmitLine("}");
+    } break;
+
+    case xenos::FetchOpDimension::k2D: {
+      EmitLine("float2 xe_tf_size = XeGetTextureFetchSize2D(" +
+               fetch_constant_literal + ");");
+      if (instr.attributes.unnormalized_coordinates) {
+        EmitLine("xe_tf_weight_coord.xy = " + coords + ".xy + float2(" +
+                 offset_x_literal + ", " + offset_y_literal + ");");
+        EmitLine("float2 xe_tf_uv = xe_tf_weight_coord.xy / xe_tf_size;");
+      } else {
+        EmitLine("xe_tf_weight_coord.xy = " + coords +
+                 ".xy * xe_tf_size + float2(" + offset_x_literal + ", " +
+                 offset_y_literal + ");");
+        EmitLine("float2 xe_tf_uv = " + coords + ".xy + float2(" +
+                 offset_x_literal + ", " + offset_y_literal +
+                 ") / xe_tf_size;");
       }
     } break;
 
     case xenos::FetchOpDimension::k3DOrStacked: {
-      EmitLine("float3 xe_tf_uvw = " + coords + ".xyz;");
-
-      if (bindless_resources_used_) {
-        // SM 6.6 bindless: Use ResourceDescriptorHeap for 3D textures.
-        EmitLine(
-            "Texture3D<float4> xe_tf_tex = "
-            "ResourceDescriptorHeap[xe_tf_tex_idx];");
-        EmitLine(
-            "SamplerState xe_tf_smp = SamplerDescriptorHeap[xe_tf_smp_idx];");
-        if (instr.attributes.use_register_lod) {
-          EmitLine(
-              "float4 xe_tf_result = xe_tf_tex.SampleLevel("
-              "xe_tf_smp, xe_tf_uvw, " +
-              std::to_string(instr.attributes.lod_bias) + ");");
-        } else {
-          EmitLine(
-              "float4 xe_tf_result = xe_tf_tex.Sample("
-              "xe_tf_smp, xe_tf_uvw);");
-        }
+      EmitLine("float3 xe_tf_size = XeGetTextureFetchSize3DOrStacked(" +
+               fetch_constant_literal + ");");
+      EmitLine("bool xe_tf_is_3d = XeTextureFetchConstantIs3D(" +
+               fetch_constant_literal + ");");
+      if (instr.attributes.unnormalized_coordinates) {
+        EmitLine("xe_tf_weight_coord = " + coords + ".xyz + float3(" +
+                 offset_x_literal + ", " + offset_y_literal + ", " +
+                 offset_z_literal + ");");
+        EmitLine("float3 xe_tf_uvw = xe_tf_weight_coord / xe_tf_size;");
+        EmitLine("if (!xe_tf_is_3d) {");
+        Indent();
+        EmitLine("xe_tf_uvw.z = xe_tf_weight_coord.z;");
+        Outdent();
+        EmitLine("}");
       } else {
-        // Bindful: Use static texture names.
-        std::string tex_name =
-            "xe_texture3d_" + std::to_string(fetch_constant_index);
-        std::string sampler_name =
-            "xe_sampler_" + std::to_string(fetch_constant_index);
-        if (instr.attributes.use_register_lod) {
-          EmitLine("float4 xe_tf_result = " + tex_name + ".SampleLevel(" +
-                   sampler_name + ", xe_tf_uvw, " +
-                   std::to_string(instr.attributes.lod_bias) + ");");
-        } else {
-          EmitLine("float4 xe_tf_result = " + tex_name + ".Sample(" +
-                   sampler_name + ", xe_tf_uvw);");
-        }
+        EmitLine("xe_tf_weight_coord = " + coords +
+                 ".xyz * xe_tf_size + float3(" + offset_x_literal + ", " +
+                 offset_y_literal + ", " + offset_z_literal + ");");
+        EmitLine("float3 xe_tf_uvw;");
+        EmitLine("xe_tf_uvw.xy = " + coords + ".xy + float2(" +
+                 offset_x_literal + ", " + offset_y_literal +
+                 ") / xe_tf_size.xy;");
+        EmitLine("xe_tf_uvw.z = xe_tf_is_3d ? (" + coords + ".z + (" +
+                 offset_z_literal + " / xe_tf_size.z)) : (" + coords +
+                 ".z * xe_tf_size.z + " + offset_z_literal + ");");
       }
-      result_value = "xe_tf_result";
     } break;
 
     case xenos::FetchOpDimension::kCube: {
-      EmitLine("float3 xe_tf_dir = " + coords + ".xyz;");
-
-      if (bindless_resources_used_) {
-        // SM 6.6 bindless: Use ResourceDescriptorHeap for cube textures.
+      EmitLine("float2 xe_tf_size = XeGetTextureFetchSize2D(" +
+               fetch_constant_literal + ");");
+      if (instr.attributes.unnormalized_coordinates) {
+        EmitLine("xe_tf_weight_coord.xy = " + coords + ".xy + float2(" +
+                 offset_x_literal + ", " + offset_y_literal + ");");
         EmitLine(
-            "TextureCube<float4> xe_tf_tex = "
-            "ResourceDescriptorHeap[xe_tf_tex_idx];");
-        EmitLine(
-            "SamplerState xe_tf_smp = SamplerDescriptorHeap[xe_tf_smp_idx];");
-        if (instr.attributes.use_register_lod) {
-          EmitLine(
-              "float4 xe_tf_result = xe_tf_tex.SampleLevel("
-              "xe_tf_smp, xe_tf_dir, " +
-              std::to_string(instr.attributes.lod_bias) + ");");
-        } else {
-          EmitLine(
-              "float4 xe_tf_result = xe_tf_tex.Sample("
-              "xe_tf_smp, xe_tf_dir);");
-        }
+            "float3 xe_tf_cube_coord = float3("
+            "xe_tf_weight_coord.xy / xe_tf_size, " +
+            coords + ".z + " + offset_z_literal + ");");
       } else {
-        // Bindful: Use static texture names.
-        std::string tex_name =
-            "xe_texturecube_" + std::to_string(fetch_constant_index);
-        std::string sampler_name =
-            "xe_sampler_" + std::to_string(fetch_constant_index);
-        if (instr.attributes.use_register_lod) {
-          EmitLine("float4 xe_tf_result = " + tex_name + ".SampleLevel(" +
-                   sampler_name + ", xe_tf_dir, " +
-                   std::to_string(instr.attributes.lod_bias) + ");");
-        } else {
-          EmitLine("float4 xe_tf_result = " + tex_name + ".Sample(" +
-                   sampler_name + ", xe_tf_dir);");
-        }
+        EmitLine("xe_tf_weight_coord.xy = " + coords +
+                 ".xy * xe_tf_size + float2(" + offset_x_literal + ", " +
+                 offset_y_literal + ");");
+        EmitLine("float3 xe_tf_cube_coord = float3(" + coords +
+                 ".xy + float2(" + offset_x_literal + ", " + offset_y_literal +
+                 ") / xe_tf_size, " + coords + ".z + " + offset_z_literal +
+                 ");");
       }
-      result_value = "xe_tf_result";
+      EmitLine("xe_tf_weight_coord.z = " + coords + ".z + " + offset_z_literal +
+               ";");
+      EmitLine("float3 xe_tf_dir = XeTextureCubeDirection(xe_tf_cube_coord);");
     } break;
 
     default:
       XELOGW("HLSL: Unknown texture dimension: {}",
              static_cast<uint32_t>(instr.dimension));
-      result_value = "float4(1.0, 0.0, 1.0, 1.0)";  // Magenta for debug.
+      EmitLine("xe_tf_result = float4(1.0, 0.0, 1.0, 1.0);");
       break;
   }
 
-  // Apply texture sign conversion based on xe_texture_swizzled_signs.
-  // The signs are packed: 2 bits per component, 8 bits per texture.
-  // xe_texture_swizzled_signs is uint4[2] = 8 uint32s covering 32 textures.
-  if (instr.opcode == ucode::FetchOpcode::kTextureFetch &&
-      !result_value.empty()) {
-    uint32_t fc = fetch_constant_index;
-    // Get the packed signs for this texture.
-    EmitLine("// Apply texture sign conversion");
-    EmitLine("uint xe_tf_signs_vec = xe_texture_swizzled_signs[" +
-             std::to_string(fc >> 4) + "][" + std::to_string((fc >> 2) & 3) +
-             "];");
-    EmitLine("uint xe_tf_signs = (xe_tf_signs_vec >> " +
-             std::to_string((fc & 3) * 8) + "u) & 0xFFu;");
-    // kUnsignedBiased = 2: convert from [0,1] to [-1,1] via *2-1
-    // kSigned = 1: DXBC uses separate SNORM texture views, we don't have that
-    // yet kGamma = 3: would need gamma correction (not implemented yet)
-    EmitLine("uint xe_tf_sign_x = xe_tf_signs & 0x3u;");
-    EmitLine("uint xe_tf_sign_y = (xe_tf_signs >> 2u) & 0x3u;");
-    EmitLine("uint xe_tf_sign_z = (xe_tf_signs >> 4u) & 0x3u;");
-    EmitLine("uint xe_tf_sign_w = (xe_tf_signs >> 6u) & 0x3u;");
-    EmitLine(
-        "xe_tf_result.x = (xe_tf_sign_x == 2u) ? "
-        "(xe_tf_result.x * 2.0 - 1.0) : xe_tf_result.x;");
-    EmitLine(
-        "xe_tf_result.y = (xe_tf_sign_y == 2u) ? "
-        "(xe_tf_result.y * 2.0 - 1.0) : xe_tf_result.y;");
-    EmitLine(
-        "xe_tf_result.z = (xe_tf_sign_z == 2u) ? "
-        "(xe_tf_result.z * 2.0 - 1.0) : xe_tf_result.z;");
-    EmitLine(
-        "xe_tf_result.w = (xe_tf_sign_w == 2u) ? "
-        "(xe_tf_result.w * 2.0 - 1.0) : xe_tf_result.w;");
+  if (instr.opcode == FetchOpcode::kGetTextureGradients) {
+    if (is_pixel_shader()) {
+      switch (instr.dimension) {
+        case xenos::FetchOpDimension::k1D:
+        case xenos::FetchOpDimension::k2D:
+          EmitLine("xe_tf_result = float4(ddx_coarse(" + coords +
+                   ".xy), ddy_coarse(" + coords + ".xy));");
+          break;
+        case xenos::FetchOpDimension::k3DOrStacked:
+          EmitLine("xe_tf_result = float4(ddx_coarse(" + coords +
+                   ".xy), ddy_coarse(" + coords + ".xy));");
+          break;
+        case xenos::FetchOpDimension::kCube:
+          EmitLine("xe_tf_result = float4(ddx_coarse(" + coords +
+                   ".xy), ddy_coarse(" + coords + ".xy));");
+          break;
+        default:
+          break;
+      }
+    }
+  } else if (instr.opcode == FetchOpcode::kGetTextureWeights) {
+    switch (instr.dimension) {
+      case xenos::FetchOpDimension::k1D:
+      case xenos::FetchOpDimension::k2D:
+        EmitLine(
+            "xe_tf_result = float4(frac(xe_tf_weight_coord.xy), 0.0, "
+            "0.0);");
+        break;
+      case xenos::FetchOpDimension::k3DOrStacked:
+        EmitLine("xe_tf_result = float4(frac(xe_tf_weight_coord), 0.0);");
+        break;
+      case xenos::FetchOpDimension::kCube:
+        EmitLine(
+            "xe_tf_result = float4(frac(xe_tf_weight_coord.xy), 0.0, "
+            "0.0);");
+        break;
+      default:
+        break;
+    }
+  } else {
+    const bool texture_fetch = instr.opcode == FetchOpcode::kTextureFetch;
+    const bool use_sample_grad =
+        instr.attributes.use_register_gradients && is_pixel_shader() &&
+        instr.dimension != xenos::FetchOpDimension::k1D;
+    const bool use_sample_level =
+        !use_sample_grad &&
+        (instr.attributes.use_register_lod || is_vertex_shader() ||
+         !instr.attributes.use_computed_lod);
+    const xenos::TextureFilter sampler_mip_filter =
+        instr.opcode == FetchOpcode::kGetTextureComputedLod
+            ? xenos::TextureFilter::kLinear
+            : instr.attributes.mip_filter;
+    const xenos::AnisoFilter sampler_aniso_filter =
+        use_sample_level ? xenos::AnisoFilter::kDisabled
+                         : instr.attributes.aniso_filter;
+
+    uint32_t texture_binding_unsigned = UINT32_MAX;
+    uint32_t texture_binding_signed = UINT32_MAX;
+    uint32_t texture_binding_3d_unsigned = UINT32_MAX;
+    uint32_t texture_binding_3d_signed = UINT32_MAX;
+    uint32_t texture_binding_2d_unsigned = UINT32_MAX;
+    uint32_t texture_binding_2d_signed = UINT32_MAX;
+
+    if (instr.dimension == xenos::FetchOpDimension::k3DOrStacked) {
+      texture_binding_3d_unsigned = FindOrAddTextureBinding(
+          fetch_constant_index, xenos::FetchOpDimension::k3DOrStacked, false);
+      texture_binding_2d_unsigned = FindOrAddTextureBinding(
+          fetch_constant_index, xenos::FetchOpDimension::k2D, false);
+      if (texture_fetch) {
+        texture_binding_3d_signed = FindOrAddTextureBinding(
+            fetch_constant_index, xenos::FetchOpDimension::k3DOrStacked, true);
+        texture_binding_2d_signed = FindOrAddTextureBinding(
+            fetch_constant_index, xenos::FetchOpDimension::k2D, true);
+      }
+    } else {
+      texture_binding_unsigned =
+          FindOrAddTextureBinding(fetch_constant_index, instr.dimension, false);
+      if (texture_fetch) {
+        texture_binding_signed = FindOrAddTextureBinding(fetch_constant_index,
+                                                         instr.dimension, true);
+      }
+    }
+    uint32_t sampler_binding_index = FindOrAddSamplerBinding(
+        fetch_constant_index, instr.attributes.mag_filter,
+        instr.attributes.min_filter, sampler_mip_filter, sampler_aniso_filter);
+
+    EmitLine("float xe_tf_lod = XeGetTextureFetchLodBias(" +
+             fetch_constant_literal + ") + " + instruction_lod_bias + ";");
+    if (instr.attributes.use_register_lod) {
+      EmitLine("xe_tf_lod += xe_texture_lod;");
+    }
+    EmitLine("float3 xe_tf_grad_h = xe_texture_grad_h;");
+    EmitLine("float3 xe_tf_grad_v = xe_texture_grad_v;");
+    if (instr.attributes.use_register_gradients &&
+        instr.attributes.unnormalized_coordinates &&
+        instr.dimension != xenos::FetchOpDimension::k1D &&
+        instr.dimension != xenos::FetchOpDimension::kCube) {
+      switch (instr.dimension) {
+        case xenos::FetchOpDimension::k1D:
+        case xenos::FetchOpDimension::k2D:
+          EmitLine("xe_tf_grad_h.xy /= xe_tf_size.xy;");
+          EmitLine("xe_tf_grad_v.xy /= xe_tf_size.xy;");
+          break;
+        case xenos::FetchOpDimension::k3DOrStacked:
+          EmitLine("xe_tf_grad_h.xy /= xe_tf_size.xy;");
+          EmitLine("xe_tf_grad_v.xy /= xe_tf_size.xy;");
+          EmitLine("if (xe_tf_is_3d) {");
+          Indent();
+          EmitLine("xe_tf_grad_h.z /= xe_tf_size.z;");
+          EmitLine("xe_tf_grad_v.z /= xe_tf_size.z;");
+          Outdent();
+          EmitLine("}");
+          break;
+        default:
+          break;
+      }
+    }
+    EmitLine("float4 xe_tf_result_unsigned = float4(0.0, 0.0, 0.0, 0.0);");
+    EmitLine("float4 xe_tf_result_signed = float4(0.0, 0.0, 0.0, 0.0);");
+    if (texture_fetch) {
+      EmitLine("uint xe_tf_signs_vec = xe_texture_swizzled_signs[" +
+               std::to_string(fetch_constant_index >> 4) + "][" +
+               std::to_string((fetch_constant_index >> 2) & 3) + "];");
+      EmitLine("uint xe_tf_signs = (xe_tf_signs_vec >> " +
+               std::to_string((fetch_constant_index & 3) * 8) + "u) & 0xFFu;");
+      EmitLine("uint xe_tf_sign_x = xe_tf_signs & 0x3u;");
+      EmitLine("uint xe_tf_sign_y = (xe_tf_signs >> 2u) & 0x3u;");
+      EmitLine("uint xe_tf_sign_z = (xe_tf_signs >> 4u) & 0x3u;");
+      EmitLine("uint xe_tf_sign_w = (xe_tf_signs >> 6u) & 0x3u;");
+      EmitLine(
+          "bool xe_tf_needs_signed = xe_tf_sign_x == 1u || xe_tf_sign_y == "
+          "1u || xe_tf_sign_z == 1u || xe_tf_sign_w == 1u;");
+      EmitLine(
+          "bool xe_tf_needs_unsigned = xe_tf_sign_x != 1u || xe_tf_sign_y != "
+          "1u || xe_tf_sign_z != 1u || xe_tf_sign_w != 1u;");
+    }
+
+    auto emit_bindless_texture_index = [&](const std::string& variable_name,
+                                           uint32_t binding_index) {
+      uint32_t descriptor_index =
+          texture_bindings_[binding_index].bindless_descriptor_index;
+      EmitLine("uint " + variable_name + " = XeGetDescriptorIndex(" +
+               std::to_string(descriptor_index) +
+               "u) + kXeResourceDescriptorHeapStart;");
+    };
+    auto emit_sample =
+        [&](const std::string& result_name, const std::string& texture_name,
+            const std::string& sampler_name, const std::string& sample_coord,
+            const std::string& lod_coord, const std::string& grad_h,
+            const std::string& grad_v) {
+          if (instr.opcode == FetchOpcode::kGetTextureComputedLod) {
+            if (is_pixel_shader() && !instr.attributes.use_register_lod &&
+                !instr.attributes.use_register_gradients) {
+              EmitLine("float xe_tf_computed_lod = " + texture_name +
+                       ".CalculateLevelOfDetailUnclamped(" + sampler_name +
+                       ", " + lod_coord + ");");
+              EmitLine(result_name +
+                       " = float4(xe_tf_computed_lod, xe_tf_computed_lod, "
+                       "xe_tf_computed_lod, xe_tf_computed_lod);");
+            }
+          } else if (use_sample_grad) {
+            EmitLine(result_name + " = " + texture_name + ".SampleGrad(" +
+                     sampler_name + ", " + sample_coord + ", " + grad_h + ", " +
+                     grad_v + ");");
+          } else if (use_sample_level) {
+            EmitLine(result_name + " = " + texture_name + ".SampleLevel(" +
+                     sampler_name + ", " + sample_coord + ", xe_tf_lod);");
+          } else {
+            EmitLine(result_name + " = " + texture_name + ".SampleBias(" +
+                     sampler_name + ", " + sample_coord + ", xe_tf_lod);");
+          }
+        };
+    auto emit_texture_fetch_sample =
+        [&](const std::string& condition, const std::string& result_name,
+            const std::string& texture_name, const std::string& sampler_name,
+            const std::string& sample_coord, const std::string& lod_coord,
+            const std::string& grad_h, const std::string& grad_v) {
+          if (!texture_fetch) {
+            emit_sample(result_name, texture_name, sampler_name, sample_coord,
+                        lod_coord, grad_h, grad_v);
+            return;
+          }
+          EmitLine("if (" + condition + ") {");
+          Indent();
+          emit_sample(result_name, texture_name, sampler_name, sample_coord,
+                      lod_coord, grad_h, grad_v);
+          Outdent();
+          EmitLine("}");
+        };
+
+    if (bindless_resources_used_) {
+      uint32_t sampler_descriptor_index =
+          sampler_bindings_[sampler_binding_index].bindless_descriptor_index;
+      EmitLine("uint xe_tf_smp_idx = XeGetDescriptorIndex(" +
+               std::to_string(sampler_descriptor_index) + "u);");
+      EmitLine(
+          "SamplerState xe_tf_smp = "
+          "SamplerDescriptorHeap[NonUniformResourceIndex(xe_tf_smp_idx)];");
+
+      switch (instr.dimension) {
+        case xenos::FetchOpDimension::k1D:
+        case xenos::FetchOpDimension::k2D:
+          emit_bindless_texture_index("xe_tf_tex_idx_unsigned",
+                                      texture_binding_unsigned);
+          if (texture_fetch) {
+            emit_bindless_texture_index("xe_tf_tex_idx_signed",
+                                        texture_binding_signed);
+          }
+          EmitLine(
+              "Texture2DArray<float4> xe_tf_tex_unsigned = "
+              "ResourceDescriptorHeap[NonUniformResourceIndex(xe_tf_tex_idx_"
+              "unsigned)];");
+          if (texture_fetch) {
+            EmitLine(
+                "Texture2DArray<float4> xe_tf_tex_signed = "
+                "ResourceDescriptorHeap[NonUniformResourceIndex(xe_tf_tex_idx_"
+                "signed)];");
+          }
+          EmitLine("float3 xe_tf_uvl = float3(xe_tf_uv, 0.0);");
+          emit_texture_fetch_sample(
+              "xe_tf_needs_unsigned", "xe_tf_result_unsigned",
+              "xe_tf_tex_unsigned", "xe_tf_smp", "xe_tf_uvl", "xe_tf_uv",
+              "xe_tf_grad_h.xy", "xe_tf_grad_v.xy");
+          if (texture_fetch) {
+            emit_texture_fetch_sample("xe_tf_needs_signed",
+                                      "xe_tf_result_signed", "xe_tf_tex_signed",
+                                      "xe_tf_smp", "xe_tf_uvl", "xe_tf_uv",
+                                      "xe_tf_grad_h.xy", "xe_tf_grad_v.xy");
+          }
+          break;
+        case xenos::FetchOpDimension::k3DOrStacked:
+          emit_bindless_texture_index("xe_tf_tex_3d_idx_unsigned",
+                                      texture_binding_3d_unsigned);
+          emit_bindless_texture_index("xe_tf_tex_2d_idx_unsigned",
+                                      texture_binding_2d_unsigned);
+          if (texture_fetch) {
+            emit_bindless_texture_index("xe_tf_tex_3d_idx_signed",
+                                        texture_binding_3d_signed);
+            emit_bindless_texture_index("xe_tf_tex_2d_idx_signed",
+                                        texture_binding_2d_signed);
+          }
+          EmitLine("if (XeTextureFetchConstantIs3D(" + fetch_constant_literal +
+                   ")) {");
+          Indent();
+          EmitLine(
+              "Texture3D<float4> xe_tf_tex_3d_unsigned = "
+              "ResourceDescriptorHeap[NonUniformResourceIndex(xe_tf_tex_3d_idx_"
+              "unsigned)];");
+          if (texture_fetch) {
+            EmitLine(
+                "Texture3D<float4> xe_tf_tex_3d_signed = "
+                "ResourceDescriptorHeap[NonUniformResourceIndex(xe_tf_tex_3d_"
+                "idx_signed)];");
+          }
+          emit_texture_fetch_sample(
+              "xe_tf_needs_unsigned", "xe_tf_result_unsigned",
+              "xe_tf_tex_3d_unsigned", "xe_tf_smp", "xe_tf_uvw", "xe_tf_uvw",
+              "xe_tf_grad_h", "xe_tf_grad_v");
+          if (texture_fetch) {
+            emit_texture_fetch_sample(
+                "xe_tf_needs_signed", "xe_tf_result_signed",
+                "xe_tf_tex_3d_signed", "xe_tf_smp", "xe_tf_uvw", "xe_tf_uvw",
+                "xe_tf_grad_h", "xe_tf_grad_v");
+          }
+          Outdent();
+          EmitLine("} else {");
+          Indent();
+          EmitLine(
+              "Texture2DArray<float4> xe_tf_tex_2d_unsigned = "
+              "ResourceDescriptorHeap[NonUniformResourceIndex(xe_tf_tex_2d_idx_"
+              "unsigned)];");
+          if (texture_fetch) {
+            EmitLine(
+                "Texture2DArray<float4> xe_tf_tex_2d_signed = "
+                "ResourceDescriptorHeap[NonUniformResourceIndex(xe_tf_tex_2d_"
+                "idx_signed)];");
+          }
+          emit_texture_fetch_sample(
+              "xe_tf_needs_unsigned", "xe_tf_result_unsigned",
+              "xe_tf_tex_2d_unsigned", "xe_tf_smp", "xe_tf_uvw", "xe_tf_uvw.xy",
+              "xe_tf_grad_h.xy", "xe_tf_grad_v.xy");
+          if (texture_fetch) {
+            emit_texture_fetch_sample(
+                "xe_tf_needs_signed", "xe_tf_result_signed",
+                "xe_tf_tex_2d_signed", "xe_tf_smp", "xe_tf_uvw", "xe_tf_uvw.xy",
+                "xe_tf_grad_h.xy", "xe_tf_grad_v.xy");
+          }
+          Outdent();
+          EmitLine("}");
+          break;
+        case xenos::FetchOpDimension::kCube:
+          emit_bindless_texture_index("xe_tf_tex_idx_unsigned",
+                                      texture_binding_unsigned);
+          if (texture_fetch) {
+            emit_bindless_texture_index("xe_tf_tex_idx_signed",
+                                        texture_binding_signed);
+          }
+          EmitLine(
+              "TextureCube<float4> xe_tf_tex_unsigned = "
+              "ResourceDescriptorHeap[NonUniformResourceIndex(xe_tf_tex_idx_"
+              "unsigned)];");
+          if (texture_fetch) {
+            EmitLine(
+                "TextureCube<float4> xe_tf_tex_signed = "
+                "ResourceDescriptorHeap[NonUniformResourceIndex(xe_tf_tex_idx_"
+                "signed)];");
+          }
+          emit_texture_fetch_sample(
+              "xe_tf_needs_unsigned", "xe_tf_result_unsigned",
+              "xe_tf_tex_unsigned", "xe_tf_smp", "xe_tf_dir", "xe_tf_dir",
+              "xe_tf_grad_h", "xe_tf_grad_v");
+          if (texture_fetch) {
+            emit_texture_fetch_sample("xe_tf_needs_signed",
+                                      "xe_tf_result_signed", "xe_tf_tex_signed",
+                                      "xe_tf_smp", "xe_tf_dir", "xe_tf_dir",
+                                      "xe_tf_grad_h", "xe_tf_grad_v");
+          }
+          break;
+        default:
+          break;
+      }
+    } else {
+      std::string sampler_name =
+          "xe_sampler_" + std::to_string(fetch_constant_index);
+      switch (instr.dimension) {
+        case xenos::FetchOpDimension::k1D:
+        case xenos::FetchOpDimension::k2D: {
+          std::string texture_name =
+              "xe_texture2d_" + std::to_string(fetch_constant_index);
+          emit_sample("xe_tf_result_unsigned", texture_name, sampler_name,
+                      "xe_tf_uv", "xe_tf_uv", "xe_tf_grad_h.xy",
+                      "xe_tf_grad_v.xy");
+        } break;
+        case xenos::FetchOpDimension::k3DOrStacked: {
+          EmitLine("if (XeTextureFetchConstantIs3D(" + fetch_constant_literal +
+                   ")) {");
+          Indent();
+          std::string texture_name =
+              "xe_texture3d_" + std::to_string(fetch_constant_index);
+          emit_sample("xe_tf_result_unsigned", texture_name, sampler_name,
+                      "xe_tf_uvw", "xe_tf_uvw", "xe_tf_grad_h", "xe_tf_grad_v");
+          Outdent();
+          EmitLine("} else {");
+          Indent();
+          texture_name = "xe_texture2d_" + std::to_string(fetch_constant_index);
+          emit_sample("xe_tf_result_unsigned", texture_name, sampler_name,
+                      "xe_tf_uvw.xy", "xe_tf_uvw.xy", "xe_tf_grad_h.xy",
+                      "xe_tf_grad_v.xy");
+          Outdent();
+          EmitLine("}");
+        } break;
+        case xenos::FetchOpDimension::kCube: {
+          std::string texture_name =
+              "xe_texturecube_" + std::to_string(fetch_constant_index);
+          emit_sample("xe_tf_result_unsigned", texture_name, sampler_name,
+                      "xe_tf_dir", "xe_tf_dir", "xe_tf_grad_h", "xe_tf_grad_v");
+        } break;
+        default:
+          break;
+      }
+      EmitLine("xe_tf_result_signed = xe_tf_result_unsigned;");
+    }
+
+    if (texture_fetch) {
+      EmitLine("xe_tf_result = float4(");
+      Indent();
+      EmitLine(
+          "XeApplyTextureSign(xe_tf_result_unsigned.x, xe_tf_result_signed.x, "
+          "xe_tf_sign_x),");
+      EmitLine(
+          "XeApplyTextureSign(xe_tf_result_unsigned.y, xe_tf_result_signed.y, "
+          "xe_tf_sign_y),");
+      EmitLine(
+          "XeApplyTextureSign(xe_tf_result_unsigned.z, xe_tf_result_signed.z, "
+          "xe_tf_sign_z),");
+      EmitLine(
+          "XeApplyTextureSign(xe_tf_result_unsigned.w, xe_tf_result_signed.w, "
+          "xe_tf_sign_w));");
+      Outdent();
+      EmitLine("xe_tf_result *= XeGetTextureFetchExpAdjust(" +
+               fetch_constant_literal + ");");
+    } else {
+      EmitLine("xe_tf_result = xe_tf_result_unsigned;");
+    }
   }
 
   // Store result with proper swizzle matching.
@@ -2117,6 +3359,15 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
 void HlslShaderTranslator::ProcessAluInstruction(
     const ParsedAluInstruction& instr,
     uint8_t memexport_eM_potentially_written_before) {
+  if (memexport_eM_potentially_written_before &&
+      (IsVectorKillOpcode(instr.vector_opcode) ||
+       IsScalarKillOpcode(instr.scalar_opcode))) {
+    XELOGE(
+        "HLSL: UNIMPLEMENTED memexport-before-kill flush: pending eM mask "
+        "0x{:02X}; discard may drop memory export side effects",
+        memexport_eM_potentially_written_before);
+  }
+
   // Handle instruction predication.
   bool needs_predicate_close = false;
   if (instr.is_predicated) {
@@ -2186,13 +3437,13 @@ void HlslShaderTranslator::ProcessVectorAluInstruction(
     case AluVectorOpcode::kMax:
       // SM3 NaN behavior: a >= b ? a : b (not fmax)
       // Optimization: if both operands are identical, just use the operand
-      // directly. This avoids a DXC optimizer bug where select(a, a, cond)
+      // directly. This avoids a DXC optimizer bug where select(cond, a, a)
       // with fast-math enabled incorrectly replaces 0.0 values with 1.0.
       if (op0 == op1) {
         result = op0;
       } else {
         result =
-            "select(" + op1 + ", " + op0 + ", (" + op0 + " >= " + op1 + "))";
+            "select((" + op0 + " >= " + op1 + "), " + op0 + ", " + op1 + ")";
       }
       break;
 
@@ -2203,32 +3454,28 @@ void HlslShaderTranslator::ProcessVectorAluInstruction(
         result = op0;
       } else {
         result =
-            "select(" + op1 + ", " + op0 + ", (" + op0 + " < " + op1 + "))";
+            "select((" + op0 + " < " + op1 + "), " + op0 + ", " + op1 + ")";
       }
       break;
 
     case AluVectorOpcode::kSeq:
-      result =
-          "select(float4(0.0, 0.0, 0.0, 0.0), float4(1.0, 1.0, 1.0, 1.0), (" +
-          op0 + " == " + op1 + "))";
+      result = "select((" + op0 + " == " + op1 +
+               "), float4(1.0, 1.0, 1.0, 1.0), float4(0.0, 0.0, 0.0, 0.0))";
       break;
 
     case AluVectorOpcode::kSgt:
-      result =
-          "select(float4(0.0, 0.0, 0.0, 0.0), float4(1.0, 1.0, 1.0, 1.0), (" +
-          op0 + " > " + op1 + "))";
+      result = "select((" + op0 + " > " + op1 +
+               "), float4(1.0, 1.0, 1.0, 1.0), float4(0.0, 0.0, 0.0, 0.0))";
       break;
 
     case AluVectorOpcode::kSge:
-      result =
-          "select(float4(0.0, 0.0, 0.0, 0.0), float4(1.0, 1.0, 1.0, 1.0), (" +
-          op0 + " >= " + op1 + "))";
+      result = "select((" + op0 + " >= " + op1 +
+               "), float4(1.0, 1.0, 1.0, 1.0), float4(0.0, 0.0, 0.0, 0.0))";
       break;
 
     case AluVectorOpcode::kSne:
-      result =
-          "select(float4(0.0, 0.0, 0.0, 0.0), float4(1.0, 1.0, 1.0, 1.0), (" +
-          op0 + " != " + op1 + "))";
+      result = "select((" + op0 + " != " + op1 +
+               "), float4(1.0, 1.0, 1.0, 1.0), float4(0.0, 0.0, 0.0, 0.0))";
       break;
 
     case AluVectorOpcode::kFrc:
@@ -2244,18 +3491,18 @@ void HlslShaderTranslator::ProcessVectorAluInstruction(
       break;
 
     case AluVectorOpcode::kCndEq:
-      result = "select(" + op2 + ", " + op1 + ", (" + op0 +
-               " == float4(0.0, 0.0, 0.0, 0.0)))";
+      result = "select((" + op0 + " == float4(0.0, 0.0, 0.0, 0.0)), " + op1 +
+               ", " + op2 + ")";
       break;
 
     case AluVectorOpcode::kCndGe:
-      result = "select(" + op2 + ", " + op1 + ", (" + op0 +
-               " >= float4(0.0, 0.0, 0.0, 0.0)))";
+      result = "select((" + op0 + " >= float4(0.0, 0.0, 0.0, 0.0)), " + op1 +
+               ", " + op2 + ")";
       break;
 
     case AluVectorOpcode::kCndGt:
-      result = "select(" + op2 + ", " + op1 + ", (" + op0 +
-               " > float4(0.0, 0.0, 0.0, 0.0)))";
+      result = "select((" + op0 + " > float4(0.0, 0.0, 0.0, 0.0)), " + op1 +
+               ", " + op2 + ")";
       break;
 
     case AluVectorOpcode::kDp4:
@@ -2326,10 +3573,9 @@ void HlslShaderTranslator::ProcessVectorAluInstruction(
       Outdent();
       EmitLine("}");
       // Store result.
-      std::string dest = ResultToHlsl(instr.vector_and_constant_result);
-      if (!dest.empty()) {
-        EmitLine(dest + " = xe_cube_result;");
-      }
+      EmitVectorResultAssignment(instr.vector_and_constant_result,
+                                 "xe_cube_result");
+      StoreConstantComponents(instr.vector_and_constant_result);
       Outdent();
       EmitLine("}");
       // Return early - we handled the result store.
@@ -2427,7 +3673,7 @@ void HlslShaderTranslator::ProcessVectorAluInstruction(
         result = op0;
       } else {
         result =
-            "select(" + op1 + ", " + op0 + ", (" + op0 + " >= " + op1 + "))";
+            "select((" + op0 + " >= " + op1 + "), " + op0 + ", " + op1 + ")";
       }
     } break;
 
@@ -2760,7 +4006,8 @@ std::string HlslShaderTranslator::OperandToHlslNoSwizzle(
   // Get base register reference.
   switch (operand.storage_source) {
     case InstructionStorageSource::kRegister:
-      result = "r" + std::to_string(operand.storage_index);
+      result = RegisterToHlsl(operand.storage_index,
+                              operand.storage_addressing_mode);
       break;
     case InstructionStorageSource::kConstantFloat: {
       const Shader::ConstantRegisterMap& constant_map =

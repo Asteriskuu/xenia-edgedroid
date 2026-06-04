@@ -150,8 +150,12 @@ bool PipelineCache::Initialize() {
                             RenderTargetCache::Path::kPixelShaderInterlock;
       hlsl_shader_translator_ = std::make_unique<HlslShaderTranslator>(
           provider.GetAdapterVendorID(), bindless_resources_used_,
-          edram_rov_used);
+          edram_rov_used, /*use_shader_model_6_6=*/true,
+          render_target_cache_.draw_resolution_scale_x(),
+          render_target_cache_.draw_resolution_scale_y());
       hlsl_shader_translator_->SetDxcCompiler(dxc_shader_compiler_.get());
+      hlsl_shader_translator_->SetBindlessSrvHeapOffset(uint32_t(
+          D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart));
       dxil_shaders_enabled_ = true;
       XELOGI(
           "DXIL shader compilation enabled (SM 6.6 with "
@@ -1188,8 +1192,12 @@ void PipelineCache::TranslateShadersForStorage(
     if (dxil_shaders_enabled_) {
       hlsl_translator = std::make_unique<HlslShaderTranslator>(
           provider.GetAdapterVendorID(), bindless_resources_used_,
-          edram_rov_used);
+          edram_rov_used, /*use_shader_model_6_6=*/true,
+          render_target_cache_.draw_resolution_scale_x(),
+          render_target_cache_.draw_resolution_scale_y());
       hlsl_translator->SetDxcCompiler(dxc_shader_compiler_.get());
+      hlsl_translator->SetBindlessSrvHeapOffset(uint32_t(
+          D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart));
     }
     // DXIL conversion objects (for DXBC disassembly only).
     IDxbcConverter* dxbc_converter = nullptr;
@@ -2796,283 +2804,334 @@ const std::vector<uint32_t>& PipelineCache::GetGeometryShader(
   return geometry_shaders_.emplace(key, std::move(shader)).first->second;
 }
 
+namespace {
+
+// Helpers for generating the HLSL geometry shader. These mirror the geometry
+// expansion the DXBC generator performs, but emit the xe_-prefixed I/O the HLSL
+// vertex and pixel shaders use so the stages link.
+
+const char* HlslGeometryFloatVectorType(uint32_t component_count) {
+  switch (component_count) {
+    case 1:
+      return "float";
+    case 2:
+      return "float2";
+    case 3:
+      return "float3";
+    case 4:
+      return "float4";
+    default:
+      assert_unhandled_case(component_count);
+      return "float4";
+  }
+}
+
+void AppendHlslClipDeclarations(std::ostringstream& hlsl,
+                                uint32_t clip_distance_count) {
+  if (!clip_distance_count) {
+    return;
+  }
+  if (clip_distance_count <= 4) {
+    hlsl << "  " << HlslGeometryFloatVectorType(clip_distance_count)
+         << " xe_clip_distance : SV_ClipDistance0;\n";
+  } else {
+    hlsl << "  float4 xe_clip_distance_0123 : SV_ClipDistance0;\n";
+    hlsl << "  " << HlslGeometryFloatVectorType(clip_distance_count - 4)
+         << " xe_clip_distance_45 : SV_ClipDistance1;\n";
+  }
+}
+
+void AppendHlslCullDeclarations(std::ostringstream& hlsl,
+                                uint32_t cull_distance_count) {
+  if (!cull_distance_count) {
+    return;
+  }
+  if (cull_distance_count <= 4) {
+    hlsl << "  " << HlslGeometryFloatVectorType(cull_distance_count)
+         << " xe_cull_distance : SV_CullDistance0;\n";
+  } else {
+    hlsl << "  float4 xe_cull_distance_0123 : SV_CullDistance0;\n";
+    hlsl << "  " << HlslGeometryFloatVectorType(cull_distance_count - 4)
+         << " xe_cull_distance_45 : SV_CullDistance1;\n";
+  }
+}
+
+std::string HlslDistanceComponent(const char* name, uint32_t distance_count,
+                                  uint32_t index, const std::string& source) {
+  const char* components = "xyzw";
+  std::string field = source + "." + name;
+  if (distance_count <= 4) {
+    if (distance_count == 1) {
+      return field;
+    }
+    return field + "." + components[index];
+  }
+  if (index < 4) {
+    return field + "_0123." + components[index];
+  }
+  uint32_t tail_index = index - 4;
+  if (distance_count - 4 == 1) {
+    return field + "_45";
+  }
+  return field + "_45." + components[tail_index];
+}
+
+void AppendHlslClipCopy(std::ostringstream& hlsl, uint32_t clip_distance_count,
+                        const char* destination, const char* source) {
+  if (!clip_distance_count) {
+    return;
+  }
+  if (clip_distance_count <= 4) {
+    hlsl << "  " << destination << ".xe_clip_distance = " << source
+         << ".xe_clip_distance;\n";
+  } else {
+    hlsl << "  " << destination << ".xe_clip_distance_0123 = " << source
+         << ".xe_clip_distance_0123;\n";
+    hlsl << "  " << destination << ".xe_clip_distance_45 = " << source
+         << ".xe_clip_distance_45;\n";
+  }
+}
+
+void AppendHlslClipMirror(std::ostringstream& hlsl,
+                          uint32_t clip_distance_count) {
+  if (!clip_distance_count) {
+    return;
+  }
+  if (clip_distance_count <= 4) {
+    hlsl << "  output_vertex.xe_clip_distance = -a.xe_clip_distance + "
+            "b.xe_clip_distance + c.xe_clip_distance;\n";
+  } else {
+    hlsl << "  output_vertex.xe_clip_distance_0123 = "
+            "-a.xe_clip_distance_0123 + b.xe_clip_distance_0123 + "
+            "c.xe_clip_distance_0123;\n";
+    hlsl << "  output_vertex.xe_clip_distance_45 = "
+            "-a.xe_clip_distance_45 + b.xe_clip_distance_45 + "
+            "c.xe_clip_distance_45;\n";
+  }
+}
+
+void AppendHlslPointVertex(std::ostringstream& hlsl, const char* uv,
+                           const char* offset) {
+  hlsl << "  XeCopyVertex(input[0], output_vertex);\n";
+  hlsl << "  output_vertex.xe_position.xy = input[0].xe_position.xy + "
+       << offset << ";\n";
+  hlsl << "  output_vertex.xe_point_parameters = float3(" << uv << ", 0.0);\n";
+  hlsl << "  stream.Append(output_vertex);\n";
+}
+
+}  // namespace
+
 std::string PipelineCache::CreateHlslGeometryShaderSource(
     GeometryShaderKey key) {
-  std::ostringstream source;
-
-  // System constants for point sprites.
-  source << "// Generated HLSL geometry shader - Xenia Xbox 360 Emulator\n";
-  source << "// Shader Model 6.6\n\n";
-
-  if (key.type == PipelineGeometryShader::kPointList) {
-    source << "cbuffer xe_system_cbuffer : register(b0) {\n";
-    source << "  uint xe_flags;\n";
-    source << "  float2 xe_tessellation_factor_range;\n";
-    source << "  uint xe_line_loop_closing_index;\n";
-    source << "  uint xe_vertex_index_endian;\n";
-    source << "  uint xe_vertex_index_offset;\n";
-    source << "  uint2 xe_vertex_index_min_max;\n";
-    source << "  float4 xe_user_clip_planes[6];\n";
-    source << "  float3 xe_ndc_scale;\n";
-    source << "  float xe_point_vertex_diameter_min;\n";
-    source << "  float3 xe_ndc_offset;\n";
-    source << "  float xe_point_vertex_diameter_max;\n";
-    source << "  float2 xe_point_constant_diameter;\n";
-    source << "  float2 xe_point_screen_diameter_to_ndc_radius;\n";
-    source << "};\n\n";
-  }
-
-  // Input/output structures.
-  // GSInput must match the vertex shader output structure exactly.
-  source << "struct GSInput {\n";
-  for (uint32_t i = 0; i < key.interpolator_count; ++i) {
-    source << "  float4 interpolator_" << i << " : TEXCOORD" << i << ";\n";
-  }
-  uint32_t texcoord_after_interpolators = key.interpolator_count;
-  // point_parameters only present when VS outputs point size.
-  if (key.has_point_size) {
-    source << "  float3 point_parameters : TEXCOORD"
-           << texcoord_after_interpolators << ";\n";
-    ++texcoord_after_interpolators;
-  }
-  source << "  float4 position : SV_Position;\n";
-  if (key.user_clip_plane_count > 0) {
-    source << "  float" << key.user_clip_plane_count
-           << " clip_distance : SV_ClipDistance;\n";
-  }
-  source << "};\n\n";
-
-  // GSOutput must match the pixel shader input structure.
-  source << "struct GSOutput {\n";
-  for (uint32_t i = 0; i < key.interpolator_count; ++i) {
-    source << "  float4 interpolator_" << i << " : TEXCOORD" << i << ";\n";
-  }
-  texcoord_after_interpolators = key.interpolator_count;
-  // point_parameters only present when PS expects point coordinates.
-  if (key.has_point_coordinates) {
-    source << "  float3 point_parameters : TEXCOORD"
-           << texcoord_after_interpolators << ";\n";
-    ++texcoord_after_interpolators;
-  }
-  source << "  float4 position : SV_Position;\n";
-  if (key.user_clip_plane_count > 0) {
-    source << "  float" << key.user_clip_plane_count
-           << " clip_distance : SV_ClipDistance;\n";
-  }
-  source << "};\n\n";
-
-  // Main function based on primitive type.
+  std::ostringstream hlsl;
+  const uint32_t clip_distance_count =
+      key.user_clip_plane_cull ? 0 : key.user_clip_plane_count;
+  const uint32_t cull_distance_count =
+      (key.user_clip_plane_cull ? key.user_clip_plane_count : 0) +
+      key.has_vertex_kill_and;
+  const char* input_primitive;
+  uint32_t input_vertex_count;
   switch (key.type) {
-    case PipelineGeometryShader::kPointList: {
-      // Point list: expand single point to quad (4 vertices, triangle strip).
-      source << "[maxvertexcount(4)]\n";
-      source << "void main(point GSInput input[1], inout "
-                "TriangleStream<GSOutput> output) {\n";
-      source << "  GSOutput vertex;\n\n";
-
-      // Copy interpolators.
-      for (uint32_t i = 0; i < key.interpolator_count; ++i) {
-        source << "  vertex.interpolator_" << i << " = input[0].interpolator_"
-               << i << ";\n";
-      }
-      if (key.user_clip_plane_count > 0) {
-        source << "  vertex.clip_distance = input[0].clip_distance;\n";
-      }
-      source << "\n";
-
-      // Calculate point size in NDC.
-      source << "  // Calculate point radius in NDC.\n";
-      source << "  float point_size = ";
-      if (key.has_point_size) {
-        source << "input[0].point_parameters.x;\n";
-      } else {
-        source << "xe_point_constant_diameter.x;\n";
-      }
-      source
-          << "  point_size = clamp(point_size, xe_point_vertex_diameter_min, "
-             "xe_point_vertex_diameter_max);\n";
-      source << "  float2 point_radius = point_size * "
-                "xe_point_screen_diameter_to_ndc_radius;\n\n";
-
-      // Emit 4 vertices (triangle strip: TL, TR, BL, BR).
-      const char* offsets[4][2] = {
-          {"-1.0", "-1.0"}, {"1.0", "-1.0"}, {"-1.0", "1.0"}, {"1.0", "1.0"}};
-      const char* coords[4][2] = {
-          {"0.0", "0.0"}, {"1.0", "0.0"}, {"0.0", "1.0"}, {"1.0", "1.0"}};
-      for (int i = 0; i < 4; ++i) {
-        source << "  vertex.position = input[0].position;\n";
-        source << "  vertex.position.xy += float2(" << offsets[i][0] << ", "
-               << offsets[i][1] << ") * point_radius * input[0].position.w;\n";
-        // Write generated sprite coordinates to point_parameters.xy for PS.
-        if (key.has_point_coordinates) {
-          if (key.has_point_size) {
-            // point_parameters.z is preserved from input (may contain point
-            // size).
-            source << "  vertex.point_parameters = float3(" << coords[i][0]
-                   << ", " << coords[i][1]
-                   << ", input[0].point_parameters.z);\n";
-          } else {
-            source << "  vertex.point_parameters = float3(" << coords[i][0]
-                   << ", " << coords[i][1] << ", 0.0);\n";
-          }
-        }
-        source << "  output.Append(vertex);\n\n";
-      }
-      source << "  output.RestartStrip();\n";
-      source << "}\n";
-    } break;
-
-    case PipelineGeometryShader::kRectangleList: {
-      // Rectangle list: 3 vertices define a rectangle, expand to 4 vertices.
-      // The longest edge is the diagonal. Find it and construct the 4th vertex.
-      // Based on DXBC implementation which handles all 3 possible diagonal
-      // cases.
-      source << "[maxvertexcount(4)]\n";
-      source << "void main(triangle GSInput input[3], inout "
-                "TriangleStream<GSOutput> output) {\n";
-      source << "  GSOutput vertex;\n\n";
-
-      // Find the longest edge (the diagonal) by comparing squared lengths.
-      source << "  // Find longest edge (diagonal) by comparing squared "
-                "lengths.\n";
-      source
-          << "  float2 edge12 = input[2].position.xy - input[1].position.xy;\n";
-      source
-          << "  float2 edge20 = input[0].position.xy - input[2].position.xy;\n";
-      source
-          << "  float2 edge01 = input[1].position.xy - input[0].position.xy;\n";
-      source << "  float len12sq = dot(edge12, edge12);\n";
-      source << "  float len20sq = dot(edge20, edge20);\n";
-      source << "  float len01sq = dot(edge01, edge01);\n\n";
-
-      // Select vertex order based on which edge is longest.
-      // If 12 is longest: strip order 0,1,2,3 where 3 = -0+1+2
-      // If 20 is longest: strip order 1,2,0,3 where 3 = -1+2+0
-      // If 01 is longest: strip order 2,0,1,3 where 3 = -2+0+1
-      source << "  // Select vertex indices based on longest edge.\n";
-      source << "  int3 idx;\n";
-      source << "  if (len12sq > len20sq && len12sq > len01sq) {\n";
-      source << "    idx = int3(0, 1, 2); // 12 is diagonal\n";
-      source << "  } else if (len20sq > len01sq) {\n";
-      source << "    idx = int3(1, 2, 0); // 20 is diagonal\n";
-      source << "  } else {\n";
-      source << "    idx = int3(2, 0, 1); // 01 is diagonal\n";
-      source << "  }\n\n";
-
-      // Helper arrays for indexed access.
-      source << "  float4 positions[3] = { input[0].position, "
-                "input[1].position, input[2].position };\n";
-      if (key.has_point_size) {
-        source << "  float3 point_params[3] = { input[0].point_parameters, "
-                  "input[1].point_parameters, input[2].point_parameters };\n";
-      }
-      for (uint32_t j = 0; j < key.interpolator_count; ++j) {
-        source << "  float4 interp" << j << "[3] = { input[0].interpolator_"
-               << j << ", input[1].interpolator_" << j
-               << ", input[2].interpolator_" << j << " };\n";
-      }
-      if (key.user_clip_plane_count > 0) {
-        source << "  float" << key.user_clip_plane_count
-               << " clip_dists[3] = { input[0].clip_distance, "
-                  "input[1].clip_distance, input[2].clip_distance };\n";
-      }
-      source << "\n";
-
-      // Calculate 4th vertex position: v3 = -v[idx.x] + v[idx.y] + v[idx.z]
-      source << "  float4 pos3 = -positions[idx.x] + positions[idx.y] + "
-                "positions[idx.z];\n\n";
-
-      // Emit first 3 vertices in selected order.
-      for (int i = 0; i < 3; ++i) {
-        source << "  // Vertex " << i << "\n";
-        for (uint32_t j = 0; j < key.interpolator_count; ++j) {
-          source << "  vertex.interpolator_" << j << " = interp" << j << "[idx["
-                 << i << "]];\n";
-        }
-        if (key.user_clip_plane_count > 0) {
-          source << "  vertex.clip_distance = clip_dists[idx[" << i << "]];\n";
-        }
-        if (key.has_point_coordinates) {
-          if (key.has_point_size) {
-            source << "  vertex.point_parameters = point_params[idx[" << i
-                   << "]];\n";
-          } else {
-            source << "  vertex.point_parameters = float3(0.0, 0.0, 0.0);\n";
-          }
-        }
-        source << "  vertex.position = positions[idx[" << i << "]];\n";
-        source << "  output.Append(vertex);\n\n";
-      }
-
-      // Emit 4th vertex (generated).
-      source << "  // Vertex 3 (generated)\n";
-      for (uint32_t j = 0; j < key.interpolator_count; ++j) {
-        source << "  vertex.interpolator_" << j << " = -interp" << j
-               << "[idx.x] + interp" << j << "[idx.y] + interp" << j
-               << "[idx.z];\n";
-      }
-      if (key.user_clip_plane_count > 0) {
-        source << "  vertex.clip_distance = -clip_dists[idx.x] + "
-                  "clip_dists[idx.y] + clip_dists[idx.z];\n";
-      }
-      if (key.has_point_coordinates) {
-        if (key.has_point_size) {
-          source << "  vertex.point_parameters = -point_params[idx.x] + "
-                    "point_params[idx.y] + point_params[idx.z];\n";
-        } else {
-          source << "  vertex.point_parameters = float3(0.0, 0.0, 0.0);\n";
-        }
-      }
-      source << "  vertex.position = pos3;\n";
-      source << "  output.Append(vertex);\n\n";
-
-      source << "  output.RestartStrip();\n";
-      source << "}\n";
-    } break;
-
-    case PipelineGeometryShader::kQuadList: {
-      // Quad list: 4 vertices per quad, emit as triangle strip.
-      source << "[maxvertexcount(4)]\n";
-      source << "void main(lineadj GSInput input[4], inout "
-                "TriangleStream<GSOutput> output) {\n";
-      source << "  GSOutput vertex;\n\n";
-
-      // Emit vertices in order: 0, 1, 3, 2 for correct triangle strip winding.
-      const int order[4] = {0, 1, 3, 2};
-      for (int i = 0; i < 4; ++i) {
-        int idx = order[i];
-        for (uint32_t j = 0; j < key.interpolator_count; ++j) {
-          source << "  vertex.interpolator_" << j << " = input[" << idx
-                 << "].interpolator_" << j << ";\n";
-        }
-        if (key.user_clip_plane_count > 0) {
-          source << "  vertex.clip_distance = input[" << idx
-                 << "].clip_distance;\n";
-        }
-        if (key.has_point_coordinates) {
-          if (key.has_point_size) {
-            source << "  vertex.point_parameters = input[" << idx
-                   << "].point_parameters;\n";
-          } else {
-            source << "  vertex.point_parameters = float3(0.0, 0.0, 0.0);\n";
-          }
-        }
-        source << "  vertex.position = input[" << idx << "].position;\n";
-        source << "  output.Append(vertex);\n\n";
-      }
-      source << "  output.RestartStrip();\n";
-      source << "}\n";
-    } break;
-
+    case PipelineGeometryShader::kPointList:
+      input_primitive = "point";
+      input_vertex_count = 1;
+      break;
+    case PipelineGeometryShader::kRectangleList:
+      input_primitive = "triangle";
+      input_vertex_count = 3;
+      break;
+    case PipelineGeometryShader::kQuadList:
+      input_primitive = "lineadj";
+      input_vertex_count = 4;
+      break;
     default:
-      source << "// Unknown geometry shader type\n";
-      source << "[maxvertexcount(1)]\n";
-      source << "void main(point GSInput input[1], inout PointStream<GSOutput> "
-                "output) {}\n";
+      assert_unhandled_case(key.type);
+      input_primitive = "point";
+      input_vertex_count = 1;
       break;
   }
 
-  return source.str();
+  hlsl << "// Generated HLSL geometry shader - Xenia Xbox 360 Emulator\n";
+  hlsl << "// Shader Model 6.0\n\n";
+
+  if (key.type == PipelineGeometryShader::kPointList) {
+    hlsl << "cbuffer xe_system_cbuffer : register(b0) {\n";
+    hlsl << "  uint4 xe_system_constants_padding[10];\n";
+    hlsl << "  float2 xe_point_constant_diameter;\n";
+    hlsl << "  float2 xe_point_screen_diameter_to_ndc_radius;\n";
+    hlsl << "};\n\n";
+  }
+
+  hlsl << "struct GSIn {\n";
+  for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+    hlsl << "  float4 xe_interpolator_" << i << " : TEXCOORD" << i << ";\n";
+  }
+  if (key.has_point_size) {
+    hlsl << "  float3 xe_point_parameters : TEXCOORD" << key.interpolator_count
+         << ";\n";
+  }
+  hlsl << "  precise float4 xe_position : SV_Position;\n";
+  AppendHlslClipDeclarations(hlsl, clip_distance_count);
+  AppendHlslCullDeclarations(hlsl, cull_distance_count);
+  hlsl << "};\n\n";
+
+  hlsl << "struct GSOut {\n";
+  for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+    hlsl << "  float4 xe_interpolator_" << i << " : TEXCOORD" << i << ";\n";
+  }
+  if (key.has_point_coordinates) {
+    hlsl << "  float3 xe_point_parameters : TEXCOORD" << key.interpolator_count
+         << ";\n";
+  }
+  hlsl << "  precise float4 xe_position : SV_Position;\n";
+  AppendHlslClipDeclarations(hlsl, clip_distance_count);
+  hlsl << "};\n\n";
+
+  hlsl << "bool XePositionIsNaN(float4 position) {\n";
+  hlsl << "  return any(position != position);\n";
+  hlsl << "}\n\n";
+
+  hlsl << "void XeCopyVertex(GSIn input_vertex, out GSOut output_vertex) {\n";
+  hlsl << "  output_vertex = (GSOut)0;\n";
+  for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+    hlsl << "  output_vertex.xe_interpolator_" << i
+         << " = input_vertex.xe_interpolator_" << i << ";\n";
+  }
+  if (key.has_point_coordinates) {
+    hlsl << "  output_vertex.xe_point_parameters = float3(0.0, 0.0, 0.0);\n";
+  }
+  hlsl << "  output_vertex.xe_position = input_vertex.xe_position;\n";
+  AppendHlslClipCopy(hlsl, clip_distance_count, "output_vertex",
+                     "input_vertex");
+  hlsl << "}\n\n";
+
+  if (key.type == PipelineGeometryShader::kRectangleList) {
+    hlsl << "GSOut XeMakeMirroredVertex(GSIn a, GSIn b, GSIn c) {\n";
+    hlsl << "  GSOut output_vertex = (GSOut)0;\n";
+    for (uint32_t i = 0; i < key.interpolator_count; ++i) {
+      hlsl << "  output_vertex.xe_interpolator_" << i
+           << " = -a.xe_interpolator_" << i << " + b.xe_interpolator_" << i
+           << " + c.xe_interpolator_" << i << ";\n";
+    }
+    if (key.has_point_coordinates) {
+      hlsl << "  output_vertex.xe_point_parameters = float3(0.0, 0.0, 0.0);\n";
+    }
+    hlsl << "  output_vertex.xe_position = -a.xe_position + b.xe_position + "
+            "c.xe_position;\n";
+    AppendHlslClipMirror(hlsl, clip_distance_count);
+    hlsl << "  return output_vertex;\n";
+    hlsl << "}\n\n";
+  }
+
+  hlsl << "[maxvertexcount(4)]\n";
+  hlsl << "void main(" << input_primitive << " GSIn input["
+       << input_vertex_count << "], inout TriangleStream<GSOut> stream) {\n";
+
+  for (uint32_t i = 0; i < input_vertex_count; ++i) {
+    hlsl << "  if (XePositionIsNaN(input[" << i << "].xe_position)) return;\n";
+  }
+  for (uint32_t i = 0; i < cull_distance_count; ++i) {
+    hlsl << "  if (";
+    for (uint32_t j = 0; j < input_vertex_count; ++j) {
+      if (j) {
+        hlsl << " && ";
+      }
+      hlsl << HlslDistanceComponent("xe_cull_distance", cull_distance_count, i,
+                                    "input[" + std::to_string(j) + "]")
+           << " < 0.0";
+    }
+    hlsl << ") return;\n";
+  }
+
+  switch (key.type) {
+    case PipelineGeometryShader::kPointList:
+      hlsl << "  float2 point_size = xe_point_constant_diameter;\n";
+      if (key.has_point_size) {
+        hlsl << "  if (input[0].xe_point_parameters.x >= 0.0) {\n";
+        hlsl << "    point_size = input[0].xe_point_parameters.xx;\n";
+        hlsl << "  }\n";
+      }
+      hlsl << "  if (point_size.x <= 0.0 || point_size.y <= 0.0) return;\n";
+      hlsl << "  float2 point_radius = point_size * "
+              "xe_point_screen_diameter_to_ndc_radius * "
+              "input[0].xe_position.w;\n";
+      hlsl << "  GSOut output_vertex;\n";
+      if (key.has_point_coordinates) {
+        AppendHlslPointVertex(hlsl, "0.0, 0.0",
+                              "float2(-point_radius.x, point_radius.y)");
+        AppendHlslPointVertex(hlsl, "1.0, 0.0",
+                              "float2(point_radius.x, point_radius.y)");
+        AppendHlslPointVertex(hlsl, "0.0, 1.0",
+                              "float2(-point_radius.x, -point_radius.y)");
+        AppendHlslPointVertex(hlsl, "1.0, 1.0",
+                              "float2(point_radius.x, -point_radius.y)");
+      } else {
+        hlsl << "  XeCopyVertex(input[0], output_vertex);\n";
+        hlsl << "  output_vertex.xe_position.xy = input[0].xe_position.xy + "
+                "float2(-point_radius.x, point_radius.y);\n";
+        hlsl << "  stream.Append(output_vertex);\n";
+        hlsl << "  XeCopyVertex(input[0], output_vertex);\n";
+        hlsl << "  output_vertex.xe_position.xy = input[0].xe_position.xy + "
+                "float2(point_radius.x, point_radius.y);\n";
+        hlsl << "  stream.Append(output_vertex);\n";
+        hlsl << "  XeCopyVertex(input[0], output_vertex);\n";
+        hlsl << "  output_vertex.xe_position.xy = input[0].xe_position.xy + "
+                "float2(-point_radius.x, -point_radius.y);\n";
+        hlsl << "  stream.Append(output_vertex);\n";
+        hlsl << "  XeCopyVertex(input[0], output_vertex);\n";
+        hlsl << "  output_vertex.xe_position.xy = input[0].xe_position.xy + "
+                "float2(point_radius.x, -point_radius.y);\n";
+        hlsl << "  stream.Append(output_vertex);\n";
+      }
+      hlsl << "  stream.RestartStrip();\n";
+      break;
+    case PipelineGeometryShader::kRectangleList:
+      hlsl << "  float2 edge12 = input[2].xe_position.xy - "
+              "input[1].xe_position.xy;\n";
+      hlsl << "  float2 edge20 = input[0].xe_position.xy - "
+              "input[2].xe_position.xy;\n";
+      hlsl << "  float2 edge01 = input[1].xe_position.xy - "
+              "input[0].xe_position.xy;\n";
+      hlsl << "  float length12 = dot(edge12, edge12);\n";
+      hlsl << "  float length20 = dot(edge20, edge20);\n";
+      hlsl << "  float length01 = dot(edge01, edge01);\n";
+      hlsl << "  uint i0 = 2, i1 = 0, i2 = 1;\n";
+      hlsl << "  if (length12 > length20 && length12 > length01) {\n";
+      hlsl << "    i0 = 0; i1 = 1; i2 = 2;\n";
+      hlsl << "  } else if (length20 > length01) {\n";
+      hlsl << "    i0 = 1; i1 = 2; i2 = 0;\n";
+      hlsl << "  }\n";
+      hlsl << "  GSOut output_vertex;\n";
+      hlsl << "  XeCopyVertex(input[i0], output_vertex);\n";
+      hlsl << "  stream.Append(output_vertex);\n";
+      hlsl << "  XeCopyVertex(input[i1], output_vertex);\n";
+      hlsl << "  stream.Append(output_vertex);\n";
+      hlsl << "  XeCopyVertex(input[i2], output_vertex);\n";
+      hlsl << "  stream.Append(output_vertex);\n";
+      hlsl << "  output_vertex = XeMakeMirroredVertex(input[i0], input[i1], "
+              "input[i2]);\n";
+      hlsl << "  stream.Append(output_vertex);\n";
+      hlsl << "  stream.RestartStrip();\n";
+      break;
+    case PipelineGeometryShader::kQuadList:
+      hlsl << "  GSOut output_vertex;\n";
+      hlsl << "  XeCopyVertex(input[0], output_vertex);\n";
+      hlsl << "  stream.Append(output_vertex);\n";
+      hlsl << "  XeCopyVertex(input[1], output_vertex);\n";
+      hlsl << "  stream.Append(output_vertex);\n";
+      hlsl << "  XeCopyVertex(input[3], output_vertex);\n";
+      hlsl << "  stream.Append(output_vertex);\n";
+      hlsl << "  XeCopyVertex(input[2], output_vertex);\n";
+      hlsl << "  stream.Append(output_vertex);\n";
+      hlsl << "  stream.RestartStrip();\n";
+      break;
+    default:
+      assert_unhandled_case(key.type);
+      break;
+  }
+
+  hlsl << "}\n";
+  return hlsl.str();
 }
 
 const std::vector<uint8_t>* PipelineCache::GetDxilGeometryShader(
@@ -3685,9 +3744,13 @@ void PipelineCache::CreationThread(size_t thread_index) {
   std::unique_ptr<HlslShaderTranslator> hlsl_translator;
   if (dxil_shaders_enabled_) {
     hlsl_translator = std::make_unique<HlslShaderTranslator>(
-        provider.GetAdapterVendorID(), bindless_resources_used_,
-        edram_rov_used);
+        provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
+        /*use_shader_model_6_6=*/true,
+        render_target_cache_.draw_resolution_scale_x(),
+        render_target_cache_.draw_resolution_scale_y());
     hlsl_translator->SetDxcCompiler(dxc_shader_compiler_.get());
+    hlsl_translator->SetBindlessSrvHeapOffset(uint32_t(
+        D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart));
   }
   // Select the appropriate translator.
   ShaderTranslator* translator_ptr;

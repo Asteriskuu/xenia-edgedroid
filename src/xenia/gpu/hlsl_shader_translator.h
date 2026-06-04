@@ -22,6 +22,7 @@
 
 namespace xe {
 namespace gpu {
+
 namespace d3d12 {
 class DxcCompiler;
 }  // namespace d3d12
@@ -41,7 +42,9 @@ class HlslShaderTranslator : public ShaderTranslator {
   //                        If false, uses SM 6.0 with unbounded SRV arrays.
   HlslShaderTranslator(ui::GraphicsProvider::GpuVendorID vendor_id,
                        bool bindless_resources_used, bool edram_rov_used,
-                       bool use_shader_model_6_6 = true);
+                       bool use_shader_model_6_6 = true,
+                       uint32_t draw_resolution_scale_x = 1,
+                       uint32_t draw_resolution_scale_y = 1);
   ~HlslShaderTranslator() override;
 
   // Returns the generated HLSL source code. Valid after translation.
@@ -57,6 +60,13 @@ class HlslShaderTranslator : public ShaderTranslator {
     dxc_compiler_ = compiler;
   }
 
+  // Offset to the unbounded guest SRV range in the view heap. Added to
+  // bindless texture indices, which the command processor stores relative to
+  // that range.
+  void SetBindlessSrvHeapOffset(uint32_t offset) {
+    bindless_srv_heap_offset_ = offset;
+  }
+
   uint64_t GetDefaultVertexShaderModification(
       uint32_t dynamic_addressable_register_count,
       Shader::HostVertexShaderType host_vertex_shader_type =
@@ -68,6 +78,7 @@ class HlslShaderTranslator : public ShaderTranslator {
   void Reset() override;
   void StartTranslation() override;
   std::vector<uint8_t> CompleteTranslation() override;
+  uint32_t GetModificationRegisterCount() const override;
 
   void ProcessLabel(uint32_t cf_index) override;
   void ProcessExecInstructionBegin(const ParsedExecInstruction& instr) override;
@@ -76,6 +87,8 @@ class HlslShaderTranslator : public ShaderTranslator {
       const ParsedLoopStartInstruction& instr) override;
   void ProcessLoopEndInstruction(
       const ParsedLoopEndInstruction& instr) override;
+  void ProcessCallInstruction(const ParsedCallInstruction& instr) override;
+  void ProcessReturnInstruction(const ParsedReturnInstruction& instr) override;
   void ProcessJumpInstruction(const ParsedJumpInstruction& instr) override;
   void ProcessAllocInstruction(const ParsedAllocInstruction& instr,
                                uint8_t export_eM) override;
@@ -126,6 +139,22 @@ class HlslShaderTranslator : public ShaderTranslator {
   std::string OperandToHlslNoSwizzle(const InstructionOperand& operand);
   // Convert a result storage target to HLSL.
   std::string ResultToHlsl(const InstructionResult& result);
+  // Convert temporary register storage to HLSL.
+  std::string RegisterToHlsl(uint32_t storage_index,
+                             InstructionStorageAddressingMode mode) const;
+  // Whether this pixel shader needs an SV_Depth output for float24 conversion.
+  bool PixelShaderNeedsFloat24DepthOutput() const;
+  // Whether this pixel shader writes an SV_Depth-family output.
+  bool PixelShaderWritesDepthOutput() const;
+  // Whether early-depth/stencil is forced globally for this pixel shader.
+  bool IsForceEarlyDepthStencilEnabled() const;
+  // Whether this pixel shader needs an SV_Coverage output for alpha-to-mask.
+  bool PixelShaderNeedsCoverageOutput() const;
+  // Whether a result write must be saturated to 0..1.
+  bool ResultNeedsSaturation(const InstructionResult& result) const;
+  // Wrap an emitted expression in saturate() when the result requires it.
+  std::string SaturateExpressionIfNeeded(const InstructionResult& result,
+                                         const std::string& expression) const;
   // Get swizzle string for components.
   std::string GetSwizzleString(const SwizzleSource* components,
                                uint32_t component_count);
@@ -137,6 +166,15 @@ class HlslShaderTranslator : public ShaderTranslator {
   // Emit assignment for scalar results (replicates scalar to match mask).
   void EmitScalarResultAssignment(const InstructionResult& result,
                                   const std::string& scalar_expr);
+  // Clamp point size exports after writing them, matching the DXBC path's
+  // signed-integer bitwise clamp behavior.
+  void EmitPointSizeClampIfNeeded(const InstructionResult& result,
+                                  uint32_t write_mask);
+  // Emit PsParamGen pseudo-interpolator initialization for pixel shaders.
+  void EmitPixelShaderParamGen();
+  // Emit fixed-function-style pixel kill / coverage logic.
+  void EmitPixelShaderAlphaTest();
+  void EmitPixelShaderAlphaToCoverage();
   // Store constant-only components (k0 or k1) to the result destination.
   // Called after ALU processing to handle cases where all components are
   // constants and the ALU operation returned early.
@@ -191,6 +229,10 @@ class HlslShaderTranslator : public ShaderTranslator {
   bool bindless_resources_used_;
   bool edram_rov_used_;
   bool use_shader_model_6_6_;
+  uint32_t draw_resolution_scale_x_;
+  uint32_t draw_resolution_scale_y_;
+  // Added to bindless texture indices to reach the unbounded SRV range.
+  uint32_t bindless_srv_heap_offset_ = 0;
 
   // DXC compiler for HLSL to DXIL compilation. If set, CompleteTranslation
   // compiles HLSL to DXIL. If null, returns HLSL source as bytes.
