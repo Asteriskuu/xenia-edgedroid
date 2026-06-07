@@ -3292,6 +3292,12 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
       HlslFloatLiteral(instr.attributes.lod_bias);
   const bool get_texture_weights =
       instr.opcode == FetchOpcode::kGetTextureWeights;
+  const bool get_border_color_frac =
+      instr.opcode == FetchOpcode::kGetTextureBorderColorFrac;
+  // getWeights and getBCF both need the bilinear footprint centered on the
+  // texel grid (the -0.5 texel shift), not the raw sampling coordinate.
+  const bool needs_bilinear_footprint =
+      get_texture_weights || get_border_color_frac;
   float offset_x = 0.0f;
   float offset_y = 0.0f;
   float offset_z = 0.0f;
@@ -3303,9 +3309,9 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
     if (instr.dimension == xenos::FetchOpDimension::kCube) {
       // Cube SC/TC get the same texel-center ambiguity fixup as 2D, but the
       // face index is a discrete value, not a texture coordinate.
-      offset_z = get_texture_weights ? 0.0f : instr.attributes.offset_z;
+      offset_z = needs_bilinear_footprint ? 0.0f : instr.attributes.offset_z;
     }
-    if (get_texture_weights) {
+    if (needs_bilinear_footprint) {
       offset_x -= 0.5f;
       switch (instr.dimension) {
         case xenos::FetchOpDimension::k2D:
@@ -3327,14 +3333,6 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
   std::string result_value = "xe_tf_result";
   EmitLine("float4 xe_tf_result = float4(0.0, 0.0, 0.0, 0.0);");
   EmitLine("float3 xe_tf_weight_coord = float3(0.0, 0.0, 0.0);");
-  if (instr.opcode == FetchOpcode::kGetTextureBorderColorFrac) {
-    XELOGW("HLSL: getBCF is unimplemented; returning zero");
-    EmitVectorResultAssignment(instr.result, result_value);
-    StoreConstantComponents(instr.result);
-    Outdent();
-    EmitLine("}");
-    return;
-  }
   if (instr.opcode == FetchOpcode::kGetTextureComputedLod &&
       (!is_pixel_shader() || !instr.attributes.use_computed_lod ||
        instr.attributes.use_register_lod ||
@@ -3492,6 +3490,123 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
             "xe_tf_result = float4(frac(xe_tf_weight_coord.xy), 0.0, "
             "0.0);");
         break;
+      default:
+        break;
+    }
+  } else if (get_border_color_frac) {
+    // Border color fraction (in .x): the bilinear-weighted share of the sample
+    // footprint that lands outside the texture on axes using a border clamp
+    // mode (6/7). Mips are ignored (LOD 0), matching the getWeights
+    // simplification. xe_tf_weight_coord is the footprint center in texels.
+    EmitLine("uint xe_tf_clamp = XeGetTextureFetchConstantWord(" +
+             fetch_constant_literal + ", 0u);");
+    EmitLine("bool xe_tf_bx = ((xe_tf_clamp >> 10u) & 6u) == 6u;");
+    EmitLine("bool xe_tf_by = ((xe_tf_clamp >> 13u) & 6u) == 6u;");
+    EmitLine("bool xe_tf_bz = ((xe_tf_clamp >> 16u) & 6u) == 6u;");
+    switch (instr.dimension) {
+      case xenos::FetchOpDimension::k1D: {
+        EmitLine("float xe_tf_w = XeGetTextureFetchSize1D(" +
+                 fetch_constant_literal + ");");
+        EmitLine("float xe_tf_f = frac(xe_tf_weight_coord.x);");
+        EmitLine("float xe_tf_i0 = floor(xe_tf_weight_coord.x);");
+        EmitLine(
+            "bool xe_tf_x0 = xe_tf_bx && (xe_tf_i0 < 0.0 || xe_tf_i0 >= "
+            "xe_tf_w);");
+        EmitLine(
+            "bool xe_tf_x1 = xe_tf_bx && (xe_tf_i0 + 1.0 < 0.0 || xe_tf_i0 + "
+            "1.0 >= xe_tf_w);");
+        EmitLine(
+            "xe_tf_result.x = (xe_tf_x0 ? (1.0 - xe_tf_f) : 0.0) + (xe_tf_x1 ? "
+            "xe_tf_f : 0.0);");
+      } break;
+      case xenos::FetchOpDimension::k2D:
+      case xenos::FetchOpDimension::kCube: {
+        // Cube reuses the 2D face-UV footprint; cube faces rarely use border
+        // clamp, so this is normally zero.
+        EmitLine("float2 xe_tf_s = XeGetTextureFetchSize2D(" +
+                 fetch_constant_literal + ");");
+        EmitLine("float2 xe_tf_f = frac(xe_tf_weight_coord.xy);");
+        EmitLine("float2 xe_tf_i0 = floor(xe_tf_weight_coord.xy);");
+        EmitLine("float2 xe_tf_i1 = xe_tf_i0 + 1.0;");
+        EmitLine(
+            "bool xe_tf_x0 = xe_tf_bx && (xe_tf_i0.x < 0.0 || xe_tf_i0.x >= "
+            "xe_tf_s.x);");
+        EmitLine(
+            "bool xe_tf_x1 = xe_tf_bx && (xe_tf_i1.x < 0.0 || xe_tf_i1.x >= "
+            "xe_tf_s.x);");
+        EmitLine(
+            "bool xe_tf_y0 = xe_tf_by && (xe_tf_i0.y < 0.0 || xe_tf_i0.y >= "
+            "xe_tf_s.y);");
+        EmitLine(
+            "bool xe_tf_y1 = xe_tf_by && (xe_tf_i1.y < 0.0 || xe_tf_i1.y >= "
+            "xe_tf_s.y);");
+        EmitLine("float xe_tf_bcf = 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x0 || xe_tf_y0) ? (1.0 - xe_tf_f.x) * (1.0 - "
+            "xe_tf_f.y) : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x1 || xe_tf_y0) ? xe_tf_f.x * (1.0 - "
+            "xe_tf_f.y) : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x0 || xe_tf_y1) ? (1.0 - xe_tf_f.x) * "
+            "xe_tf_f.y : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x1 || xe_tf_y1) ? xe_tf_f.x * xe_tf_f.y : "
+            "0.0;");
+        EmitLine("xe_tf_result.x = xe_tf_bcf;");
+      } break;
+      case xenos::FetchOpDimension::k3DOrStacked: {
+        EmitLine("float3 xe_tf_s = XeGetTextureFetchSize3DOrStacked(" +
+                 fetch_constant_literal + ");");
+        EmitLine("float3 xe_tf_f = frac(xe_tf_weight_coord);");
+        EmitLine("float3 xe_tf_i0 = floor(xe_tf_weight_coord);");
+        EmitLine("float3 xe_tf_i1 = xe_tf_i0 + 1.0;");
+        EmitLine(
+            "bool xe_tf_x0 = xe_tf_bx && (xe_tf_i0.x < 0.0 || xe_tf_i0.x >= "
+            "xe_tf_s.x);");
+        EmitLine(
+            "bool xe_tf_x1 = xe_tf_bx && (xe_tf_i1.x < 0.0 || xe_tf_i1.x >= "
+            "xe_tf_s.x);");
+        EmitLine(
+            "bool xe_tf_y0 = xe_tf_by && (xe_tf_i0.y < 0.0 || xe_tf_i0.y >= "
+            "xe_tf_s.y);");
+        EmitLine(
+            "bool xe_tf_y1 = xe_tf_by && (xe_tf_i1.y < 0.0 || xe_tf_i1.y >= "
+            "xe_tf_s.y);");
+        EmitLine(
+            "bool xe_tf_z0 = xe_tf_bz && (xe_tf_i0.z < 0.0 || xe_tf_i0.z >= "
+            "xe_tf_s.z);");
+        EmitLine(
+            "bool xe_tf_z1 = xe_tf_bz && (xe_tf_i1.z < 0.0 || xe_tf_i1.z >= "
+            "xe_tf_s.z);");
+        EmitLine("float3 xe_tf_g = 1.0 - xe_tf_f;");
+        EmitLine("float xe_tf_bcf = 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x0||xe_tf_y0||xe_tf_z0) ? xe_tf_g.x*xe_tf_g.y*"
+            "xe_tf_g.z : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x1||xe_tf_y0||xe_tf_z0) ? xe_tf_f.x*xe_tf_g.y*"
+            "xe_tf_g.z : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x0||xe_tf_y1||xe_tf_z0) ? xe_tf_g.x*xe_tf_f.y*"
+            "xe_tf_g.z : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x1||xe_tf_y1||xe_tf_z0) ? xe_tf_f.x*xe_tf_f.y*"
+            "xe_tf_g.z : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x0||xe_tf_y0||xe_tf_z1) ? xe_tf_g.x*xe_tf_g.y*"
+            "xe_tf_f.z : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x1||xe_tf_y0||xe_tf_z1) ? xe_tf_f.x*xe_tf_g.y*"
+            "xe_tf_f.z : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x0||xe_tf_y1||xe_tf_z1) ? xe_tf_g.x*xe_tf_f.y*"
+            "xe_tf_f.z : 0.0;");
+        EmitLine(
+            "xe_tf_bcf += (xe_tf_x1||xe_tf_y1||xe_tf_z1) ? xe_tf_f.x*xe_tf_f.y*"
+            "xe_tf_f.z : 0.0;");
+        EmitLine("xe_tf_result.x = xe_tf_bcf;");
+      } break;
       default:
         break;
     }
