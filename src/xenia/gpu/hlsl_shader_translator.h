@@ -105,6 +105,23 @@ class HlslShaderTranslator : public ShaderTranslator {
     return Modification(current_translation().modification());
   }
 
+  // Whether the current shader is a tessellation domain shader (a guest vertex
+  // shader evaluated per tessellated patch point).
+  bool IsDomainShader() const {
+    return is_vertex_shader() &&
+           Shader::IsHostVertexShaderTypeDomain(
+               GetHlslShaderModification().vertex.host_vertex_shader_type);
+  }
+  // Fills the HLSL domain ("tri"/"quad"), control point count and
+  // SV_DomainLocation component count for the current domain shader. Returns
+  // false for unsupported domain types.
+  bool GetDomainShaderInfo(const char*& domain_out,
+                           uint32_t& control_point_count_out,
+                           uint32_t& domain_location_component_count_out) const;
+  // Emit the domain shader prologue: domain location and host-provided control
+  // point indices into the guest registers, matching the DXBC translator.
+  void EmitDomainShaderPrologue();
+
   // Emit system constant buffer declaration (must match xenos_draw.hlsli).
   void EmitSystemConstants();
   // Emit float/bool/loop constant buffer declarations.
@@ -118,6 +135,20 @@ class HlslShaderTranslator : public ShaderTranslator {
   // Emit helper functions used by the shader.
   void EmitHelperFunctions();
 
+  // Whether this shader performs memory export (writes to eM#).
+  bool MemExportUsed() const {
+    return current_shader().memexport_eM_written() != 0;
+  }
+  // Emit the fixed memory-export helper functions (format conversion + store).
+  void EmitMemExportHelpers();
+  // Emit a flush of the currently-written eM# elements to shared memory.
+  void EmitMemExportFlush();
+  // Mark an eM# element as written when a result targets export data.
+  void EmitMemExportWrittenMark(const InstructionResult& result);
+
+  // Emit per-invocation shader state as static globals, so subroutine functions
+  // can share it. The program counter stays local to each function.
+  void EmitGlobalState();
   // Emit the shader entry point signature.
   void EmitEntryPointBegin();
   // Emit the shader entry point closing.

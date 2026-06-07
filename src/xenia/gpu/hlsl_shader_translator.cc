@@ -45,29 +45,6 @@ std::string HlslFloatLiteral(float value) {
   return text;
 }
 
-bool IsMemExportTarget(const InstructionResult& result) {
-  return result.storage_target == InstructionStorageTarget::kExportAddress ||
-         result.storage_target == InstructionStorageTarget::kExportData;
-}
-
-const char* GetMemExportTargetName(const InstructionResult& result) {
-  return result.storage_target == InstructionStorageTarget::kExportAddress
-             ? "eA"
-             : "eM";
-}
-
-void LogUnimplementedMemExportResult(const char* operation,
-                                     const InstructionResult& result) {
-  if (!IsMemExportTarget(result)) {
-    return;
-  }
-  XELOGE(
-      "HLSL: UNIMPLEMENTED memexport {} write: target {}{} mask 0x{:X}; "
-      "dropping write",
-      operation, GetMemExportTargetName(result), result.storage_index,
-      result.GetUsedWriteMask());
-}
-
 bool IsVectorKillOpcode(ucode::AluVectorOpcode opcode) {
   switch (opcode) {
     case ucode::AluVectorOpcode::kKillEq:
@@ -112,9 +89,38 @@ HlslShaderTranslator::~HlslShaderTranslator() = default;
 
 std::string HlslShaderTranslator::GetShaderTargetProfile() const {
   if (is_vertex_shader()) {
-    return "vs_6_6";
+    return IsDomainShader() ? "ds_6_6" : "vs_6_6";
   } else {
     return "ps_6_6";
+  }
+}
+
+bool HlslShaderTranslator::GetDomainShaderInfo(
+    const char*& domain_out, uint32_t& control_point_count_out,
+    uint32_t& domain_location_component_count_out) const {
+  switch (GetHlslShaderModification().vertex.host_vertex_shader_type) {
+    case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
+      domain_out = "tri";
+      control_point_count_out = 3;
+      domain_location_component_count_out = 3;
+      return true;
+    case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
+      domain_out = "tri";
+      control_point_count_out = 1;
+      domain_location_component_count_out = 3;
+      return true;
+    case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
+      domain_out = "quad";
+      control_point_count_out = 4;
+      domain_location_component_count_out = 2;
+      return true;
+    case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
+      domain_out = "quad";
+      control_point_count_out = 1;
+      domain_location_component_count_out = 2;
+      return true;
+    default:
+      return false;
   }
 }
 
@@ -458,12 +464,38 @@ void HlslShaderTranslator::EmitInputDeclarations() {
   Modification modification = GetHlslShaderModification();
 
   if (is_vertex_shader()) {
-    EmitLine("struct VSInput {");
-    Indent();
-    EmitLine("uint xe_vertex_id : SV_VertexID;");
-    Outdent();
-    EmitLine("};");
-    EmitLine("");
+    if (IsDomainShader()) {
+      const char* domain = "quad";
+      uint32_t control_point_count = 1;
+      uint32_t domain_location_component_count = 2;
+      GetDomainShaderInfo(domain, control_point_count,
+                          domain_location_component_count);
+      // Control points produced by the host hull shader.
+      EmitLine("struct XeHSControlPointOutput {");
+      Indent();
+      EmitLine("float index : XEVERTEXID;");
+      Outdent();
+      EmitLine("};");
+      // Tessellation factors produced by the host hull shader. Unused by the
+      // guest, declared to match the hull shader patch constant signature.
+      bool is_triangle = domain_location_component_count == 3;
+      EmitLine("struct XeHSConstantDataOutput {");
+      Indent();
+      EmitLine(std::string("float edges[") + (is_triangle ? "3" : "4") +
+               "] : SV_TessFactor;");
+      EmitLine(is_triangle ? "float inside : SV_InsideTessFactor;"
+                           : "float inside[2] : SV_InsideTessFactor;");
+      Outdent();
+      EmitLine("};");
+      EmitLine("");
+    } else {
+      EmitLine("struct VSInput {");
+      Indent();
+      EmitLine("uint xe_vertex_id : SV_VertexID;");
+      Outdent();
+      EmitLine("};");
+      EmitLine("");
+    }
   } else {
     // Pixel shader input - must match vertex shader output signature.
     // Only declare interpolators that are in the interpolator_mask.
@@ -1105,6 +1137,23 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   EmitLine("}");
   EmitLine("");
 
+  EmitLine("float XePreSaturatedLinearToPWLGamma(float value) {");
+  Indent();
+  EmitLine("// value must be pre-saturated linear in [0, 1].");
+  EmitLine("bool piece_at_least_2 = value >= (128.0f / 1023.0f);");
+  EmitLine("bool piece_at_least_3 = value >= (512.0f / 1023.0f);");
+  EmitLine("bool piece_at_least_1 = value >= (64.0f / 1023.0f);");
+  EmitLine(
+      "float scale = piece_at_least_2 ? (piece_at_least_3 ? (1023.0f / 8.0f) : "
+      "(1023.0f / 4.0f)) : (piece_at_least_1 ? (1023.0f / 2.0f) : 1023.0f);");
+  EmitLine(
+      "float offset = piece_at_least_2 ? (piece_at_least_3 ? (128.0f / 255.0f) "
+      ": (64.0f / 255.0f)) : (piece_at_least_1 ? (32.0f / 255.0f) : 0.0f);");
+  EmitLine("return trunc(value * scale) * (1.0f / 255.0f) + offset;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
   EmitLine(
       "float XeApplyTextureSign(float unsigned_value, float signed_value, uint "
       "sign) {");
@@ -1137,19 +1186,324 @@ void HlslShaderTranslator::EmitHelperFunctions() {
     EmitLine("}");
     EmitLine("");
   }
+
+  // Memory export helpers (after XeEndianSwap, which they reuse).
+  if (MemExportUsed()) {
+    EmitMemExportHelpers();
+  }
+}
+
+void HlslShaderTranslator::EmitMemExportHelpers() {
+  // Xbox 360 extended-range float32 -> float16 (exponent 31 is a valid large
+  // value, not Inf/NaN). Mirrors DxbcShaderTranslator's f32_to_f16 path.
+  Emit(
+      R"(uint XeMemExportF16(float v) {
+  uint h = f32tof16(v);
+  if ((h & 0x7C00u) == 0x7C00u) {
+    h = f32tof16(clamp(v, -131008.0, 131008.0) * 0.5) + 0x0400u;
+  }
+  return h & 0xFFFFu;
+}
+
+uint XeMemExportPack(float4 v, uint4 widths, bool num_signed, bool num_integer) {
+  v = select(isnan(v), float4(0.0, 0.0, 0.0, 0.0), v);
+  uint4 pu;
+  if (num_signed) {
+    float4 maxv = float4((((int4)1) << max(int4(widths) - 1, 0)) - 1);
+    if (num_integer) {
+      v = clamp(v, -1.0 - maxv, maxv);
+    } else {
+      v = clamp(v, -1.0, 1.0);
+      v = select(widths > 2u, v * maxv, v);
+    }
+    v += select(v >= 0.0, float4(0.5, 0.5, 0.5, 0.5),
+                float4(-0.5, -0.5, -0.5, -0.5));
+    pu = uint4(int4(v));
+  } else {
+    float4 maxv = float4((((uint4)1) << widths) - 1u);
+    if (num_integer) {
+      v = clamp(v, 0.0, maxv);
+    } else {
+      v = saturate(v);
+      v = select(widths > 1u, v * maxv, v);
+    }
+    v += 0.5;
+    pu = uint4(v);
+  }
+  uint4 offsets = uint4(0u, widths.x, widths.x + widths.y,
+                        widths.x + widths.y + widths.z);
+  uint result = 0u;
+  [unroll] for (uint c = 0u; c < 4u; ++c) {
+    if (widths[c] != 0u) {
+      uint m = (1u << widths[c]) - 1u;
+      result |= (pu[c] & m) << offsets[c];
+    }
+  }
+  return result;
+}
+
+)");
+
+  // Format conversion switch, with case labels from the ColorFormat enum.
+  using CF = xenos::ColorFormat;
+  std::string convert =
+      "bool XeMemExportConvert(float4 v, uint format, bool num_signed,\n"
+      "                        bool num_integer, out uint4 packed,\n"
+      "                        out uint size_log2) {\n"
+      "  packed = uint4(0u, 0u, 0u, 0u);\n"
+      "  size_log2 = 0u;\n"
+      "  switch (format) {\n";
+  auto gen = [&](std::initializer_list<CF> formats, const char* widths,
+                 uint32_t size_log2) {
+    for (CF format : formats) {
+      convert += "    case " + std::to_string(uint32_t(format)) + "u:\n";
+    }
+    convert += std::string("      packed.x = XeMemExportPack(v, ") + widths +
+               ", num_signed, num_integer);\n      size_log2 = " +
+               std::to_string(size_log2) + "u; return true;\n";
+  };
+  gen({CF::k_8, CF::k_8_A, CF::k_8_B}, "uint4(8u, 0u, 0u, 0u)", 0);
+  gen({CF::k_1_5_5_5}, "uint4(5u, 5u, 5u, 1u)", 1);
+  gen({CF::k_5_6_5}, "uint4(5u, 6u, 5u, 0u)", 1);
+  gen({CF::k_6_5_5}, "uint4(5u, 5u, 6u, 0u)", 1);
+  gen({CF::k_8_8_8_8, CF::k_8_8_8_8_A, CF::k_8_8_8_8_AS_16_16_16_16},
+      "uint4(8u, 8u, 8u, 8u)", 2);
+  gen({CF::k_2_10_10_10, CF::k_2_10_10_10_AS_16_16_16_16},
+      "uint4(10u, 10u, 10u, 2u)", 2);
+  gen({CF::k_8_8}, "uint4(8u, 8u, 0u, 0u)", 1);
+  gen({CF::k_4_4_4_4}, "uint4(4u, 4u, 4u, 4u)", 1);
+  gen({CF::k_10_11_11, CF::k_10_11_11_AS_16_16_16_16},
+      "uint4(11u, 11u, 10u, 0u)", 2);
+  gen({CF::k_11_11_10, CF::k_11_11_10_AS_16_16_16_16},
+      "uint4(10u, 11u, 11u, 0u)", 2);
+  gen({CF::k_16}, "uint4(16u, 0u, 0u, 0u)", 1);
+  gen({CF::k_16_16}, "uint4(16u, 16u, 0u, 0u)", 2);
+  // k_16_16_16_16 reuses the 16-bit packer per pair into two dwords.
+  convert += "    case " + std::to_string(uint32_t(CF::k_16_16_16_16)) +
+             "u:\n"
+             "      packed.x = XeMemExportPack(v, uint4(16u, 16u, 0u, 0u), "
+             "num_signed, num_integer);\n"
+             "      packed.y = XeMemExportPack(float4(v.zw, 0.0, 0.0), "
+             "uint4(16u, 16u, 0u, 0u), num_signed, num_integer);\n"
+             "      size_log2 = 3u; return true;\n";
+  convert += "    case " + std::to_string(uint32_t(CF::k_16_FLOAT)) +
+             "u:\n      packed.x = XeMemExportF16(v.x); size_log2 = 1u; return "
+             "true;\n";
+  convert +=
+      "    case " + std::to_string(uint32_t(CF::k_16_16_FLOAT)) +
+      "u:\n      packed.x = XeMemExportF16(v.x) | (XeMemExportF16(v.y) << "
+      "16u); size_log2 = 2u; return true;\n";
+  convert += "    case " + std::to_string(uint32_t(CF::k_16_16_16_16_FLOAT)) +
+             "u:\n"
+             "      packed.x = XeMemExportF16(v.x) | (XeMemExportF16(v.y) << "
+             "16u);\n"
+             "      packed.y = XeMemExportF16(v.z) | (XeMemExportF16(v.w) << "
+             "16u);\n"
+             "      size_log2 = 3u; return true;\n";
+  convert += "    case " + std::to_string(uint32_t(CF::k_32_FLOAT)) +
+             "u:\n      packed.x = asuint(v.x); size_log2 = 2u; return true;\n";
+  convert += "    case " + std::to_string(uint32_t(CF::k_32_32_FLOAT)) +
+             "u:\n      packed.xy = asuint(v.xy); size_log2 = 3u; return "
+             "true;\n";
+  convert += "    case " + std::to_string(uint32_t(CF::k_32_32_32_32_FLOAT)) +
+             "u:\n      packed = asuint(v); size_log2 = 4u; return true;\n";
+  convert +=
+      "    default:\n      size_log2 = 0xFFFFFFFFu; return false;\n  }\n}\n\n";
+  Emit(convert);
+
+  // Store a converted element and the full per-invocation flush.
+  Emit(
+      R"(void XeMemExportStore(uint addr, uint size_log2, uint4 packed) {
+  if (size_log2 == 0u) {
+    uint shift = (addr & 3u) * 8u;
+    uint daddr = addr & ~3u;
+    uint original;
+    xe_shared_memory_uav.InterlockedAnd(daddr, ~(0xFFu << shift), original);
+    xe_shared_memory_uav.InterlockedOr(daddr, (packed.x & 0xFFu) << shift,
+                                       original);
+  } else if (size_log2 == 1u) {
+    uint shift = (addr & 3u) * 8u;
+    uint daddr = addr & ~3u;
+    uint original;
+    xe_shared_memory_uav.InterlockedAnd(daddr, ~(0xFFFFu << shift), original);
+    xe_shared_memory_uav.InterlockedOr(daddr, (packed.x & 0xFFFFu) << shift,
+                                       original);
+  } else if (size_log2 == 2u) {
+    xe_shared_memory_uav.Store(addr, packed.x);
+  } else if (size_log2 == 3u) {
+    xe_shared_memory_uav.Store2(addr, packed.xy);
+  } else {
+    xe_shared_memory_uav.Store4(addr, packed);
+  }
+}
+
+void XeExportToMemory(uint4 ea, float4 em[5], uint em_written, bool enabled) {
+  if (!enabled) { return; }
+  uint4 chk = ea >> uint4(30u, 23u, 23u, 23u);
+  if (!(chk.x == 1u && chk.y == 0x96u && chk.z == 0x96u && chk.w == 0x96u)) {
+    return;
+  }
+  uint format = (ea.z >> 8u) & 0x3Fu;
+  bool num_signed = ((ea.z >> 16u) & 1u) != 0u;
+  bool num_integer = ((ea.z >> 17u) & 1u) != 0u;
+  bool rb_swap = ((ea.z >> 19u) & 1u) != 0u;
+  uint endian = ea.z & 0x7u;
+  uint base_index = ea.y & 0x7FFFFFu;
+  uint index_count = ea.w & 0x7FFFFFu;
+  uint base_address = (ea.x & 0x3FFFFFFFu) << 2u;
+  [unroll] for (uint i = 0u; i < 5u; ++i) {
+    if ((em_written & (1u << i)) == 0u) { continue; }
+    uint index = base_index + i;
+    if (index >= index_count) { continue; }
+    float4 v = em[i];
+    if (rb_swap) { v.xz = v.zx; }
+    uint4 packed;
+    uint size_log2;
+    if (!XeMemExportConvert(v, format, num_signed, num_integer, packed,
+                            size_log2)) {
+      continue;
+    }
+    uint e = endian;
+    if (e == 4u) { packed = packed.yxwz; e = 2u; }
+    else if (e == 5u) { packed = packed.wzyx; e = 2u; }
+    packed.x = XeEndianSwap(packed.x, e);
+    packed.y = XeEndianSwap(packed.y, e);
+    packed.z = XeEndianSwap(packed.z, e);
+    packed.w = XeEndianSwap(packed.w, e);
+    XeMemExportStore(base_address + (index << size_log2), size_log2, packed);
+  }
+}
+
+)");
+}
+
+void HlslShaderTranslator::EmitMemExportFlush() {
+  EmitLine(
+      "XeExportToMemory(asuint(xe_eA), xe_eM, xe_eM_written, "
+      "xe_memexport_enabled);");
+}
+
+void HlslShaderTranslator::EmitMemExportWrittenMark(
+    const InstructionResult& result) {
+  if (result.storage_target == InstructionStorageTarget::kExportData &&
+      result.GetUsedWriteMask() != 0) {
+    EmitLine("xe_eM_written |= " +
+             std::to_string(uint32_t(1) << result.storage_index) + "u;");
+  }
+}
+
+void HlslShaderTranslator::EmitDomainShaderPrologue() {
+  // Mirrors DxbcShaderTranslator::StartVertexOrDomainShader. Copies the domain
+  // location and the host-provided control point indices into the guest
+  // registers. Direct3D 12 passes coordinates in a consistent order, so the
+  // per-edge swizzle the guest expects is left as identity (0.0).
+  uint32_t reg_count = register_count();
+  if (!reg_count) {
+    return;
+  }
+  auto reg = [&](uint32_t i) {
+    return RegisterToHlsl(i, InstructionStorageAddressingMode::kAbsolute);
+  };
+  switch (GetHlslShaderModification().vertex.host_vertex_shader_type) {
+    case Shader::HostVertexShaderType::kTriangleDomainCPIndexed:
+      EmitLine(reg(0) + ".xyz = xe_domain_location.zyx;");
+      if (reg_count >= 2) {
+        EmitLine(reg(1) +
+                 ".xyz = float3(xe_control_points[0].index, "
+                 "xe_control_points[1].index, xe_control_points[2].index);");
+      }
+      break;
+    case Shader::HostVertexShaderType::kTriangleDomainPatchIndexed:
+      EmitLine(reg(0) + ".xyz = xe_domain_location.zyx;");
+      if (reg_count >= 2) {
+        EmitLine(reg(1) + ".x = xe_control_points[0].index;");
+        EmitLine(reg(1) + ".y = 0.0;");
+      }
+      break;
+    case Shader::HostVertexShaderType::kQuadDomainCPIndexed:
+      EmitLine(reg(0) + ".xy = xe_domain_location.xy;");
+      EmitLine(reg(0) + ".z = xe_control_points[0].index;");
+      if (reg_count >= 2) {
+        EmitLine(reg(1) +
+                 ".xyz = float3(xe_control_points[1].index, "
+                 "xe_control_points[2].index, xe_control_points[3].index);");
+      }
+      break;
+    case Shader::HostVertexShaderType::kQuadDomainPatchIndexed:
+      EmitLine(reg(0) + ".x = xe_control_points[0].index;");
+      EmitLine(reg(0) + ".yz = xe_domain_location.xy;");
+      if (reg_count >= 2) {
+        EmitLine(reg(1) + ".x = 0.0;");
+      }
+      break;
+    default:
+      EmitTranslationError(
+          "Unsupported host vertex shader type in domain shader prologue");
+      break;
+  }
+  EmitLine("");
+}
+
+void HlslShaderTranslator::EmitGlobalState() {
+  // Per-invocation guest state shared between main() and (Stage 1) subroutine
+  // functions. Declared without initializers; main() initializes everything
+  // per invocation. The program counter is NOT here - it stays local to each
+  // function's own control-flow loop.
+  EmitLine(is_vertex_shader() ? "static VSOutput output;"
+                              : "static PSOutput output;");
+  if (is_vertex_shader() &&
+      current_shader().writes_point_size_edge_flag_kill_vertex()) {
+    EmitLine("static float4 xe_point_size_edge_flag_kill_vertex;");
+  }
+  uint32_t reg_count = register_count();
+  if (reg_count > 0) {
+    EmitLine("static float4 xe_gprs[" + std::to_string(reg_count) + "];");
+  }
+  EmitLine("static float4 xe_ps; // Previous scalar");
+  EmitLine("static bool xe_p0; // Predicate");
+  EmitLine("static int xe_a0; // Address register");
+  EmitLine("static int4 xe_aL; // Loop address stack");
+  EmitLine("static uint4 xe_loop_count; // Loop count stack");
+  EmitLine(
+      "static uint xe_vfetch_address; // Vertex fetch address for mini-fetch");
+  EmitLine("static float xe_texture_lod; // Explicit texture LOD state");
+  EmitLine("static float3 xe_texture_grad_h; // Explicit horizontal gradient");
+  EmitLine("static float3 xe_texture_grad_v; // Explicit vertical gradient");
+  if (MemExportUsed()) {
+    EmitLine("static float4 xe_eA; // Export address");
+    EmitLine("static float4 xe_eM[5];");
+    EmitLine("static uint xe_eM_written; // eM# written this invocation");
+    EmitLine("static bool xe_memexport_enabled;");
+  }
+  EmitLine("");
 }
 
 void HlslShaderTranslator::EmitEntryPointBegin() {
   if (is_vertex_shader()) {
-    EmitLine("VSOutput main(VSInput input) {");
+    if (IsDomainShader()) {
+      const char* domain = "quad";
+      uint32_t control_point_count = 1;
+      uint32_t domain_location_component_count = 2;
+      GetDomainShaderInfo(domain, control_point_count,
+                          domain_location_component_count);
+      EmitLine(std::string("[domain(\"") + domain + "\")]");
+      EmitLine("VSOutput main(XeHSConstantDataOutput xe_patch_constant,");
+      EmitLine("              float" +
+               std::to_string(domain_location_component_count) +
+               " xe_domain_location : SV_DomainLocation,");
+      EmitLine("              const OutputPatch<XeHSControlPointOutput, " +
+               std::to_string(control_point_count) + "> xe_control_points) {");
+    } else {
+      EmitLine("VSOutput main(VSInput input) {");
+    }
   } else {
     EmitLine("PSOutput main(PSInput input) {");
   }
   Indent();
 
-  // Declare output variable.
+  // Initialize the output (a static global) for this invocation.
   if (is_vertex_shader()) {
-    EmitLine("VSOutput output = (VSOutput)0;");
+    EmitLine("output = (VSOutput)0;");
     Modification modification = GetHlslShaderModification();
     if (modification.vertex.output_point_size) {
       // Negative X means the point-list expansion shader should use the
@@ -1158,21 +1512,19 @@ void HlslShaderTranslator::EmitEntryPointBegin() {
     }
     if (current_shader().writes_point_size_edge_flag_kill_vertex()) {
       EmitLine(
-          "float4 xe_point_size_edge_flag_kill_vertex = float4(-1.0, 0.0, "
-          "0.0, 0.0);");
+          "xe_point_size_edge_flag_kill_vertex = float4(-1.0, 0.0, 0.0, 0.0);");
     }
   } else {
-    EmitLine("PSOutput output = (PSOutput)0;");
+    EmitLine("output = (PSOutput)0;");
     if (PixelShaderNeedsCoverageOutput()) {
       EmitLine("output.xe_coverage = 0xFFFFFFFFu;");
     }
   }
   EmitLine("");
 
-  // Declare temporary registers.
+  // Zero the general-purpose registers.
   uint32_t reg_count = register_count();
   if (reg_count > 0) {
-    EmitLine("float4 xe_gprs[" + std::to_string(reg_count) + "];");
     for (uint32_t i = 0; i < reg_count; ++i) {
       EmitLine("xe_gprs[" + std::to_string(i) +
                "] = float4(0.0, 0.0, 0.0, 0.0);");
@@ -1180,23 +1532,36 @@ void HlslShaderTranslator::EmitEntryPointBegin() {
     EmitLine("");
   }
 
-  // Declare special registers.
-  EmitLine("float4 xe_ps = float4(0.0, 0.0, 0.0, 0.0); // Previous scalar");
+  // Initialize special registers. xe_pc is local to this function's control
+  // flow loop, not shared state.
   EmitLine("int xe_pc = 0; // Program counter");
-  EmitLine("bool xe_p0 = false; // Predicate");
-  EmitLine("int xe_a0 = 0; // Address register");
-  EmitLine("int4 xe_aL = int4(0, 0, 0, 0); // Loop address stack");
-  EmitLine("uint4 xe_loop_count = uint4(0u, 0u, 0u, 0u); // Loop count stack");
-  EmitLine(
-      "uint xe_vfetch_address = 0u; // Vertex fetch address for mini-fetch");
-  EmitLine("float xe_texture_lod = 0.0; // Explicit texture LOD state");
-  EmitLine(
-      "float3 xe_texture_grad_h = float3(0.0, 0.0, 0.0); // Explicit "
-      "horizontal texture gradient");
-  EmitLine(
-      "float3 xe_texture_grad_v = float3(0.0, 0.0, 0.0); // Explicit vertical "
-      "texture gradient");
+  if (current_shader().uses_subroutine_calls()) {
+    EmitLine("uint xe_call_stack[8]; // Subroutine return-address stack");
+    EmitLine("uint xe_call_sp = 0u;");
+  }
+  EmitLine("xe_ps = float4(0.0, 0.0, 0.0, 0.0);");
+  EmitLine("xe_p0 = false;");
+  EmitLine("xe_a0 = 0;");
+  EmitLine("xe_aL = int4(0, 0, 0, 0);");
+  EmitLine("xe_loop_count = uint4(0u, 0u, 0u, 0u);");
+  EmitLine("xe_vfetch_address = 0u;");
+  EmitLine("xe_texture_lod = 0.0;");
+  EmitLine("xe_texture_grad_h = float3(0.0, 0.0, 0.0);");
+  EmitLine("xe_texture_grad_v = float3(0.0, 0.0, 0.0);");
   EmitLine("");
+
+  // Initialize memory export (memexport) state.
+  if (MemExportUsed()) {
+    EmitLine("xe_eA = float4(0.0, 0.0, 0.0, 0.0);");
+    for (uint32_t i = 0; i < 5; ++i) {
+      EmitLine("xe_eM[" + std::to_string(i) +
+               "] = float4(0.0, 0.0, 0.0, 0.0);");
+    }
+    EmitLine("xe_eM_written = 0u;");
+    // Enabled only when shared memory is bound as a UAV (xe_flags bit 0).
+    EmitLine("xe_memexport_enabled = (xe_flags & 1u) != 0u;");
+    EmitLine("");
+  }
 }
 
 void HlslShaderTranslator::EmitEntryPointEnd() {
@@ -1204,6 +1569,12 @@ void HlslShaderTranslator::EmitEntryPointEnd() {
   // Shader ALU instructions write to outputs via storage targets
   // (kPosition, kInterpolator, kColor, kDepth).
   EmitLine("");
+
+  // Flush any memory exports written since the last alloc.
+  if (MemExportUsed()) {
+    EmitMemExportFlush();
+    EmitLine("");
+  }
 
   // For vertex shaders, apply position fixups and NDC transformation.
   // This converts from Xbox 360 clip space to D3D clip space.
@@ -1347,6 +1718,102 @@ void HlslShaderTranslator::EmitEntryPointEnd() {
         EmitLine("output.xe_color_3 *= xe_color_exp_bias.w;");
       }
       EmitLine("");
+      // Encode linear color to PWL gamma for gamma render targets after the
+      // exponent bias, matching the DxbcShaderTranslator output merger.
+      // RGB only, gated on the per target flag (set for k_8_8_8_8_GAMMA).
+      for (uint32_t i = 0; i < 4; ++i) {
+        if (!(color_targets_written & (1u << i))) {
+          continue;
+        }
+        std::string color = "output.xe_color_" + std::to_string(i);
+        // kSysFlag_ConvertColor0ToGamma_Shift == 10, one bit per color target.
+        EmitLine("if ((xe_flags & " + std::to_string(1u << (10 + i)) +
+                 "u) != 0u) {");
+        Indent();
+        EmitLine(color + ".rgb = saturate(" + color + ".rgb);");
+        EmitLine(color + ".r = XePreSaturatedLinearToPWLGamma(" + color +
+                 ".r);");
+        EmitLine(color + ".g = XePreSaturatedLinearToPWLGamma(" + color +
+                 ".g);");
+        EmitLine(color + ".b = XePreSaturatedLinearToPWLGamma(" + color +
+                 ".b);");
+        Outdent();
+        EmitLine("}");
+      }
+      EmitLine("");
+
+      // For RT0 with a MIN/MAX blend op, pre-multiply by the source blend
+      // factor: D3D12 MIN/MAX ignores blend factors, but the Xbox 360 applies
+      // them. Matches DxbcShaderTranslator's output merger. The factor is
+      // kOne (no-op) unless the command processor selected a MIN/MAX blend op.
+      if ((color_targets_written & 1u) && !edram_rov_used_) {
+        Modification modification = GetHlslShaderModification();
+        xenos::BlendFactor rgb_factor =
+            modification.pixel.rt0_blend_rgb_factor_for_premult;
+        xenos::BlendFactor a_factor =
+            modification.pixel.rt0_blend_a_factor_for_premult;
+        if (rgb_factor != xenos::BlendFactor::kOne ||
+            a_factor != xenos::BlendFactor::kOne) {
+          const std::string c = "output.xe_color_0";
+          switch (rgb_factor) {
+            case xenos::BlendFactor::kZero:
+              EmitLine(c + ".rgb = float3(0.0, 0.0, 0.0);");
+              break;
+            case xenos::BlendFactor::kSrcColor:
+              EmitLine(c + ".rgb *= " + c + ".rgb;");
+              break;
+            case xenos::BlendFactor::kOneMinusSrcColor:
+              EmitLine(c + ".rgb *= (1.0 - " + c + ".rgb);");
+              break;
+            case xenos::BlendFactor::kSrcAlpha:
+              EmitLine(c + ".rgb *= " + c + ".a;");
+              break;
+            case xenos::BlendFactor::kOneMinusSrcAlpha:
+              EmitLine(c + ".rgb *= (1.0 - " + c + ".a);");
+              break;
+            case xenos::BlendFactor::kConstantColor:
+              EmitLine(c + ".rgb *= xe_edram_blend_constant.rgb;");
+              break;
+            case xenos::BlendFactor::kOneMinusConstantColor:
+              EmitLine(c + ".rgb *= (1.0 - xe_edram_blend_constant.rgb);");
+              break;
+            case xenos::BlendFactor::kConstantAlpha:
+              EmitLine(c + ".rgb *= xe_edram_blend_constant.a;");
+              break;
+            case xenos::BlendFactor::kOneMinusConstantAlpha:
+              EmitLine(c + ".rgb *= (1.0 - xe_edram_blend_constant.a);");
+              break;
+            default:
+              // kOne or a dst-based/unsupported factor - no pre-multiply.
+              break;
+          }
+          switch (a_factor) {
+            case xenos::BlendFactor::kZero:
+              EmitLine(c + ".a = 0.0;");
+              break;
+            case xenos::BlendFactor::kSrcColor:
+            case xenos::BlendFactor::kSrcAlpha:
+              EmitLine(c + ".a *= " + c + ".a;");
+              break;
+            case xenos::BlendFactor::kOneMinusSrcColor:
+            case xenos::BlendFactor::kOneMinusSrcAlpha:
+              EmitLine(c + ".a *= (1.0 - " + c + ".a);");
+              break;
+            case xenos::BlendFactor::kConstantColor:
+            case xenos::BlendFactor::kConstantAlpha:
+              EmitLine(c + ".a *= xe_edram_blend_constant.a;");
+              break;
+            case xenos::BlendFactor::kOneMinusConstantColor:
+            case xenos::BlendFactor::kOneMinusConstantAlpha:
+              EmitLine(c + ".a *= (1.0 - xe_edram_blend_constant.a);");
+              break;
+            default:
+              // kOne, kSrcAlphaSaturate (1.0 for alpha), or unsupported.
+              break;
+          }
+          EmitLine("");
+        }
+      }
     }
 
     Modification modification = GetHlslShaderModification();
@@ -1395,29 +1862,35 @@ void HlslShaderTranslator::StartTranslation() {
   EmitInputDeclarations();
   EmitOutputDeclarations();
   EmitHelperFunctions();
+  EmitGlobalState();
   EmitEntryPointBegin();
 
   // Initialize vertex shader with vertex index.
   if (is_vertex_shader()) {
-    EmitLine("// Load vertex index into r0.x");
-    EmitLine("uint xe_vertex_index = input.xe_vertex_id;");
-    EmitLine(
-        "xe_vertex_index = (xe_vertex_index != xe_line_loop_closing_index) ? "
-        "xe_vertex_index : 0u;");
-    EmitLine(
-        "xe_vertex_index = XeEndianSwap(xe_vertex_index, "
-        "xe_vertex_index_endian);");
-    EmitLine(
-        "xe_vertex_index = (xe_vertex_index + xe_vertex_index_offset) & "
-        "0x00FFFFFFu;");
-    EmitLine(
-        "xe_vertex_index = clamp(xe_vertex_index, xe_vertex_index_min_max.x, "
-        "xe_vertex_index_min_max.y);");
-    if (register_count()) {
-      EmitLine(RegisterToHlsl(0, InstructionStorageAddressingMode::kAbsolute) +
-               ".x = float(xe_vertex_index);");
+    if (IsDomainShader()) {
+      EmitDomainShaderPrologue();
+    } else {
+      EmitLine("// Load vertex index into r0.x");
+      EmitLine("uint xe_vertex_index = input.xe_vertex_id;");
+      EmitLine(
+          "xe_vertex_index = (xe_vertex_index != xe_line_loop_closing_index) ? "
+          "xe_vertex_index : 0u;");
+      EmitLine(
+          "xe_vertex_index = XeEndianSwap(xe_vertex_index, "
+          "xe_vertex_index_endian);");
+      EmitLine(
+          "xe_vertex_index = (xe_vertex_index + xe_vertex_index_offset) & "
+          "0x00FFFFFFu;");
+      EmitLine(
+          "xe_vertex_index = clamp(xe_vertex_index, xe_vertex_index_min_max.x, "
+          "xe_vertex_index_min_max.y);");
+      if (register_count()) {
+        EmitLine(
+            RegisterToHlsl(0, InstructionStorageAddressingMode::kAbsolute) +
+            ".x = float(xe_vertex_index);");
+      }
+      EmitLine("");
     }
-    EmitLine("");
   } else {
     // Pixel shader: Load interpolated values from input struct into registers.
     // In Xenos, interpolators map directly to general-purpose registers.
@@ -1636,6 +2109,12 @@ std::string HlslShaderTranslator::ResultToHlsl(
     case InstructionStorageTarget::kDepth:
       output = "output.xe_depth";
       break;
+    case InstructionStorageTarget::kExportAddress:
+      output = "xe_eA";
+      break;
+    case InstructionStorageTarget::kExportData:
+      output = "xe_eM[" + std::to_string(result.storage_index) + "]";
+      break;
     default:
       return "";
   }
@@ -1770,12 +2249,17 @@ void HlslShaderTranslator::EmitVectorResultAssignment(
     case InstructionStorageTarget::kDepth:
       dest_base = "output.xe_depth";
       break;
+    case InstructionStorageTarget::kExportAddress:
+      dest_base = "xe_eA";
+      break;
+    case InstructionStorageTarget::kExportData:
+      dest_base = "xe_eM[" + std::to_string(result.storage_index) + "]";
+      break;
     default:
       return;
   }
 
   if (dest_base.empty()) {
-    LogUnimplementedMemExportResult("vector", result);
     return;  // No output target.
   }
 
@@ -1845,6 +2329,7 @@ void HlslShaderTranslator::EmitVectorResultAssignment(
     point_size_write_mask = 0b0001;
   }
   EmitPointSizeClampIfNeeded(result, point_size_write_mask);
+  EmitMemExportWrittenMark(result);
 }
 
 // Emit a scalar result assignment. Scalar values need to be replicated
@@ -1853,7 +2338,6 @@ void HlslShaderTranslator::EmitScalarResultAssignment(
     const InstructionResult& result, const std::string& scalar_expr) {
   std::string dest = ResultToHlsl(result);
   if (dest.empty()) {
-    LogUnimplementedMemExportResult("scalar", result);
     return;  // No output target.
   }
 
@@ -1895,6 +2379,7 @@ void HlslShaderTranslator::EmitScalarResultAssignment(
   }
 
   EmitPointSizeClampIfNeeded(result, write_mask);
+  EmitMemExportWrittenMark(result);
 }
 
 void HlslShaderTranslator::EmitPointSizeClampIfNeeded(
@@ -1925,7 +2410,6 @@ void HlslShaderTranslator::StoreConstantComponents(
 
   std::string dest = ResultToHlsl(result);
   if (dest.empty()) {
-    LogUnimplementedMemExportResult("constant", result);
     return;  // No output target.
   }
 
@@ -2028,6 +2512,7 @@ void HlslShaderTranslator::StoreConstantComponents(
 
   EmitLine(dest_base + write_mask_str + " = " + value_expr + ";");
   EmitPointSizeClampIfNeeded(result, constant_mask);
+  EmitMemExportWrittenMark(result);
 }
 
 void HlslShaderTranslator::EmitPixelShaderParamGen() {
@@ -2341,41 +2826,47 @@ void HlslShaderTranslator::ProcessCallInstruction(
   CloseInstructionPredication();
   CloseExecConditionals();
 
+  // Push the return point (the instruction after the call, registered as a
+  // label) and jump to the subroutine. ret pops and jumps back.
+  std::string return_address = std::to_string(instr.dword_index + 1);
+  std::string target = std::to_string(instr.target_address);
+  auto emit_call = [&]() {
+    EmitLine("xe_call_stack[xe_call_sp++] = " + return_address + "u;");
+    EmitLine("xe_pc = " + target + ";");
+    EmitLine("continue;");
+  };
+
   switch (instr.type) {
     case ParsedCallInstruction::Type::kUnconditional:
-      XELOGE(
-          "HLSL: UNIMPLEMENTED control-flow call at CF {} to target {}; "
-          "subroutine execution is dropped",
-          instr.dword_index, instr.target_address);
+      emit_call();
       break;
     case ParsedCallInstruction::Type::kConditional:
-      XELOGE(
-          "HLSL: UNIMPLEMENTED conditional control-flow call at CF {} to "
-          "target {} using bool constant {} condition {}; subroutine execution "
-          "is dropped",
-          instr.dword_index, instr.target_address, instr.bool_constant_index,
-          instr.condition);
+      EmitLine("if (XeGetBoolConstant(" +
+               std::to_string(instr.bool_constant_index) + ") " +
+               (instr.condition ? "==" : "!=") + " true) {");
+      Indent();
+      emit_call();
+      Outdent();
+      EmitLine("}");
       break;
     case ParsedCallInstruction::Type::kPredicated:
-      XELOGE(
-          "HLSL: UNIMPLEMENTED predicated control-flow call at CF {} to target "
-          "{} condition {}; subroutine execution is dropped",
-          instr.dword_index, instr.target_address, instr.condition);
+      EmitLine("if (xe_p0 " + std::string(instr.condition ? "==" : "!=") +
+               " true) {");
+      Indent();
+      emit_call();
+      Outdent();
+      EmitLine("}");
       break;
   }
-  EmitLine("// ERROR: Unimplemented call to CF " +
-           std::to_string(instr.target_address));
 }
 
 void HlslShaderTranslator::ProcessReturnInstruction(
     const ParsedReturnInstruction& instr) {
   CloseInstructionPredication();
   CloseExecConditionals();
-  XELOGE(
-      "HLSL: UNIMPLEMENTED control-flow return at CF {}; subroutine execution "
-      "is dropped",
-      instr.dword_index);
-  EmitLine("// ERROR: Unimplemented return");
+  // Pop the return address and jump back to the instruction after the call.
+  EmitLine("xe_pc = int(xe_call_stack[--xe_call_sp]);");
+  EmitLine("continue;");
 }
 
 void HlslShaderTranslator::ProcessJumpInstruction(
@@ -2422,13 +2913,22 @@ void HlslShaderTranslator::ProcessAllocInstruction(
     const ParsedAllocInstruction& instr, uint8_t export_eM) {
   const bool starts_memexport = instr.type == ucode::AllocType::kMemory &&
                                 current_shader().memexport_eM_written() != 0;
-  if (export_eM || starts_memexport) {
-    XELOGE(
-        "HLSL: UNIMPLEMENTED memexport alloc: count {} export_eM mask "
-        "0x{:02X}; continuing without memory export stores",
-        instr.count, export_eM);
+  if (export_eM) {
+    // Flush the elements written before this alloc, then reset for the next
+    // batch (matching DxbcShaderTranslator::ProcessAllocInstruction).
+    EmitMemExportFlush();
+    EmitLine("xe_eM_written = 0u;");
+    for (uint32_t i = 0; i < ucode::kMaxMemExportElementCount; ++i) {
+      if (export_eM & (uint8_t(1) << i)) {
+        EmitLine("xe_eM[" + std::to_string(i) +
+                 "] = float4(0.0, 0.0, 0.0, 0.0);");
+      }
+    }
   }
-  EmitLine("// Alloc: " + std::to_string(instr.count) + " exports");
+  if (starts_memexport) {
+    // Reset eA to an invalid address.
+    EmitLine("xe_eA = float4(0.0, 0.0, 0.0, 0.0);");
+  }
 }
 
 void HlslShaderTranslator::ProcessVertexFetchInstruction(
@@ -3362,10 +3862,10 @@ void HlslShaderTranslator::ProcessAluInstruction(
   if (memexport_eM_potentially_written_before &&
       (IsVectorKillOpcode(instr.vector_opcode) ||
        IsScalarKillOpcode(instr.scalar_opcode))) {
-    XELOGE(
-        "HLSL: UNIMPLEMENTED memexport-before-kill flush: pending eM mask "
-        "0x{:02X}; discard may drop memory export side effects",
-        memexport_eM_potentially_written_before);
+    // A pixel killed here never reaches the end-of-shader flush, so its pending
+    // exports are dropped. Flushing unconditionally would double-export for
+    // surviving pixels, so the per-killed-lane flush is left for later.
+    EmitLine("// memexport-before-kill flush not emitted");
   }
 
   // Handle instruction predication.

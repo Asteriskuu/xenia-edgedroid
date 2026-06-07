@@ -2865,7 +2865,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
         label, sizeof(label), primitive_type, primitive_processing_result,
         vertex_shader ? vertex_shader->ucode_data_hash() : 0,
         pixel_shader ? pixel_shader->ucode_data_hash() : 0);
-    PushDebugMarker("%s", label);
+    PushDebugMarker(memexport_used ? "%s (memexport)" : "%s", label);
   }
 
   // Update the textures - this may bind pipelines.
@@ -3181,6 +3181,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   PopDebugMarker();
 
   if (memexport_used) {
+    InsertDebugMarker("Memexport draw: %zu ranges", memexport_ranges_.size());
     // Make sure this memexporting draw is ordered with other work using shared
     // memory as a UAV.
     // TODO(Triang3l): Find some PM4 command that can be used for indication of
@@ -3721,7 +3722,14 @@ void D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(
   // Copy exported data to current frame's buffer
   shared_memory_->UseAsCopySource();
   SubmitBarriers();
-  InsertDebugMarker("Memexport Readback (async): %u bytes, %zu ranges",
+  // Delayed sync reads the previous frame's buffer; on a cache miss (first use
+  // or buffer resize) it must stall and read this frame's buffer instead. Known
+  // here so the marker reports whether this readback actually stalled.
+  uint32_t read_index = 1 - write_index;
+  bool is_cache_miss = rb.buffers[read_index] == nullptr ||
+                       memexport_total_size > rb.sizes[read_index];
+  InsertDebugMarker("Memexport Readback (async%s): %u bytes, %zu ranges",
+                    is_cache_miss ? ", sync fallback" : "",
                     memexport_total_size, memexport_ranges_.size());
   ID3D12Resource* shared_memory_buffer = shared_memory_->GetBuffer();
   uint32_t readback_buffer_offset = 0;
@@ -3733,15 +3741,8 @@ void D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(
     readback_buffer_offset += memexport_range_size;
   }
 
-  // Use delayed sync (read from previous frame's buffer)
-  uint32_t read_index = 1 - write_index;
-
-  bool is_cache_miss = false;
-  // If previous buffer doesn't exist or is too small, fall back to sync
-  // This happens on first use or buffer resize - subsequent frames will be fast
-  if (rb.buffers[read_index] == nullptr ||
-      memexport_total_size > rb.sizes[read_index]) {
-    is_cache_miss = true;
+  // On a cache miss, stall and read the buffer just written this frame.
+  if (is_cache_miss) {
     read_index = write_index;
     if (!AwaitAllQueueOperationsCompletion()) {
       return;

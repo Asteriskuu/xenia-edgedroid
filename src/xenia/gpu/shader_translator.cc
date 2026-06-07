@@ -66,6 +66,10 @@ void Shader::AnalyzeUcode(StringBuffer& ucode_disasm_buffer) {
       switch (cf.opcode()) {
         case ControlFlowOpcode::kCondCall:
           label_addresses_.insert(cf.cond_call.address());
+          // The instruction after the call is the subroutine return point, so
+          // it must be a label that ret can jump back to.
+          label_addresses_.insert(i * 2 + j + 1);
+          uses_subroutine_calls_ = true;
           break;
         case ControlFlowOpcode::kCondJmp:
           label_addresses_.insert(cf.cond_jmp.address());
