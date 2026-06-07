@@ -313,7 +313,7 @@ GetKnownEnumOptions() {
 #endif
         {"d3d12_readback_resolve",
          {"kCopy", "kComputeLuminance", "kComputeRGBA16"}},
-        {"occlusion_query", {"fake", "fast", "strict"}},
+        {"occlusion_query", {"fake", "fast", "fast-alt", "strict"}},
         {"readback_resolve", {"fast", "some", "full", "none"}},
         {"render_target_path", {"performance", "accuracy"}},
         {"postprocess_antialiasing", {"off", "fxaa", "fxaa_extreme"}},
