@@ -499,7 +499,10 @@ void Processor::OnThreadCreated(uint32_t thread_handle,
 void Processor::OnThreadExit(uint32_t thread_id) {
   auto global_lock = global_critical_region_.Acquire();
   auto it = thread_debug_infos_.find(thread_id);
-  assert_true(it != thread_debug_infos_.end());
+  if (it == thread_debug_infos_.end()) {
+    XELOGW("Processor::OnThreadExit ignored unknown thread {:08X}", thread_id);
+    return;
+  }
   auto thread_info = it->second.get();
   thread_info->state = ThreadDebugInfo::State::kExited;
 }
@@ -507,7 +510,11 @@ void Processor::OnThreadExit(uint32_t thread_id) {
 void Processor::OnThreadDestroyed(uint32_t thread_id) {
   auto global_lock = global_critical_region_.Acquire();
   auto it = thread_debug_infos_.find(thread_id);
-  assert_true(it != thread_debug_infos_.end());
+  if (it == thread_debug_infos_.end()) {
+    XELOGW("Processor::OnThreadDestroyed ignored unknown thread {:08X}",
+           thread_id);
+    return;
+  }
   it->second->thread_handle = 0;
   thread_debug_infos_.erase(it);
 }
