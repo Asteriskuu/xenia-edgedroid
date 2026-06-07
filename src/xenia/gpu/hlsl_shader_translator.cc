@@ -500,13 +500,19 @@ void HlslShaderTranslator::EmitInputDeclarations() {
     // Pixel shader input - must match vertex shader output signature.
     // Only declare interpolators that are in the interpolator_mask.
     uint32_t interpolator_mask = modification.pixel.interpolator_mask;
+    // With precise interpolation the interpolators are declared nointerpolation
+    // so GetAttributeAtVertex can read the raw per-vertex values, and the
+    // shader interpolates them manually using SV_Barycentrics.
+    bool precise = UsePreciseInterpolation();
+    const char* interp_prefix = precise ? "nointerpolation " : "";
     EmitLine("struct PSInput {");
     Indent();
     // Interpolators are packed contiguously by TEXCOORD index.
     uint32_t texcoord_index = 0;
     for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
       if (interpolator_mask & (1u << i)) {
-        EmitLine("float4 xe_interpolator_" + std::to_string(i) + " : TEXCOORD" +
+        EmitLine(interp_prefix + std::string("float4 xe_interpolator_") +
+                 std::to_string(i) + " : TEXCOORD" +
                  std::to_string(texcoord_index) + ";");
         ++texcoord_index;
       }
@@ -521,6 +527,9 @@ void HlslShaderTranslator::EmitInputDeclarations() {
     // a register and shifts SV_Position, breaking inter-stage linkage).
     EmitLine("float4 xe_position : SV_Position;");
     EmitLine("bool xe_is_front_face : SV_IsFrontFace;");
+    if (precise) {
+      EmitLine("float3 xe_barycentrics : SV_Barycentrics;");
+    }
     Outdent();
     EmitLine("};");
     EmitLine("");
@@ -1902,6 +1911,7 @@ void HlslShaderTranslator::StartTranslation() {
          modification.pixel.param_gen_interpolator < register_count())
             ? modification.pixel.param_gen_interpolator
             : UINT32_MAX;
+    bool precise = UsePreciseInterpolation();
     bool any_loaded = false;
     for (uint32_t i = 0; i < xenos::kMaxInterpolators; ++i) {
       if (interpolator_mask & (1u << i)) {
@@ -1909,9 +1919,26 @@ void HlslShaderTranslator::StartTranslation() {
           if (i == param_gen_interpolator) {
             continue;
           }
-          EmitLine(
-              RegisterToHlsl(i, InstructionStorageAddressingMode::kAbsolute) +
-              " = input.xe_interpolator_" + std::to_string(i) + ";");
+          std::string reg =
+              RegisterToHlsl(i, InstructionStorageAddressingMode::kAbsolute);
+          std::string in = "input.xe_interpolator_" + std::to_string(i);
+          if (precise) {
+            // Manual v0-anchor barycentric interpolation (matches the SPIR-V
+            // path): v0 + (v1 - v0) * bary.y + (v2 - v0) * bary.z. Exact when
+            // all vertices are equal, avoiding hardware interpolation noise.
+            EmitLine("{");
+            Indent();
+            EmitLine("float4 xe_v0 = GetAttributeAtVertex(" + in + ", 0);");
+            EmitLine("float4 xe_v1 = GetAttributeAtVertex(" + in + ", 1);");
+            EmitLine("float4 xe_v2 = GetAttributeAtVertex(" + in + ", 2);");
+            EmitLine(reg +
+                     " = xe_v0 + (xe_v1 - xe_v0) * input.xe_barycentrics.y + "
+                     "(xe_v2 - xe_v0) * input.xe_barycentrics.z;");
+            Outdent();
+            EmitLine("}");
+          } else {
+            EmitLine(reg + " = " + in + ";");
+          }
           any_loaded = true;
         }
       }

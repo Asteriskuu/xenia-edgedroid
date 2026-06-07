@@ -114,7 +114,7 @@ class DxbcShaderTranslator : public ShaderTranslator {
     // If anything in this is structure is changed in a way not compatible with
     // the previous layout, invalidate the pipeline storages by increasing this
     // version number (0xYYYYMMDD)!
-    static constexpr uint32_t kVersion = 0x20260526;
+    static constexpr uint32_t kVersion = 0x20260608;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -192,6 +192,10 @@ class DxbcShaderTranslator : public ShaderTranslator {
       // Only RT0 is supported for now.
       xenos::BlendFactor rt0_blend_rgb_factor_for_premult : 5;
       xenos::BlendFactor rt0_blend_a_factor_for_premult : 5;
+      // Manually interpolate interpolators with barycentric coordinates to
+      // match the guest exactly (avoids hardware interpolation noise). Only the
+      // HLSL/DXIL backend acts on this (needs SV_Barycentrics).
+      uint32_t precise_interpolation : 1;
     } pixel;
 
     explicit Modification(uint64_t modification_value = 0)

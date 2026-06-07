@@ -139,6 +139,15 @@ class HlslShaderTranslator : public ShaderTranslator {
   bool MemExportUsed() const {
     return current_shader().memexport_eM_written() != 0;
   }
+
+  // Whether the pixel shader manually interpolates inputs via barycentric
+  // coordinates (precise interpolation). Set only when the device supports
+  // SV_Barycentrics; not used for point primitives (no barycentrics).
+  bool UsePreciseInterpolation() const {
+    return is_pixel_shader() &&
+           GetHlslShaderModification().pixel.precise_interpolation &&
+           !GetHlslShaderModification().pixel.param_gen_point;
+  }
   // Emit the fixed memory-export helper functions (format conversion + store).
   void EmitMemExportHelpers();
   // Emit a flush of the currently-written eM# elements to shared memory.

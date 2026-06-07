@@ -63,6 +63,8 @@ DEFINE_bool(d3d12_dxil, true,
             "Enables SM 6.x features. Requires Windows 10 1709+.",
             "D3D12");
 
+DECLARE_bool(precise_interpolation);
+
 namespace xe {
 namespace gpu {
 namespace d3d12 {
@@ -711,6 +713,14 @@ PipelineCache::GetCurrentPixelShaderModification(
     modification.pixel.param_gen_interpolator = 0;
     modification.pixel.param_gen_point = 0;
   }
+
+  // Precise (manual barycentric) interpolation, only when the device supports
+  // SV_Barycentrics. The translator additionally skips it for point primitives.
+  modification.pixel.precise_interpolation =
+      (cvars::precise_interpolation &&
+       command_processor_.GetD3D12Provider().AreBarycentricsSupported())
+          ? 1
+          : 0;
 
   if (render_target_cache_.GetPath() ==
       RenderTargetCache::Path::kHostRenderTargets) {

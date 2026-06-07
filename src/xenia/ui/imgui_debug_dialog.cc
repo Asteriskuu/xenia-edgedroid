@@ -43,7 +43,7 @@ DECLARE_bool(draw_resolution_scaled_texture_offsets);
 DECLARE_bool(readback_resolve_half_pixel_offset);
 DECLARE_bool(resolve_resolution_scale_fill_half_pixel_offset);
 DECLARE_bool(use_fuzzy_alpha_epsilon);
-DECLARE_bool(vulkan_precise_interpolation);
+DECLARE_bool(precise_interpolation);
 DECLARE_bool(dxbc_switch);
 DECLARE_bool(execute_unclipped_draw_vs_on_cpu);
 DECLARE_bool(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend);
@@ -303,7 +303,7 @@ void ImGuiDebugDialog::LoadCurrentSettings() {
       cvars::resolve_resolution_scale_fill_half_pixel_offset;
 
   use_fuzzy_alpha_epsilon_ = cvars::use_fuzzy_alpha_epsilon;
-  vulkan_precise_interpolation_ = cvars::vulkan_precise_interpolation;
+  precise_interpolation_ = cvars::precise_interpolation;
   dxbc_switch_ = cvars::dxbc_switch;
 
   execute_unclipped_draw_vs_on_cpu_ = cvars::execute_unclipped_draw_vs_on_cpu;
@@ -627,7 +627,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
   });
   bool show_shader = AnyMatchesFilter({
       "use_fuzzy_alpha_epsilon",
-      "vulkan_precise_interpolation",
+      "precise_interpolation",
       "dxbc_switch",
   });
   bool show_edram = AnyMatchesFilter({
@@ -900,18 +900,16 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             }
           }
 
-          if (MatchesFilter("vulkan_precise_interpolation")) {
+          if (MatchesFilter("precise_interpolation")) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::BeginDisabled(!backend_state.vulkan);
-            DrawLabelCell("vulkan_precise_interpolation", "[Vulkan]");
+            DrawLabelCell("precise_interpolation", "[GPU]");
             ImGui::TableSetColumnIndex(1);
-            if (RightAlignedCheckbox("##vulkan_precise_interpolation",
-                                     &vulkan_precise_interpolation_)) {
-              ApplyBoolSetting("GPU", "vulkan_precise_interpolation",
-                               vulkan_precise_interpolation_, true);
+            if (RightAlignedCheckbox("##precise_interpolation",
+                                     &precise_interpolation_)) {
+              ApplyBoolSetting("GPU", "precise_interpolation",
+                               precise_interpolation_, true);
             }
-            ImGui::EndDisabled();
           }
 
           if (MatchesFilter("dxbc_switch")) {

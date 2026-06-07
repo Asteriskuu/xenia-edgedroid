@@ -82,6 +82,18 @@ DEFINE_string(
     "GPU");
 
 DEFINE_bool(
+    precise_interpolation, true,
+    "Manually interpolate pixel shader inputs with barycentric coordinates to "
+    "exactly match the guest and avoid hardware interpolation precision "
+    "differences. Fixes noise artifacts in games like Perfect Dark and Tenchu "
+    "Z "
+    "that do exact equality comparisons on interpolated values. Requires "
+    "fragment shader barycentric support (VK_KHR_fragment_shader_barycentric "
+    "on "
+    "Vulkan, SV_Barycentrics on Direct3D 12).",
+    "GPU");
+
+DEFINE_bool(
     readback_memexport, true,
     "Read data written by memory export in shaders on the CPU. "
     "This is needed in some games but many only access exported data on "

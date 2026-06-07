@@ -42,13 +42,7 @@ DEFINE_bool(
     "capability.",
     "GPU");
 
-DEFINE_bool(
-    vulkan_precise_interpolation, true,
-    "Use manual barycentric interpolation in fragment shaders to avoid "
-    "precision issues on Nvidia GPUs. Fixes noise artifacts in games like "
-    "Perfect Dark and Tenchu Z that do exact equality comparisons on "
-    "interpolated values. Requires VK_KHR_fragment_shader_barycentric.",
-    "GPU");
+DECLARE_bool(precise_interpolation);
 
 DEFINE_bool(
     spirv_moltenvk_allow_contraction, true,
@@ -222,7 +216,7 @@ uint64_t SpirvShaderTranslator::GetDefaultPixelShaderModification(
   shader_modification.pixel.dynamic_addressable_register_count =
       dynamic_addressable_register_count;
   shader_modification.pixel.precise_interpolation =
-      cvars::vulkan_precise_interpolation ? 1 : 0;
+      cvars::precise_interpolation ? 1 : 0;
   return shader_modification.value;
 }
 

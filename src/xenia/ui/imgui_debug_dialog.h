@@ -93,7 +93,7 @@ class ImGuiDebugDialog : public ImGuiGamepadDialog {
   bool resolve_resolution_scale_fill_half_pixel_offset_;
   // Shader / Driver Workarounds
   bool use_fuzzy_alpha_epsilon_;
-  bool vulkan_precise_interpolation_;
+  bool precise_interpolation_;
   bool dxbc_switch_;
   // EDRAM / Draw Heuristics
   bool execute_unclipped_draw_vs_on_cpu_;

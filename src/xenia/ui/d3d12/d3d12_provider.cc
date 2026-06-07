@@ -475,6 +475,12 @@ bool D3D12Provider::Initialize() {
     programmable_sample_positions_tier_ =
         options2.ProgrammableSamplePositionsTier;
   }
+  barycentrics_supported_ = false;
+  D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3;
+  if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3,
+                                            &options3, sizeof(options3)))) {
+    barycentrics_supported_ = bool(options3.BarycentricsSupported);
+  }
   D3D12_FEATURE_DATA_D3D12_OPTIONS8 options8;
   if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS8,
                                             &options8, sizeof(options8)))) {
