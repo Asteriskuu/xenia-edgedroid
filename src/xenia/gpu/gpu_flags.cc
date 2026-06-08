@@ -215,3 +215,8 @@ DEFINE_bool(
     "This fixes(hide) issues with black ground in AC6. Use only in AC6. "
     "Might cause issues in other titles.",
     "HACKS");
+
+DEFINE_bool(use_fuzzy_alpha_epsilon, false,
+            "Use approximate compare for alpha values to prevent flickering on "
+            "NVIDIA graphics cards",
+            "GPU");

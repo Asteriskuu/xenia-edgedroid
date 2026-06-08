@@ -42,6 +42,8 @@ class HlslShaderTranslator : public ShaderTranslator {
   //                        If false, uses SM 6.0 with unbounded SRV arrays.
   HlslShaderTranslator(ui::GraphicsProvider::GpuVendorID vendor_id,
                        bool bindless_resources_used, bool edram_rov_used,
+                       bool gamma_render_target_as_unorm8 = false,
+                       bool msaa_2x_supported = true,
                        bool use_shader_model_6_6 = true,
                        uint32_t draw_resolution_scale_x = 1,
                        uint32_t draw_resolution_scale_y = 1);
@@ -154,6 +156,8 @@ class HlslShaderTranslator : public ShaderTranslator {
   void EmitMemExportFlush();
   // Mark an eM# element as written when a result targets export data.
   void EmitMemExportWrittenMark(const InstructionResult& result);
+  // Emit a kill conditional: flush any in-flight exports, then discard.
+  void EmitKill(const std::string& condition);
 
   // Emit per-invocation shader state as static globals, so subroutine functions
   // can share it. The program counter stays local to each function.
@@ -172,6 +176,10 @@ class HlslShaderTranslator : public ShaderTranslator {
   // Decrease indentation level.
   void Outdent();
 
+  // Code-gen helpers shared across the split translator .cc files (static so
+  // they have external linkage rather than being file-local).
+  static std::string HlslFloatLiteral(float value);
+
   // Convert an operand to HLSL representation.
   std::string OperandToHlsl(const InstructionOperand& operand,
                             uint32_t needed_components);
@@ -186,8 +194,13 @@ class HlslShaderTranslator : public ShaderTranslator {
   bool PixelShaderNeedsFloat24DepthOutput() const;
   // Whether this pixel shader writes an SV_Depth-family output.
   bool PixelShaderWritesDepthOutput() const;
+  // Whether this non-ROV pixel shader applies polygon offset via shader depth
+  // output instead of fixed-function bias.
+  bool PixelShaderAppliesPolygonOffset() const;
   // Whether early-depth/stencil is forced globally for this pixel shader.
   bool IsForceEarlyDepthStencilEnabled() const;
+  // Whether the pixel shader runs at sample rate (per-sample float24 depth).
+  bool IsSampleRate() const;
   // Whether this pixel shader needs an SV_Coverage output for alpha-to-mask.
   bool PixelShaderNeedsCoverageOutput() const;
   // Whether a result write must be saturated to 0..1.
@@ -268,6 +281,8 @@ class HlslShaderTranslator : public ShaderTranslator {
   ui::GraphicsProvider::GpuVendorID vendor_id_;
   bool bindless_resources_used_;
   bool edram_rov_used_;
+  bool gamma_render_target_as_unorm8_;
+  bool msaa_2x_supported_;
   bool use_shader_model_6_6_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
@@ -295,6 +310,10 @@ class HlslShaderTranslator : public ShaderTranslator {
 
   // State machine tracking.
   bool has_main_switch_ = false;  // True if shader needs switch (has labels)
+
+  // eM# possibly written before the ALU instruction currently being processed.
+  // Nonzero means a kill in this instruction must flush exports before discard.
+  uint8_t memexport_eM_written_before_kill_ = 0;
 
   // Predication tracking helpers.
   bool cf_instruction_predicate_if_open_ = false;

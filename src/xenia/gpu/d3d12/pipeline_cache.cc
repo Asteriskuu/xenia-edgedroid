@@ -152,7 +152,11 @@ bool PipelineCache::Initialize() {
                             RenderTargetCache::Path::kPixelShaderInterlock;
       hlsl_shader_translator_ = std::make_unique<HlslShaderTranslator>(
           provider.GetAdapterVendorID(), bindless_resources_used_,
-          edram_rov_used, /*use_shader_model_6_6=*/true,
+          edram_rov_used,
+          !(edram_rov_used ||
+            render_target_cache_.gamma_render_target_as_unorm16()),
+          render_target_cache_.msaa_2x_supported(),
+          /*use_shader_model_6_6=*/true,
           render_target_cache_.draw_resolution_scale_x(),
           render_target_cache_.draw_resolution_scale_y());
       hlsl_shader_translator_->SetDxcCompiler(dxc_shader_compiler_.get());
@@ -1202,7 +1206,11 @@ void PipelineCache::TranslateShadersForStorage(
     if (dxil_shaders_enabled_) {
       hlsl_translator = std::make_unique<HlslShaderTranslator>(
           provider.GetAdapterVendorID(), bindless_resources_used_,
-          edram_rov_used, /*use_shader_model_6_6=*/true,
+          edram_rov_used,
+          !(edram_rov_used ||
+            render_target_cache_.gamma_render_target_as_unorm16()),
+          render_target_cache_.msaa_2x_supported(),
+          /*use_shader_model_6_6=*/true,
           render_target_cache_.draw_resolution_scale_x(),
           render_target_cache_.draw_resolution_scale_y());
       hlsl_translator->SetDxcCompiler(dxc_shader_compiler_.get());
@@ -3154,13 +3162,6 @@ const std::vector<uint8_t>* PipelineCache::GetDxilGeometryShader(
   // Generate HLSL source.
   std::string hlsl_source = CreateHlslGeometryShaderSource(key);
 
-  // Debug: dump the HLSL source for investigation
-  XELOGI(
-      "HLSL GS Source (type={}, interp={}, has_point_size={}, "
-      "has_point_coords={}, clip_planes={}):\n{}",
-      static_cast<int>(key.type), key.interpolator_count, key.has_point_size,
-      key.has_point_coordinates, key.user_clip_plane_count, hlsl_source);
-
   // Compile with DXC.
   std::vector<uint8_t> dxil_bytecode;
   if (dxc_shader_compiler_) {
@@ -3172,20 +3173,27 @@ const std::vector<uint8_t>* PipelineCache::GetDxilGeometryShader(
       dxil_geometry_shaders_.emplace(key, std::vector<uint8_t>());
       return nullptr;
     }
-    XELOGI("Compiled DXIL geometry shader (type={}, interpolators={})",
-           static_cast<int>(key.type), key.interpolator_count);
 
-    // Dump DXIL disassembly for debugging
-    std::string disasm;
-    if (dxc_shader_compiler_->Disassemble(dxil_bytecode, disasm)) {
-      std::string dxil_filename =
-          "shaders/gs_type" + std::to_string(static_cast<int>(key.type)) +
-          "_interp" + std::to_string(key.interpolator_count) + ".hlsl.dxil";
-      FILE* df = fopen(dxil_filename.c_str(), "w");
-      if (df) {
-        fwrite(disasm.c_str(), 1, disasm.size(), df);
-        fclose(df);
-        XELOGI("GS DXIL disassembly written to {}", dxil_filename);
+    // Dump the GS source and DXIL disassembly when dumping is enabled.
+    if (!cvars::dump_shaders.empty()) {
+      std::filesystem::path dump_dir =
+          std::filesystem::absolute(cvars::dump_shaders);
+      std::filesystem::create_directories(dump_dir);
+      std::string base = "gs_type" +
+                         std::to_string(static_cast<int>(key.type)) +
+                         "_interp" + std::to_string(key.interpolator_count);
+      FILE* hf = filesystem::OpenFile(dump_dir / (base + ".hlsl"), "w");
+      if (hf) {
+        fwrite(hlsl_source.c_str(), 1, hlsl_source.size(), hf);
+        fclose(hf);
+      }
+      std::string disasm;
+      if (dxc_shader_compiler_->Disassemble(dxil_bytecode, disasm)) {
+        FILE* df = filesystem::OpenFile(dump_dir / (base + ".hlsl.dxil"), "w");
+        if (df) {
+          fwrite(disasm.c_str(), 1, disasm.size(), df);
+          fclose(df);
+        }
       }
     }
   } else {
@@ -3755,6 +3763,9 @@ void PipelineCache::CreationThread(size_t thread_index) {
   if (dxil_shaders_enabled_) {
     hlsl_translator = std::make_unique<HlslShaderTranslator>(
         provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
+        !(edram_rov_used ||
+          render_target_cache_.gamma_render_target_as_unorm16()),
+        render_target_cache_.msaa_2x_supported(),
         /*use_shader_model_6_6=*/true,
         render_target_cache_.draw_resolution_scale_x(),
         render_target_cache_.draw_resolution_scale_y());

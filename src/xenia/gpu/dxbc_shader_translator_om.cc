@@ -15,13 +15,9 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/texture_cache.h"
-
-DEFINE_bool(use_fuzzy_alpha_epsilon, false,
-            "Use approximate compare for alpha values to prevent flickering on "
-            "NVIDIA graphics cards",
-            "GPU");
 
 namespace xe {
 namespace gpu {
