@@ -69,6 +69,10 @@ class HlslShaderTranslator : public ShaderTranslator {
     bindless_srv_heap_offset_ = offset;
   }
 
+  // Translate an empty pixel shader, used for pixel-shader-less depth-only
+  // draws under ROV (returns empty on failure).
+  std::vector<uint8_t> CreateDepthOnlyPixelShader();
+
   uint64_t GetDefaultVertexShaderModification(
       uint32_t dynamic_addressable_register_count,
       Shader::HostVertexShaderType host_vertex_shader_type =
@@ -219,6 +223,9 @@ class HlslShaderTranslator : public ShaderTranslator {
   // Emit assignment for scalar results (replicates scalar to match mask).
   void EmitScalarResultAssignment(const InstructionResult& result,
                                   const std::string& scalar_expr);
+  // Under ROV, record that this color target was written on the current
+  // execution path so the ROV color write only touches written targets.
+  void MarkColorWrittenIfRov(const InstructionResult& result);
   // Clamp point size exports after writing them, matching the DXBC path's
   // signed-integer bitwise clamp behavior.
   void EmitPointSizeClampIfNeeded(const InstructionResult& result,
@@ -228,6 +235,24 @@ class HlslShaderTranslator : public ShaderTranslator {
   // Emit fixed-function-style pixel kill / coverage logic.
   void EmitPixelShaderAlphaTest();
   void EmitPixelShaderAlphaToCoverage();
+  // ROV output merger, emitted instead of a render-target return under ROV.
+  // EmitROVParameters computes the per-pixel EDRAM dword offsets and the
+  // per-sample coverage mask consumed by the rest of the output merger.
+  void EmitROVParameters();
+  // EmitROVAlphaToCoverage builds the guest-order per-sample mask narrowed by
+  // alpha to coverage, ANDed into the ROV coverage by the output merger.
+  void EmitROVAlphaToCoverage();
+  // EmitROVDepthStencil runs the per-sample late depth/stencil test against the
+  // EDRAM, clearing failing coverage bits and writing the new packed
+  // depth/stencil for passing samples.
+  void EmitROVDepthStencil();
+  // EmitROVZpdCounter adds the samples surviving depth/stencil to the active
+  // occlusion-query counter slot when a ZPD segment is open.
+  void EmitROVZpdCounter();
+  // EmitROVColorWrite blends, clamps, packs and write-masks each written render
+  // target's color into the EDRAM for every still-covered sample.
+  void EmitROVColorWrite();
+  void EmitROVOutputMerger();
   // Store constant-only components (k0 or k1) to the result destination.
   // Called after ALU processing to handle cases where all components are
   // constants and the ALU operation returned early.

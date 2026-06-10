@@ -172,6 +172,23 @@ bool PipelineCache::Initialize() {
     }
   }
 
+  // Under ROV, pixel-shader-less depth-only draws need a real shader that runs
+  // the in-shader EDRAM depth/stencil + ZPD path (the precompiled depth_only_ps
+  // is a no-op). Generate it once here on the main thread via the active
+  // translator so pipeline creation only reads the cached bytecode.
+  if (render_target_cache_.GetPath() ==
+      RenderTargetCache::Path::kPixelShaderInterlock) {
+    depth_only_rov_pixel_shader_ =
+        dxil_shaders_enabled_
+            ? hlsl_shader_translator_->CreateDepthOnlyPixelShader()
+            : shader_translator_->CreateDepthOnlyPixelShader();
+    if (depth_only_rov_pixel_shader_.empty()) {
+      XELOGW(
+          "Failed to generate the ROV depth-only pixel shader, depth-only "
+          "draws will not write EDRAM depth");
+    }
+  }
+
   uint32_t logical_processor_count = xe::threading::logical_processor_count();
   if (!logical_processor_count) {
     // Pick some reasonable amount if couldn't determine the number of cores.
@@ -3460,8 +3477,15 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
     state_desc.PS.BytecodeLength =
         runtime_description.pixel_shader->translated_binary().size();
   } else if (edram_rov_used) {
-    state_desc.PS.pShaderBytecode = shaders::depth_only_ps;
-    state_desc.PS.BytecodeLength = sizeof(shaders::depth_only_ps);
+    // Real ROV depth-only shader (writes EDRAM depth/stencil); the no-op
+    // depth_only_ps is only a fallback if generation failed.
+    if (!depth_only_rov_pixel_shader_.empty()) {
+      state_desc.PS.pShaderBytecode = depth_only_rov_pixel_shader_.data();
+      state_desc.PS.BytecodeLength = depth_only_rov_pixel_shader_.size();
+    } else {
+      state_desc.PS.pShaderBytecode = shaders::depth_only_ps;
+      state_desc.PS.BytecodeLength = sizeof(shaders::depth_only_ps);
+    }
   } else {
     if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
         (description.depth_func != xenos::CompareFunction::kAlways ||

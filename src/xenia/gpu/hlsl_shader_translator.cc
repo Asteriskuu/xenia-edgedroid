@@ -21,6 +21,7 @@
 #include "xenia/base/platform.h"
 #include "xenia/gpu/dxbc_shader.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/ucode.h"
 #include "xenia/gpu/xenos.h"
 #if XE_PLATFORM_WIN32
@@ -257,7 +258,7 @@ void HlslShaderTranslator::EmitSystemConstants() {
   EmitLine("uint xe_alpha_to_mask;");
   EmitLine("uint xe_edram_32bpp_tile_pitch_dwords_scaled;");
   EmitLine("uint xe_edram_depth_base_dwords_scaled;");
-  EmitLine("uint _xe_padding_system_0;");
+  EmitLine("uint xe_zpd_rov_counter_index;");
   EmitLine("");
   EmitLine("float4 xe_color_exp_bias;");
   EmitLine("");
@@ -325,6 +326,15 @@ void HlslShaderTranslator::EmitResourceDeclarations() {
   // The runtime uses either SRV or UAV depending on xe_flags bit 0.
   EmitLine("ByteAddressBuffer xe_shared_memory_srv : register(t0);");
   EmitLine("RWByteAddressBuffer xe_shared_memory_uav : register(u0);");
+  if (edram_rov_used_ && is_pixel_shader()) {
+    // EDRAM as a rasterizer-ordered buffer for the in-shader ROV output merger.
+    // Rasterizer-ordered views are valid only in pixel shaders.
+    EmitLine("RasterizerOrderedBuffer<uint> xe_edram_rov : register(u1);");
+    // Occlusion query (ZPD) sample counter. Atomic adds are order independent,
+    // so this is a plain UAV, not rasterizer-ordered. The ROV root signature
+    // always binds this register.
+    EmitLine("RWByteAddressBuffer xe_zpd_rov_counter_uav : register(u2);");
+  }
   EmitLine("");
 
   if (bindless_resources_used_) {
@@ -439,6 +449,10 @@ void HlslShaderTranslator::EmitInputDeclarations() {
     // sample per guest pixel when shading runs at sample rate.
     if (IsSampleRate() && MemExportUsed()) {
       EmitLine("uint xe_sample_index : SV_SampleIndex;");
+    }
+    // Input coverage, needed for memexport sample narrowing and for the ROV
+    // output merger per-sample coverage mask.
+    if ((IsSampleRate() && MemExportUsed()) || edram_rov_used_) {
       EmitLine("uint xe_coverage_in : SV_Coverage;");
     }
     if (precise) {
@@ -514,7 +528,7 @@ void HlslShaderTranslator::EmitOutputDeclarations() {
                  std::to_string(i) + ";");
       }
     }
-    if (PixelShaderNeedsCoverageOutput()) {
+    if (PixelShaderNeedsCoverageOutput() && !edram_rov_used_) {
       EmitLine("uint xe_coverage : SV_Coverage;");
     }
     // Depth output if needed.
@@ -1042,6 +1056,22 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   EmitLine("}");
   EmitLine("");
 
+  // Convert a guest depth in [0, 2) to the packed 24-bit EDRAM depth, selecting
+  // 20e4 float or unorm24 by kSysFlag_DepthFloat24 (1 << 6 = 64). Mirrors
+  // DxbcShaderTranslator::ROV_DepthTo24Bit.
+  EmitLine("uint XeROVDepthTo24Bit(float depth) {");
+  Indent();
+  EmitLine("if ((xe_flags & 64u) != 0u) {");
+  Indent();
+  EmitLine("return XePreClampedDepthTo20e4(depth, true, false);");
+  Outdent();
+  EmitLine("}");
+  // Unorm24: round to the nearest even integer, then truncate to fixed-point.
+  EmitLine("return uint(round(depth * float(0xFFFFFF)));");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
   EmitLine("float XeDepthFloat24TruncateToHost(float depth) {");
   Indent();
   EmitLine("depth = XeSaturateNoNaN(depth);");
@@ -1114,6 +1144,541 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   Outdent();
   EmitLine("}");
   EmitLine("");
+
+  // EDRAM ROV color format pack/unpack, transcribed from
+  // DxbcShaderTranslator::ROV_UnpackColor and ROV_PackPreClampedColor.
+  if (edram_rov_used_) {
+    auto fmt_case = [](xenos::ColorRenderTargetFormat format) {
+      return "case " +
+             std::to_string(RenderTargetCache::AddPSIColorFormatFlags(format)) +
+             "u:";
+    };
+
+    // 7e3 float (RGB of the FLOAT 10-bit formats), matching the DirectXTex
+    // reference and PreClampedFloat32To7e3.
+    // Input must be pre-clamped to [0, 31.875].
+    EmitLine("uint XePreClampedFloat32To7e3(float value) {");
+    Indent();
+    EmitLine("uint f32 = asuint(value);");
+    EmitLine("uint biased_f32;");
+    EmitLine("if (f32 < 0x3E800000u) {");
+    Indent();
+    EmitLine("uint shift = min(125u - (f32 >> 23u), 24u);");
+    EmitLine("biased_f32 = (((f32 & 0x7FFFFFu) | 0x800000u) >> shift);");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("biased_f32 = f32 + 0xC2000000u;");
+    Outdent();
+    EmitLine("}");
+    EmitLine("biased_f32 += 0x7FFFu + ((biased_f32 >> 16u) & 1u);");
+    EmitLine("return (biased_f32 >> 16u) & 0x3FFu;");
+    Outdent();
+    EmitLine("}");
+    EmitLine("");
+
+    // 7e3 to float32, matching Float7e3To32. f10 is the lower 10 bits.
+    EmitLine("float XeFloat7e3To32(uint f10) {");
+    Indent();
+    EmitLine("uint mantissa = f10 & 0x7Fu;");
+    EmitLine("int exponent = int((f10 >> 7u) & 7u);");
+    EmitLine("if (exponent == 0) {");
+    Indent();
+    EmitLine("if (mantissa != 0u) {");
+    Indent();
+    EmitLine("int shift = 7 - int(firstbithigh(mantissa));");
+    EmitLine("mantissa <<= uint(shift);");
+    EmitLine("exponent = 1 - shift;");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("exponent = -124;");
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("}");
+    EmitLine("uint exponent_bits = uint(exponent + 124) << 23u;");
+    EmitLine("return asfloat(exponent_bits | ((mantissa & 0x7Fu) << 16u));");
+    Outdent();
+    EmitLine("}");
+    EmitLine("");
+
+    // Unpack 1 dword (32bpp) or 2 dwords (64bpp) into a float4 color.
+    EmitLine("float4 XeROVUnpackColor(uint format_flags, uint2 packed) {");
+    Indent();
+    EmitLine("float4 color = float4(0.0f, 0.0f, 0.0f, 1.0f);");
+    EmitLine("switch (format_flags) {");
+    Indent();
+    // k_8_8_8_8 and k_8_8_8_8_GAMMA.
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_8_8_8_8));
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA));
+    Indent();
+    EmitLine("color = float4((packed.x >> uint4(0u, 8u, 16u, 24u)) & 0xFFu);");
+    EmitLine("color *= 1.0f / 255.0f;");
+    // Gamma decode RGB. kSysFlag_ConvertColor0ToGamma_Shift == 10.
+    EmitLine("if (format_flags == " +
+             std::to_string(RenderTargetCache::AddPSIColorFormatFlags(
+                 xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) +
+             "u) {");
+    Indent();
+    EmitLine("color.r = XePWLGammaToLinear(color.r);");
+    EmitLine("color.g = XePWLGammaToLinear(color.g);");
+    EmitLine("color.b = XePWLGammaToLinear(color.b);");
+    Outdent();
+    EmitLine("}");
+    EmitLine("break;");
+    Outdent();
+    // k_2_10_10_10 and k_2_10_10_10_AS_10_10_10_10.
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_2_10_10_10));
+    EmitLine(
+        fmt_case(xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10));
+    Indent();
+    EmitLine(
+        "color = float4((packed.x >> uint4(0u, 10u, 20u, 30u)) & "
+        "uint4(0x3FFu, 0x3FFu, 0x3FFu, 3u));");
+    EmitLine(
+        "color *= float4(1.0f / 1023.0f, 1.0f / 1023.0f, 1.0f / 1023.0f, "
+        "1.0f / 3.0f);");
+    EmitLine("break;");
+    Outdent();
+    // k_2_10_10_10_FLOAT and k_2_10_10_10_FLOAT_AS_16_16_16_16.
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT));
+    EmitLine(fmt_case(
+        xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16));
+    Indent();
+    EmitLine("color.r = XeFloat7e3To32(packed.x & 0x3FFu);");
+    EmitLine("color.g = XeFloat7e3To32((packed.x >> 10u) & 0x3FFu);");
+    EmitLine("color.b = XeFloat7e3To32((packed.x >> 20u) & 0x3FFu);");
+    EmitLine("color.a = float(packed.x >> 30u) * (1.0f / 3.0f);");
+    EmitLine("break;");
+    Outdent();
+    // k_16_16 and k_16_16_16_16 (64bpp), signed fixed-point.
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16));
+    Indent();
+    EmitLine("{");
+    EmitLine("int2 s16 = int2(packed.x << uint2(16u, 0u)) >> 16;");
+    EmitLine("color.rg = float2(s16) * (32.0f / 32767.0f);");
+    EmitLine("}");
+    EmitLine("break;");
+    Outdent();
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_16_16));
+    Indent();
+    EmitLine("{");
+    EmitLine("int4 s16 = int4(packed.xxyy << uint4(16u, 0u, 16u, 0u)) >> 16;");
+    EmitLine("color = float4(s16) * (32.0f / 32767.0f);");
+    EmitLine("}");
+    EmitLine("break;");
+    Outdent();
+    // k_16_16_FLOAT and k_16_16_16_16_FLOAT (64bpp).
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_FLOAT));
+    Indent();
+    EmitLine(
+        "color.rg = float2(f16tof32(packed.x & 0xFFFFu), "
+        "f16tof32(packed.x >> 16u));");
+    EmitLine("break;");
+    Outdent();
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT));
+    Indent();
+    EmitLine(
+        "color = float4(f16tof32(packed.x & 0xFFFFu), f16tof32(packed.x >> "
+        "16u), f16tof32(packed.y & 0xFFFFu), f16tof32(packed.y >> 16u));");
+    EmitLine("break;");
+    Outdent();
+    // k_32_FLOAT and k_32_32_FLOAT.
+    EmitLine("default:");
+    Indent();
+    EmitLine("color.rg = asfloat(packed);");
+    EmitLine("break;");
+    Outdent();
+    Outdent();
+    EmitLine("}");
+    EmitLine("return color;");
+    Outdent();
+    EmitLine("}");
+    EmitLine("");
+
+    // Pack a pre-clamped float4 into 1 dword (32bpp) or 2 dwords (64bpp).
+    EmitLine("uint2 XeROVPackColor(uint format_flags, float4 color) {");
+    Indent();
+    EmitLine("uint2 packed = uint2(0u, 0u);");
+    EmitLine("switch (format_flags) {");
+    Indent();
+    // k_8_8_8_8 and k_8_8_8_8_GAMMA.
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_8_8_8_8));
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA));
+    Indent();
+    EmitLine("{");
+    EmitLine("if (format_flags == " +
+             std::to_string(RenderTargetCache::AddPSIColorFormatFlags(
+                 xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) +
+             "u) {");
+    Indent();
+    EmitLine("color.r = XePreSaturatedLinearToPWLGamma(color.r);");
+    EmitLine("color.g = XePreSaturatedLinearToPWLGamma(color.g);");
+    EmitLine("color.b = XePreSaturatedLinearToPWLGamma(color.b);");
+    Outdent();
+    EmitLine("}");
+    EmitLine("uint4 c = uint4(color * 255.0f + 0.5f);");
+    EmitLine("packed.x = c.x | (c.y << 8u) | (c.z << 16u) | (c.w << 24u);");
+    EmitLine("}");
+    EmitLine("break;");
+    Outdent();
+    // k_2_10_10_10 and k_2_10_10_10_AS_10_10_10_10.
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_2_10_10_10));
+    EmitLine(
+        fmt_case(xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10));
+    Indent();
+    EmitLine("{");
+    EmitLine(
+        "uint4 c = uint4(color * float4(1023.0f, 1023.0f, 1023.0f, 3.0f) + "
+        "0.5f);");
+    EmitLine("packed.x = c.x | (c.y << 10u) | (c.z << 20u) | (c.w << 30u);");
+    EmitLine("}");
+    EmitLine("break;");
+    Outdent();
+    // k_2_10_10_10_FLOAT and k_2_10_10_10_FLOAT_AS_16_16_16_16.
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT));
+    EmitLine(fmt_case(
+        xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16));
+    Indent();
+    EmitLine("packed.x = XePreClampedFloat32To7e3(color.r);");
+    EmitLine("packed.x |= XePreClampedFloat32To7e3(color.g) << 10u;");
+    EmitLine("packed.x |= XePreClampedFloat32To7e3(color.b) << 20u;");
+    EmitLine("packed.x |= uint(color.a * 3.0f + 0.5f) << 30u;");
+    EmitLine("break;");
+    Outdent();
+    // k_16_16 and k_16_16_16_16 (64bpp), signed fixed-point.
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16));
+    Indent();
+    EmitLine("{");
+    EmitLine(
+        "float2 r = select(color.rg >= 0.0f, float2(0.5f, 0.5f), "
+        "float2(-0.5f, -0.5f));");
+    EmitLine("int2 s16 = int2(color.rg * (32767.0f / 32.0f) + r) & 0xFFFF;");
+    EmitLine("packed.x = uint(s16.x) | (uint(s16.y) << 16u);");
+    EmitLine("}");
+    EmitLine("break;");
+    Outdent();
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_16_16));
+    Indent();
+    EmitLine("{");
+    EmitLine(
+        "float4 r = select(color >= 0.0f, float4(0.5f, 0.5f, 0.5f, 0.5f), "
+        "float4(-0.5f, -0.5f, -0.5f, -0.5f));");
+    EmitLine("int4 s16 = int4(color * (32767.0f / 32.0f) + r) & 0xFFFF;");
+    EmitLine("packed.x = uint(s16.x) | (uint(s16.y) << 16u);");
+    EmitLine("packed.y = uint(s16.z) | (uint(s16.w) << 16u);");
+    EmitLine("}");
+    EmitLine("break;");
+    Outdent();
+    // k_16_16_FLOAT and k_16_16_16_16_FLOAT (64bpp).
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_FLOAT));
+    Indent();
+    EmitLine("packed.x = f32tof16(color.r) | (f32tof16(color.g) << 16u);");
+    EmitLine("break;");
+    Outdent();
+    EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT));
+    Indent();
+    EmitLine("packed.x = f32tof16(color.r) | (f32tof16(color.g) << 16u);");
+    EmitLine("packed.y = f32tof16(color.b) | (f32tof16(color.a) << 16u);");
+    EmitLine("break;");
+    Outdent();
+    // k_32_FLOAT and k_32_32_FLOAT.
+    EmitLine("default:");
+    Indent();
+    EmitLine("packed = asuint(color.rg);");
+    EmitLine("break;");
+    Outdent();
+    Outdent();
+    EmitLine("}");
+    EmitLine("return packed;");
+    Outdent();
+    EmitLine("}");
+    EmitLine("");
+
+    auto bf_case = [](xenos::BlendFactor factor) {
+      return "case " + std::to_string(uint32_t(factor)) + "u:";
+    };
+
+    // Select the RGB blend factor for a factor index.
+    // Transcribed from DxbcShaderTranslator::ROV_HandleColorBlendFactorCases.
+    // src and dst are the unclamped source and destination colors.
+    EmitLine(
+        "float3 XeROVColorBlendFactor(uint factor, float4 src, float4 dst, "
+        "float4 blend_constant) {");
+    Indent();
+    EmitLine("switch (factor) {");
+    Indent();
+    EmitLine(bf_case(xenos::BlendFactor::kOne));
+    Indent();
+    EmitLine("return float3(1.0f, 1.0f, 1.0f);");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kSrcColor));
+    Indent();
+    EmitLine("return src.rgb;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusSrcColor));
+    Indent();
+    EmitLine("return 1.0f - src.rgb;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kSrcAlpha));
+    Indent();
+    EmitLine("return src.aaa;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusSrcAlpha));
+    Indent();
+    EmitLine("return 1.0f - src.aaa;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kDstColor));
+    Indent();
+    EmitLine("return dst.rgb;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusDstColor));
+    Indent();
+    EmitLine("return 1.0f - dst.rgb;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kDstAlpha));
+    Indent();
+    EmitLine("return dst.aaa;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusDstAlpha));
+    Indent();
+    EmitLine("return 1.0f - dst.aaa;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kConstantColor));
+    Indent();
+    EmitLine("return blend_constant.rgb;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusConstantColor));
+    Indent();
+    EmitLine("return 1.0f - blend_constant.rgb;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kConstantAlpha));
+    Indent();
+    EmitLine("return blend_constant.aaa;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusConstantAlpha));
+    Indent();
+    EmitLine("return 1.0f - blend_constant.aaa;");
+    Outdent();
+    EmitLine(bf_case(xenos::BlendFactor::kSrcAlphaSaturate));
+    Indent();
+    EmitLine("return min(src.aaa, 1.0f - dst.aaa);");
+    Outdent();
+    // kZero default.
+    EmitLine("default:");
+    Indent();
+    EmitLine("return float3(0.0f, 0.0f, 0.0f);");
+    Outdent();
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("}");
+    EmitLine("");
+
+    // Select the alpha blend factor for a factor index.
+    // Transcribed from DxbcShaderTranslator::ROV_HandleAlphaBlendFactorCases.
+    EmitLine(
+        "float XeROVAlphaBlendFactor(uint factor, float src_a, float dst_a, "
+        "float4 blend_constant) {");
+    Indent();
+    EmitLine("switch (factor) {");
+    Indent();
+    // kOne, kSrcAlphaSaturate.
+    EmitLine(bf_case(xenos::BlendFactor::kOne));
+    EmitLine(bf_case(xenos::BlendFactor::kSrcAlphaSaturate));
+    Indent();
+    EmitLine("return 1.0f;");
+    Outdent();
+    // kSrcColor, kSrcAlpha.
+    EmitLine(bf_case(xenos::BlendFactor::kSrcColor));
+    EmitLine(bf_case(xenos::BlendFactor::kSrcAlpha));
+    Indent();
+    EmitLine("return src_a;");
+    Outdent();
+    // kOneMinusSrcColor, kOneMinusSrcAlpha.
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusSrcColor));
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusSrcAlpha));
+    Indent();
+    EmitLine("return 1.0f - src_a;");
+    Outdent();
+    // kDstColor, kDstAlpha.
+    EmitLine(bf_case(xenos::BlendFactor::kDstColor));
+    EmitLine(bf_case(xenos::BlendFactor::kDstAlpha));
+    Indent();
+    EmitLine("return dst_a;");
+    Outdent();
+    // kOneMinusDstColor, kOneMinusDstAlpha.
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusDstColor));
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusDstAlpha));
+    Indent();
+    EmitLine("return 1.0f - dst_a;");
+    Outdent();
+    // kConstantColor, kConstantAlpha.
+    EmitLine(bf_case(xenos::BlendFactor::kConstantColor));
+    EmitLine(bf_case(xenos::BlendFactor::kConstantAlpha));
+    Indent();
+    EmitLine("return blend_constant.a;");
+    Outdent();
+    // kOneMinusConstantColor, kOneMinusConstantAlpha.
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusConstantColor));
+    EmitLine(bf_case(xenos::BlendFactor::kOneMinusConstantAlpha));
+    Indent();
+    EmitLine("return 1.0f - blend_constant.a;");
+    Outdent();
+    // kZero default.
+    EmitLine("default:");
+    Indent();
+    EmitLine("return 0.0f;");
+    Outdent();
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("}");
+    EmitLine("");
+
+    // Blend the source and destination colors using the RT blend control.
+    // Transcribed from DxbcShaderTranslator::CompletePixelShader_WriteToROV.
+    // blend_control is xe_edram_rt_blend_factors_ops for the RT, holding the
+    // raw RB_BLENDCONTROL bits. The result is not clamped here.
+    // Layout of blend_control:
+    //   bits 0-4   color source factor (BlendFactor)
+    //   bits 5-7   color combine function (BlendOp)
+    //   bits 8-12  color destination factor (BlendFactor)
+    //   bits 16-20 alpha source factor (BlendFactor)
+    //   bits 21-23 alpha combine function (BlendOp)
+    //   bits 24-28 alpha destination factor (BlendFactor)
+    // The 3-bit BlendOp encodes bit0 as destination sign or min-vs-max, bit1 as
+    // whether to use min/max, bit2 as source sign.
+    EmitLine(
+        "float4 XeROVBlendColor(float4 src_color, float4 dst_color, uint "
+        "blend_control, float4 blend_constant) {");
+    Indent();
+    EmitLine("float4 result;");
+    EmitLine("");
+
+    // RGB blending.
+    EmitLine("// RGB blending.");
+    EmitLine("uint color_src_factor = blend_control & 0x1Fu;");
+    EmitLine("uint color_dst_factor = (blend_control >> 8u) & 0x1Fu;");
+    EmitLine("// Source RGB part - zero factor ignores the source completely.");
+    EmitLine("float3 color_src_part;");
+    EmitLine("if (color_src_factor != 0u) {");
+    Indent();
+    EmitLine(
+        "color_src_part = src_color.rgb * XeROVColorBlendFactor("
+        "color_src_factor, src_color, dst_color, blend_constant);");
+    EmitLine("if ((blend_control & (1u << 7u)) != 0u) {");
+    Indent();
+    EmitLine("color_src_part = -color_src_part;");
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("color_src_part = float3(0.0f, 0.0f, 0.0f);");
+    Outdent();
+    EmitLine("}");
+    EmitLine("// Destination RGB part - zero factor ignores the destination.");
+    EmitLine("float3 color_dst_part;");
+    EmitLine("if (color_dst_factor != 0u) {");
+    Indent();
+    EmitLine(
+        "color_dst_part = dst_color.rgb * XeROVColorBlendFactor("
+        "color_dst_factor, src_color, dst_color, blend_constant);");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("color_dst_part = float3(0.0f, 0.0f, 0.0f);");
+    Outdent();
+    EmitLine("}");
+    EmitLine("if ((blend_control & (1u << 6u)) != 0u) {");
+    Indent();
+    EmitLine("// Min or max of the factored parts (selected by bit 5).");
+    EmitLine("if ((blend_control & (1u << 5u)) != 0u) {");
+    Indent();
+    EmitLine("result.rgb = max(color_src_part, color_dst_part);");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("result.rgb = min(color_src_part, color_dst_part);");
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("// Add the parts, with the destination sign from bit 5.");
+    EmitLine(
+        "float color_dst_sign = (blend_control & (1u << 5u)) != 0u ? -1.0f : "
+        "1.0f;");
+    EmitLine("result.rgb = color_dst_part * color_dst_sign + color_src_part;");
+    Outdent();
+    EmitLine("}");
+    EmitLine("");
+
+    // Alpha blending.
+    EmitLine("// Alpha blending.");
+    EmitLine("uint alpha_src_factor = (blend_control >> 16u) & 0x1Fu;");
+    EmitLine("uint alpha_dst_factor = (blend_control >> 24u) & 0x1Fu;");
+    EmitLine("// Source alpha part.");
+    EmitLine("float alpha_src_part;");
+    EmitLine("if (alpha_src_factor != 0u) {");
+    Indent();
+    EmitLine(
+        "alpha_src_part = src_color.a * XeROVAlphaBlendFactor("
+        "alpha_src_factor, src_color.a, dst_color.a, blend_constant);");
+    EmitLine("if ((blend_control & (1u << 23u)) != 0u) {");
+    Indent();
+    EmitLine("alpha_src_part = -alpha_src_part;");
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("alpha_src_part = 0.0f;");
+    Outdent();
+    EmitLine("}");
+    EmitLine("// Destination alpha part.");
+    EmitLine("float alpha_dst_part;");
+    EmitLine("if (alpha_dst_factor != 0u) {");
+    Indent();
+    EmitLine(
+        "alpha_dst_part = dst_color.a * XeROVAlphaBlendFactor("
+        "alpha_dst_factor, src_color.a, dst_color.a, blend_constant);");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("alpha_dst_part = 0.0f;");
+    Outdent();
+    EmitLine("}");
+    EmitLine("if ((blend_control & (1u << 22u)) != 0u) {");
+    Indent();
+    EmitLine("// Min or max of the factored parts (selected by bit 21).");
+    EmitLine("if ((blend_control & (1u << 21u)) != 0u) {");
+    Indent();
+    EmitLine("result.a = max(alpha_src_part, alpha_dst_part);");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("result.a = min(alpha_src_part, alpha_dst_part);");
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("// Add the parts, with the destination sign from bit 21.");
+    EmitLine(
+        "float alpha_dst_sign = (blend_control & (1u << 21u)) != 0u ? -1.0f : "
+        "1.0f;");
+    EmitLine("result.a = alpha_dst_part * alpha_dst_sign + alpha_src_part;");
+    Outdent();
+    EmitLine("}");
+    EmitLine("");
+    EmitLine("return result;");
+    Outdent();
+    EmitLine("}");
+    EmitLine("");
+  }
 
   // Bindless resource helper functions.
   if (bindless_resources_used_) {
@@ -1252,7 +1817,10 @@ void HlslShaderTranslator::EmitEntryPointBegin() {
     if (IsForceEarlyDepthStencilEnabled()) {
       EmitLine("[earlydepthstencil]");
     }
-    EmitLine("PSOutput main(PSInput input) {");
+    // Under ROV the output merger runs in-shader and writes the EDRAM UAV, so
+    // there is no PSOutput render-target return.
+    EmitLine(edram_rov_used_ ? "void main(PSInput input) {"
+                             : "PSOutput main(PSInput input) {");
   }
   Indent();
 
@@ -1271,8 +1839,14 @@ void HlslShaderTranslator::EmitEntryPointBegin() {
     }
   } else {
     EmitLine("output = (PSOutput)0;");
-    if (PixelShaderNeedsCoverageOutput()) {
+    if (PixelShaderNeedsCoverageOutput() && !edram_rov_used_) {
       EmitLine("output.xe_coverage = 0xFFFFFFFFu;");
+    }
+    if (edram_rov_used_) {
+      // Per-color-target written mask, set at each color store under flow
+      // control, consumed by the ROV color write. Mirrors the DXBC rov_params
+      // 1 << (8 + i) bits.
+      EmitLine("uint xe_color_written = 0u;");
     }
     // The polygon-offset depth slope must be derived here, before any
     // kill/discard, while the 2x2 quad is still fully populated.
@@ -1281,6 +1855,14 @@ void HlslShaderTranslator::EmitEntryPointBegin() {
           "float xe_poly_offset_slope = "
           "max(abs(ddx_coarse(input.xe_position.z)), "
           "abs(ddy_coarse(input.xe_position.z)));");
+    }
+    // ROV late depth/stencil reads the screen-space depth derivatives to build
+    // per-sample depth. Derivatives are undefined after non-uniform flow, so
+    // capture them here before any kill/discard. Not needed when the shader
+    // writes its own depth (single depth for the whole pixel).
+    if (edram_rov_used_ && !current_shader().writes_depth()) {
+      EmitLine("float xe_rov_z_ddx = ddx_coarse(input.xe_position.z);");
+      EmitLine("float xe_rov_z_ddy = ddy_coarse(input.xe_position.z);");
     }
   }
   EmitLine("");
@@ -1350,7 +1932,7 @@ void HlslShaderTranslator::EmitEntryPointBegin() {
     if (IsSampleRate()) {
       EmitLine(
           "xe_memexport_enabled = xe_memexport_enabled && "
-          "(xe_sample_index == firstbitlow(xe_coverage_in));");
+          "(input.xe_sample_index == firstbitlow(input.xe_coverage_in));");
     }
     EmitLine("");
   }
@@ -1513,9 +2095,10 @@ void HlslShaderTranslator::EmitEntryPointEnd() {
       // Encode linear color to PWL gamma for gamma render targets after the
       // exponent bias, matching the DxbcShaderTranslator output merger. Only
       // when the host gamma render target is unorm8. Higher precision hosts
-      // keep the linear value to avoid 8-bit banding.
+      // keep the linear value to avoid 8-bit banding. Under ROV the gamma
+      // encode is done by XeROVPackColor at pack time, so skip it here.
       for (uint32_t i = 0; i < 4; ++i) {
-        if (!gamma_render_target_as_unorm8_ ||
+        if (edram_rov_used_ || !gamma_render_target_as_unorm8_ ||
             !(color_targets_written & (1u << i))) {
           continue;
         }
@@ -1651,7 +2234,10 @@ void HlslShaderTranslator::EmitEntryPointEnd() {
             "output.xe_depth = XeDepthFloat24RoundToHost(xe_depth_guest);");
       }
       EmitLine("");
-    } else if (current_shader().writes_depth()) {
+    } else if (current_shader().writes_depth() && !edram_rov_used_) {
+      // Host viewport float24 remap of the guest-written depth. Under ROV there
+      // is no host depth buffer - the ROV output merger converts the guest
+      // depth itself, so keep the unremapped guest value here.
       EmitLine("if ((xe_flags & 64u) != 0u) {");
       Indent();
       EmitLine("output.xe_depth *= 0.5f;");
@@ -1665,9 +2251,623 @@ void HlslShaderTranslator::EmitEntryPointEnd() {
     }
   }
 
-  EmitLine("return output;");
+  if (edram_rov_used_ && is_pixel_shader()) {
+    // ROV output merger: read the per-RT colors from output.xe_color_N, run the
+    // in-shader depth/stencil test and blending, and write the EDRAM via
+    // xe_edram_rov. Body is built across the ROV phases. Pixel shaders only -
+    // edram_rov_used_ is pipeline-wide, but the merger runs in the pixel stage.
+    EmitROVOutputMerger();
+  } else {
+    EmitLine("return output;");
+  }
   Outdent();
   EmitLine("}");
+}
+
+void HlslShaderTranslator::EmitROVParameters() {
+  bool any_color_targets_written = current_shader().writes_color_targets() != 0;
+
+  // Compute the per-pixel EDRAM dword offsets:
+  // xe_rov_offset_depth - depth / stencil, absolute and wrapped.
+  // xe_rov_offset_32bpp - 32bpp color, EDRAM base relative.
+  // xe_rov_offset_64bpp - 64bpp color, EDRAM base relative.
+  // 64bpp is stored as 40x16 samples per 1280-byte tile like 32bpp, and 40x16
+  // granularity is used here because depth tiles swap their 40-sample halves
+  // relative to color.
+
+  // Tile geometry scaled by the draw resolution.
+  uint32_t tile_width =
+      xenos::kEdramTileWidthSamples * draw_resolution_scale_x_;
+  uint32_t tile_or_tile_half_width =
+      tile_width >> uint32_t(any_color_targets_written);
+  uint32_t tile_height =
+      xenos::kEdramTileHeightSamples * draw_resolution_scale_y_;
+  uint32_t tile_size = tile_width * tile_height;
+  uint32_t tile_half_width = tile_width >> 1;
+
+  std::string tile_width_str = std::to_string(tile_width) + "u";
+  std::string tile_or_tile_half_width_str =
+      std::to_string(tile_or_tile_half_width) + "u";
+  std::string tile_height_str = std::to_string(tile_height) + "u";
+  std::string tile_size_str = std::to_string(tile_size) + "u";
+  std::string tile_half_width_str = std::to_string(tile_half_width) + "u";
+
+  EmitLine("// ROV parameters: EDRAM offsets and per-sample coverage");
+  EmitLine("uint xe_rov_offset_depth;");
+  if (any_color_targets_written) {
+    EmitLine("uint xe_rov_offset_32bpp;");
+    EmitLine("uint xe_rov_offset_64bpp;");
+  }
+  EmitLine("uint xe_rov_coverage;");
+  EmitLine("{");
+  Indent();
+
+  // Host pixel position to integer, then to sample 0 position.
+  EmitLine("uint2 xe_rov_sample = uint2(input.xe_position.xy);");
+  EmitLine(
+      "xe_rov_sample <<= uint2(xe_sample_count_log2.x, "
+      "xe_sample_count_log2.y);");
+
+  // Split into the (half-)tile position and the sample position within it.
+  // For color and depth the X granularity is a 40x16 half-tile, for depth-only
+  // it is a full 80x16 tile.
+  EmitLine("uint xe_rov_htile_x = xe_rov_sample.x / " +
+           tile_or_tile_half_width_str + ";");
+  EmitLine("uint xe_rov_tile_y = xe_rov_sample.y / " + tile_height_str + ";");
+  EmitLine("uint xe_rov_local_x = xe_rov_sample.x % " +
+           tile_or_tile_half_width_str + ";");
+  EmitLine("uint xe_rov_local_y = xe_rov_sample.y % " + tile_height_str + ";");
+  // Row dword offset within an 80x16-dword tile.
+  EmitLine("uint xe_rov_row_offset = xe_rov_local_y * " + tile_width_str + ";");
+
+  if (any_color_targets_written) {
+    // Depth, 32bpp color and 64bpp color are all needed.
+
+    // Y tile row dword origin within a 32bpp surface.
+    EmitLine(
+        "uint xe_rov_tile_row_32bpp = xe_rov_tile_y * "
+        "xe_edram_32bpp_tile_pitch_dwords_scaled;");
+    // Beginning of the row of samples within a row of 32bpp tiles, then within
+    // the whole 32bpp surface.
+    EmitLine("uint xe_rov_tile_x = xe_rov_htile_x >> 1u;");
+    EmitLine("uint xe_rov_row_32bpp = xe_rov_tile_x * " + tile_size_str +
+             " + xe_rov_row_offset;");
+    EmitLine("xe_rov_row_32bpp += xe_rov_tile_row_32bpp;");
+    // Beginning of the row of samples within a 64bpp surface (twice the 32bpp
+    // tile pitch, 40x16 half-tiles addressed directly).
+    EmitLine("uint xe_rov_row_64bpp = xe_rov_htile_x * " + tile_size_str +
+             " + xe_rov_row_offset;");
+    EmitLine("xe_rov_row_64bpp += xe_rov_tile_row_32bpp * 2u;");
+    // Final 64bpp sample 0 offset.
+    EmitLine("xe_rov_offset_64bpp = xe_rov_local_x * 2u + xe_rov_row_64bpp;");
+    // Half-tile index within the 80x16 tile.
+    EmitLine("uint xe_rov_half_tile = xe_rov_htile_x & 1u;");
+    // X sample 0 position within the 32bpp tile, then the final 32bpp offset.
+    EmitLine("uint xe_rov_tile_local_x = xe_rov_half_tile * " +
+             tile_half_width_str + " + xe_rov_local_x;");
+    EmitLine("xe_rov_offset_32bpp = xe_rov_row_32bpp + xe_rov_tile_local_x;");
+    // Depth swaps the 40x16 half-tiles relative to 32bpp color.
+    EmitLine("uint xe_rov_depth_flip = (xe_rov_half_tile != 0u) ? uint(-int(" +
+             tile_half_width_str + ")) : " + tile_half_width_str + ";");
+    EmitLine("xe_rov_offset_depth = xe_rov_offset_32bpp + xe_rov_depth_flip;");
+  } else {
+    // Depth-only, working with full 80x16 tiles.
+
+    // Beginning of the row of samples within a row of 32bpp tiles, then within
+    // the whole 32bpp surface.
+    EmitLine("uint xe_rov_row_32bpp = xe_rov_htile_x * " + tile_size_str +
+             " + xe_rov_row_offset;");
+    EmitLine(
+        "xe_rov_offset_depth = xe_rov_tile_y * "
+        "xe_edram_32bpp_tile_pitch_dwords_scaled + xe_rov_row_32bpp;");
+    EmitLine("xe_rov_offset_depth += xe_rov_local_x;");
+    // Depth swaps the 40x16 half-tiles relative to 32bpp color.
+    EmitLine("uint xe_rov_depth_flip = (xe_rov_local_x >= " +
+             tile_half_width_str + ") ? uint(-int(" + tile_half_width_str +
+             ")) : " + tile_half_width_str + ";");
+    EmitLine("xe_rov_offset_depth += xe_rov_depth_flip;");
+  }
+
+  // Add the depth / stencil EDRAM base and wrap the addressing.
+  EmitLine("xe_rov_offset_depth += xe_edram_depth_base_dwords_scaled;");
+  EmitLine("xe_rov_offset_depth %= " +
+           std::to_string(tile_size * xenos::kEdramTileCount) + "u;");
+
+  // Per-sample coverage. ForcedSampleCount is 4, so for 2x MSAA samples 0 and 3
+  // (upper-left and lower-right) act as 0 and 1.
+  EmitLine("if (xe_sample_count_log2.x != 0u) {");
+  Indent();
+  // 4x: make top-right sample 1 and bottom-left sample 2 (opposite of Direct3D
+  // 12), keeping samples 0 and 3, because 4x MSAA doubles the storage width.
+  EmitLine(
+      "xe_rov_coverage = (input.xe_coverage_in & ~0x6u) | "
+      "((input.xe_coverage_in >> 1u) & 0x2u) | "
+      "((input.xe_coverage_in << 1u) & 0x4u);");
+  Outdent();
+  EmitLine("} else {");
+  Indent();
+  // 1x or 2x: combine sample 0 with sample 3 used as sample 1.
+  EmitLine(
+      "xe_rov_coverage = (input.xe_coverage_in & 1u) | "
+      "(((input.xe_coverage_in >> 3u) & 1u) << 1u);");
+  Outdent();
+  EmitLine("}");
+
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+}
+
+void HlslShaderTranslator::EmitROVOutputMerger() {
+  // Parameter load: EDRAM offsets and per-sample coverage.
+  EmitROVParameters();
+  // Alpha to coverage narrows the per-sample coverage before the depth/stencil
+  // test, so discarded samples skip both the color and the stencil write. The
+  // mask was built before the exponent bias by EmitROVAlphaToCoverage.
+  if (PixelShaderNeedsCoverageOutput()) {
+    EmitLine("xe_rov_coverage &= xe_rov_atoc_coverage;");
+    EmitLine("");
+  }
+  // Late depth/stencil test and write-back against the EDRAM.
+  EmitROVDepthStencil();
+  // Occlusion query: count samples that survived depth/stencil.
+  EmitROVZpdCounter();
+  // Per-render-target color read-modify-write against the EDRAM.
+  EmitROVColorWrite();
+}
+
+void HlslShaderTranslator::EmitROVZpdCounter() {
+  // Transcribed from DxbcShaderTranslator::ROV_AddPassedMSAASamplesToZPD. When
+  // a ZPD (occlusion query) segment is open, add the number of samples that
+  // survived depth/stencil to the active counter slot. UINT32_MAX means no
+  // segment is open. The counter UAV is raw, addressed in bytes (one uint32 per
+  // slot). Only the low 4 coverage bits count.
+  EmitLine("// ROV occlusion query sample counter");
+  EmitLine("if (xe_zpd_rov_counter_index != 0xFFFFFFFFu) {");
+  Indent();
+  EmitLine("uint xe_zpd_passed = countbits(xe_rov_coverage & 0xFu);");
+  EmitLine("if (xe_zpd_passed != 0u) {");
+  Indent();
+  EmitLine("uint xe_zpd_prev;");
+  EmitLine(
+      "xe_zpd_rov_counter_uav.InterlockedAdd(xe_zpd_rov_counter_index * 4u, "
+      "xe_zpd_passed, xe_zpd_prev);");
+  Outdent();
+  EmitLine("}");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+}
+
+void HlslShaderTranslator::EmitROVDepthStencil() {
+  // Late depth/stencil test transcribed from
+  // DxbcShaderTranslator::ROV_DepthStencilTest. Runs per sample against the
+  // packed depth(24):stencil(8) dword in the EDRAM, clears coverage bits for
+  // failing samples, and writes the new packed value for passing samples
+  // respecting the depth-write and stencil-write masks.
+
+  // System flag bit values (DxbcShaderTranslator kSysFlag_* shifts).
+  // kSysFlag_DepthFloat24 = 1 << 6 = 64
+  // kSysFlag_ROVDepthStencil = 1 << 14 = 16384
+  // kSysFlag_ROVDepthPassIfLess = 1 << 15 = 32768
+  // kSysFlag_ROVDepthPassIfEqual = 1 << 16 = 65536
+  // kSysFlag_ROVDepthPassIfGreater = 1 << 17 = 131072
+  // kSysFlag_ROVDepthWrite = 1 << 18 = 262144
+  // kSysFlag_ROVStencilTest = 1 << 19 = 524288
+
+  bool shader_writes_depth = current_shader().writes_depth();
+
+  // D3D standard 4x sample positions in 1/16th pixel units.
+  static const int kSamplePos[4][2] = {{-2, -6}, {6, -2}, {-6, 2}, {2, 6}};
+
+  // Per-sample EDRAM stride. Samples are stored at +0, +tile_width, +1,
+  // +tile_width+1 relative to sample 0, so the advance after sample i is
+  // +tile_width for even i and -tile_width + 2 - i for odd i.
+  uint32_t tile_width =
+      xenos::kEdramTileWidthSamples * draw_resolution_scale_x_;
+
+  EmitLine("// ROV late depth/stencil test");
+  EmitLine("if ((xe_flags & 16384u) != 0u) {");
+  Indent();
+
+  // Sample 0 EDRAM dword offset, advanced per sample.
+  EmitLine("uint xe_ds_offset = xe_rov_offset_depth;");
+
+  if (shader_writes_depth) {
+    // Single 24-bit depth for the whole pixel, converted once. oDepth is
+    // already saturated by the store, so no clamp here.
+    EmitLine("uint xe_ds_depth24 = XeROVDepthTo24Bit(output.xe_depth);");
+  } else {
+    // Polygon offset: biased center depth = z + slope * scale + offset, per
+    // faceness. Linear within the triangle, so the constant derivatives
+    // captured before any discard scale to each sample position. Not clamped
+    // yet - sample-position offsets are added first, then saturated.
+    EmitLine(
+        "float2 xe_ds_poly_offset = input.xe_is_front_face ? "
+        "xe_edram_poly_offset_front : xe_edram_poly_offset_back;");
+    EmitLine("float xe_ds_slope = max(abs(xe_rov_z_ddx), abs(xe_rov_z_ddy));");
+    EmitLine(
+        "float xe_ds_depth_center = input.xe_position.z + "
+        "xe_ds_slope * xe_ds_poly_offset.x + xe_ds_poly_offset.y;");
+  }
+  EmitLine("");
+
+  for (uint32_t i = 0; i < 4; ++i) {
+    std::string bit = std::to_string(1u << i) + "u";
+    EmitLine("// Sample " + std::to_string(i));
+    EmitLine("if ((xe_rov_coverage & " + bit + ") != 0u) {");
+    Indent();
+
+    // Per-sample 24-bit depth.
+    if (shader_writes_depth) {
+      EmitLine("uint xe_ds_sample_depth = xe_ds_depth24;");
+    } else {
+      auto sample_z_expr = [&](const int pos[2]) {
+        return std::string("xe_ds_depth_center + xe_rov_z_ddx * (") +
+               HlslFloatLiteral(pos[0] / 16.0f) + ") + xe_rov_z_ddy * (" +
+               HlslFloatLiteral(pos[1] / 16.0f) + ")";
+      };
+      // Per-sample depth at the D3D 4x sample positions. ForcedSampleCount 4 is
+      // used for both 2x and 4x MSAA, so sample 0 is always the host 4x
+      // top-left sample. Without MSAA sample 0 uses the pixel center.
+      EmitLine("float xe_ds_sample_z;");
+      if (i == 0) {
+        EmitLine("xe_ds_sample_z = " + sample_z_expr(kSamplePos[0]) + ";");
+        // With at least 2x MSAA take the sample position, otherwise the center.
+        EmitLine(
+            "xe_ds_sample_z = (xe_sample_count_log2.y != 0u) ? "
+            "saturate(xe_ds_sample_z) : saturate(xe_ds_depth_center);");
+      } else if (i == 1) {
+        // 4x: D3D sample 2; 2x as ForcedSampleCount 4: D3D sample 3.
+        EmitLine("if (xe_sample_count_log2.x != 0u) {");
+        Indent();
+        EmitLine("xe_ds_sample_z = saturate(" + sample_z_expr(kSamplePos[2]) +
+                 ");");
+        Outdent();
+        EmitLine("} else {");
+        Indent();
+        EmitLine("xe_ds_sample_z = saturate(" + sample_z_expr(kSamplePos[3]) +
+                 ");");
+        Outdent();
+        EmitLine("}");
+      } else {
+        // Xenia samples 2 and 3 -> D3D samples 1 and 3.
+        const int* sample_position =
+            kSamplePos[i ^ (((i & 1) ^ (i >> 1)) * 0b11)];
+        EmitLine("xe_ds_sample_z = saturate(" + sample_z_expr(sample_position) +
+                 ");");
+      }
+      EmitLine("uint xe_ds_sample_depth = XeROVDepthTo24Bit(xe_ds_sample_z);");
+    }
+
+    // Load the old packed depth/stencil.
+    EmitLine("uint xe_ds_old = xe_edram_rov[xe_ds_offset];");
+    EmitLine("uint xe_ds_old_depth = xe_ds_old >> 8u;");
+
+    // Depth test. Build the pass-condition bits from the signed depth
+    // difference, mask with the enabled depth function bits in xe_flags.
+    EmitLine(
+        "int xe_ds_depth_diff = int(xe_ds_sample_depth) - "
+        "int(xe_ds_old_depth);");
+    EmitLine(
+        "uint xe_ds_depth_func = (xe_ds_depth_diff < 0) ? 32768u : 131072u;");
+    EmitLine("if (xe_ds_depth_diff == 0) { xe_ds_depth_func = 65536u; }");
+    EmitLine("bool xe_ds_depth_passed = (xe_ds_depth_func & xe_flags) != 0u;");
+
+    // New depth after the depth test (write the new depth only if depth write
+    // is enabled and the test passed; otherwise keep the old depth).
+    EmitLine("uint xe_ds_new_depth = xe_ds_old_depth;");
+    EmitLine("if (xe_ds_depth_passed) {");
+    Indent();
+    EmitLine("if ((xe_flags & 262144u) != 0u) {");
+    Indent();
+    EmitLine("xe_ds_new_depth = xe_ds_sample_depth;");
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("xe_rov_coverage &= ~" + bit + ";");
+    Outdent();
+    EmitLine("}");
+
+    // Packed new depth/stencil with the stencil still unchanged.
+    EmitLine("uint xe_ds_new = (xe_ds_new_depth << 8u) | (xe_ds_old & 0xFFu);");
+
+    // Stencil test.
+    EmitLine("if ((xe_flags & 524288u) != 0u) {");
+    Indent();
+    // Per-face stencil state (index 0 = front, 1 = back).
+    EmitLine(
+        "uint4 xe_ds_stencil = input.xe_is_front_face ? xe_edram_stencil[0] : "
+        "xe_edram_stencil[1];");
+    EmitLine("uint xe_ds_stencil_ref = xe_ds_stencil.x & xe_ds_stencil.y;");
+    EmitLine("uint xe_ds_stencil_old = (xe_ds_old & 0xFFu) & xe_ds_stencil.y;");
+    EmitLine("uint xe_ds_func_ops = xe_ds_stencil.w;");
+    // Signed difference -> pass-condition compare-function bits, masked by the
+    // configured compare function in the low 3 bits of func_ops.
+    EmitLine(
+        "int xe_ds_stencil_diff = int(xe_ds_stencil_ref) - "
+        "int(xe_ds_stencil_old);");
+    EmitLine("uint xe_ds_stencil_func = (xe_ds_stencil_diff < 0) ? " +
+             std::to_string(uint32_t(xenos::CompareFunction::kLess)) + "u : " +
+             std::to_string(uint32_t(xenos::CompareFunction::kGreater)) + "u;");
+    EmitLine("if (xe_ds_stencil_diff == 0) { xe_ds_stencil_func = " +
+             std::to_string(uint32_t(xenos::CompareFunction::kEqual)) + "u; }");
+    EmitLine(
+        "bool xe_ds_stencil_passed = (xe_ds_stencil_func & xe_ds_func_ops) != "
+        "0u;");
+    // Choose the operation: pass+depthpass at offset 6, pass+depthfail at
+    // offset 9, fail at offset 3.
+    EmitLine("uint xe_ds_stencil_op;");
+    EmitLine("if (xe_ds_stencil_passed) {");
+    Indent();
+    EmitLine("uint xe_ds_op_shift = ((xe_rov_coverage & " + bit +
+             ") != 0u) ? 6u : 9u;");
+    EmitLine("xe_ds_stencil_op = (xe_ds_func_ops >> xe_ds_op_shift) & 7u;");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    EmitLine("xe_ds_stencil_op = (xe_ds_func_ops >> 3u) & 7u;");
+    EmitLine("xe_rov_coverage &= ~" + bit + ";");
+    Outdent();
+    EmitLine("}");
+    // Apply the stencil operation to the old stencil value. Operations on the
+    // full old dword match the DXBC - the upper bits are discarded by the 8-bit
+    // write mask below.
+    EmitLine("uint xe_ds_stencil_new;");
+    EmitLine("switch (xe_ds_stencil_op) {");
+    Indent();
+    EmitLine("case " + std::to_string(uint32_t(xenos::StencilOp::kZero)) +
+             "u: xe_ds_stencil_new = 0u; break;");
+    EmitLine("case " + std::to_string(uint32_t(xenos::StencilOp::kReplace)) +
+             "u: xe_ds_stencil_new = xe_ds_stencil.x; break;");
+    EmitLine(
+        "case " + std::to_string(uint32_t(xenos::StencilOp::kIncrementClamp)) +
+        "u: xe_ds_stencil_new = min((xe_ds_old & 0xFFu) + 1u, 255u); break;");
+    EmitLine("case " +
+             std::to_string(uint32_t(xenos::StencilOp::kDecrementClamp)) +
+             "u: xe_ds_stencil_new = uint(max(int(xe_ds_old & 0xFFu) - 1, 0)); "
+             "break;");
+    EmitLine("case " + std::to_string(uint32_t(xenos::StencilOp::kInvert)) +
+             "u: xe_ds_stencil_new = ~xe_ds_old; break;");
+    EmitLine("case " +
+             std::to_string(uint32_t(xenos::StencilOp::kIncrementWrap)) +
+             "u: xe_ds_stencil_new = xe_ds_old + 1u; break;");
+    EmitLine("case " +
+             std::to_string(uint32_t(xenos::StencilOp::kDecrementWrap)) +
+             "u: xe_ds_stencil_new = xe_ds_old - 1u; break;");
+    EmitLine("default: xe_ds_stencil_new = xe_ds_old; break;");
+    Outdent();
+    EmitLine("}");
+    // Merge the new stencil through the write mask, keeping the depth bits.
+    EmitLine("uint xe_ds_stencil_wmask = xe_ds_stencil.z;");
+    EmitLine(
+        "xe_ds_new = (xe_ds_new & ~xe_ds_stencil_wmask) | (xe_ds_stencil_new & "
+        "xe_ds_stencil_wmask);");
+    Outdent();
+    EmitLine("}");
+
+    // If the depth/stencil test failed for this sample, keep the old depth
+    // (only the new stencil may be written).
+    EmitLine("if ((xe_rov_coverage & " + bit + ") == 0u) {");
+    Indent();
+    EmitLine("xe_ds_new = (xe_ds_old & ~0xFFu) | (xe_ds_new & 0xFFu);");
+    Outdent();
+    EmitLine("}");
+
+    // Write back only if the packed value changed.
+    EmitLine("if (xe_ds_new != xe_ds_old) {");
+    Indent();
+    EmitLine("xe_edram_rov[xe_ds_offset] = xe_ds_new;");
+    Outdent();
+    EmitLine("}");
+
+    Outdent();
+    EmitLine("}");
+
+    // Advance to the next sample's EDRAM dword.
+    if (i < 3) {
+      int32_t advance =
+          (i & 1) ? -int32_t(tile_width) + 2 - int32_t(i) : int32_t(tile_width);
+      if (advance >= 0) {
+        EmitLine("xe_ds_offset += " + std::to_string(advance) + "u;");
+      } else {
+        EmitLine("xe_ds_offset -= " + std::to_string(-advance) + "u;");
+      }
+    }
+    EmitLine("");
+  }
+
+  // If nothing is covered after depth/stencil, discard to skip the color
+  // phases. Matches the DXBC behavior of ending the shader once coverage is 0.
+  EmitLine("if (xe_rov_coverage == 0u) { discard; }");
+
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+}
+
+void HlslShaderTranslator::EmitROVColorWrite() {
+  // Per-render-target color read-modify-write transcribed from the color
+  // portion of DxbcShaderTranslator::CompletePixelShader_WriteToROV. The color
+  // values in output.xe_color_N are already exponent-bias scaled.
+  uint32_t shader_writes_color_targets =
+      current_shader().writes_color_targets();
+  if (!shader_writes_color_targets) {
+    return;
+  }
+
+  // PSI color format flags (RenderTargetCache::kPSIColorFormatFlag_*).
+  // kColorRenderTargetFormatBits == 4, so the flags start at bit 4.
+  const uint32_t flag_64bpp = RenderTargetCache::kPSIColorFormatFlag_64bpp;
+  const uint32_t flag_fixed_color =
+      RenderTargetCache::kPSIColorFormatFlag_FixedPointColor;
+  const uint32_t flag_fixed_alpha =
+      RenderTargetCache::kPSIColorFormatFlag_FixedPointAlpha;
+
+  // EDRAM wraps every kEdramTileCount tiles of color samples.
+  uint32_t tile_width =
+      xenos::kEdramTileWidthSamples * draw_resolution_scale_x_;
+  uint32_t tile_height =
+      xenos::kEdramTileHeightSamples * draw_resolution_scale_y_;
+  uint32_t edram_size_32bpp_samples =
+      tile_width * tile_height * xenos::kEdramTileCount;
+
+  EmitLine("// ROV color write");
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (!(shader_writes_color_targets & (1u << i))) {
+      continue;
+    }
+    std::string si = std::to_string(i);
+    std::string color = "output.xe_color_" + si;
+    // Two 32-bit keep masks for this RT, packed two-per-RT across the uint4[2].
+    std::string keep_lo = "xe_edram_rt_keep_mask[" +
+                          std::to_string((2u * i) / 4u) + "][" +
+                          std::to_string((2u * i) % 4u) + "]";
+    std::string keep_hi = "xe_edram_rt_keep_mask[" +
+                          std::to_string((2u * i + 1u) / 4u) + "][" +
+                          std::to_string((2u * i + 1u) % 4u) + "]";
+    std::string flags = "xe_edram_rt_format_flags[" + si + "]";
+    std::string clamp = "xe_edram_rt_clamp[" + si + "]";
+    std::string blend = "xe_edram_rt_blend_factors_ops[" + si + "]";
+    std::string base = "xe_edram_rt_base_dwords_scaled[" + si + "]";
+
+    EmitLine("// Render target " + si);
+    EmitLine("{");
+    Indent();
+
+    // Skip the render target if color writing is fully disabled (both keep mask
+    // halves forced to 0xFFFFFFFF by an empty write mask), or if this pixel's
+    // execution path never wrote this target. Mirrors the DXBC rov_params
+    // 1 << (8 + i) "was written" guard - without it, a target skipped by flow
+    // control would be stomped with the zero-initialized output color.
+    EmitLine("uint xe_c_keep_lo = " + keep_lo + ";");
+    EmitLine("uint xe_c_keep_hi = " + keep_hi + ";");
+    EmitLine(
+        "if ((xe_c_keep_lo & xe_c_keep_hi) != 0xFFFFFFFFu && "
+        "(xe_color_written & " +
+        std::to_string(uint32_t(1) << i) + "u) != 0u) {");
+    Indent();
+
+    EmitLine("uint xe_c_flags = " + flags + ";");
+    EmitLine("uint xe_c_blend = " + blend + ";");
+    EmitLine("bool xe_c_64bpp = (xe_c_flags & " + std::to_string(flag_64bpp) +
+             "u) != 0u;");
+    EmitLine("bool xe_c_blend_enabled = xe_c_blend != 0x00010001u;");
+    // Whether the previous color must be loaded - blending or any kept bits.
+    EmitLine("bool xe_c_keep_any = (xe_c_keep_lo | xe_c_keep_hi) != 0u;");
+    EmitLine("bool xe_c_load = xe_c_blend_enabled || xe_c_keep_any;");
+    EmitLine("float4 xe_c_clamp = " + clamp + ";");
+    EmitLine("float4 xe_c_src = " + color + ";");
+
+    // Base sample address relative to the EDRAM origin, wrapped.
+    EmitLine(
+        "uint xe_c_offset = (xe_c_64bpp ? xe_rov_offset_64bpp : "
+        "xe_rov_offset_32bpp) + " +
+        base + ";");
+    EmitLine("xe_c_offset %= " + std::to_string(edram_size_32bpp_samples) +
+             "u;");
+
+    // Clamp / pack the source color once when not blending.
+    EmitLine("uint2 xe_c_packed_src = uint2(0u, 0u);");
+    EmitLine("if (!xe_c_blend_enabled) {");
+    Indent();
+    EmitLine("xe_c_src = max(xe_c_src, xe_c_clamp.xxxy);");
+    EmitLine("xe_c_src = min(xe_c_src, xe_c_clamp.zzzw);");
+    EmitLine("xe_c_packed_src = XeROVPackColor(xe_c_flags, xe_c_src);");
+    Outdent();
+    EmitLine("} else {");
+    Indent();
+    // Clamp the blending source color / alpha if fixed-point.
+    EmitLine("if ((xe_c_flags & " + std::to_string(flag_fixed_color) +
+             "u) != 0u) {");
+    Indent();
+    EmitLine("xe_c_src.rgb = clamp(xe_c_src.rgb, xe_c_clamp.x, xe_c_clamp.z);");
+    Outdent();
+    EmitLine("}");
+    EmitLine("if ((xe_c_flags & " + std::to_string(flag_fixed_alpha) +
+             "u) != 0u) {");
+    Indent();
+    EmitLine("xe_c_src.a = clamp(xe_c_src.a, xe_c_clamp.y, xe_c_clamp.w);");
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("}");
+
+    // Per-sample color raster operation.
+    EmitLine("uint xe_c_sample_offset = xe_c_offset;");
+    for (uint32_t j = 0; j < 4; ++j) {
+      std::string bit = std::to_string(1u << j) + "u";
+      EmitLine("// Sample " + std::to_string(j));
+      EmitLine("if ((xe_rov_coverage & " + bit + ") != 0u) {");
+      Indent();
+      EmitLine("uint2 xe_c_packed = xe_c_packed_src;");
+      // Read-modify-write only when blending or keeping previous bits.
+      EmitLine("if (xe_c_load) {");
+      Indent();
+      EmitLine("uint2 xe_c_old;");
+      EmitLine("xe_c_old.x = xe_edram_rov[xe_c_sample_offset];");
+      EmitLine("if (xe_c_64bpp) {");
+      Indent();
+      EmitLine("xe_c_old.y = xe_edram_rov[xe_c_sample_offset + 1u];");
+      Outdent();
+      EmitLine("} else {");
+      Indent();
+      EmitLine("xe_c_old.y = 0u;");
+      Outdent();
+      EmitLine("}");
+      // Blend against the unpacked destination color.
+      EmitLine("if (xe_c_blend_enabled) {");
+      Indent();
+      EmitLine("float4 xe_c_dst = XeROVUnpackColor(xe_c_flags, xe_c_old);");
+      EmitLine(
+          "float4 xe_c_blended = XeROVBlendColor(xe_c_src, xe_c_dst, "
+          "xe_c_blend, xe_edram_blend_constant);");
+      EmitLine("xe_c_blended = max(xe_c_blended, xe_c_clamp.xxxy);");
+      EmitLine("xe_c_blended = min(xe_c_blended, xe_c_clamp.zzzw);");
+      EmitLine("xe_c_packed = XeROVPackColor(xe_c_flags, xe_c_blended);");
+      Outdent();
+      EmitLine("}");
+      // Apply the keep mask: keep old bits, write inverted-keep new bits.
+      EmitLine(
+          "xe_c_packed.x = (xe_c_old.x & xe_c_keep_lo) | (xe_c_packed.x & "
+          "~xe_c_keep_lo);");
+      EmitLine(
+          "xe_c_packed.y = (xe_c_old.y & xe_c_keep_hi) | (xe_c_packed.y & "
+          "~xe_c_keep_hi);");
+      Outdent();
+      EmitLine("}");
+      // Write the 32bpp color, or both halves of the 64bpp color.
+      EmitLine("xe_edram_rov[xe_c_sample_offset] = xe_c_packed.x;");
+      EmitLine("if (xe_c_64bpp) {");
+      Indent();
+      EmitLine("xe_edram_rov[xe_c_sample_offset + 1u] = xe_c_packed.y;");
+      Outdent();
+      EmitLine("}");
+      Outdent();
+      EmitLine("}");
+      // Advance to the next sample. dwpp is 1 for 32bpp, 2 for 64bpp.
+      if (j < 3) {
+        if (j & 1) {
+          int32_t advance_32 = -int32_t(tile_width) + (2 - int32_t(j));
+          int32_t advance_64 = -int32_t(tile_width) + 2 * (2 - int32_t(j));
+          EmitLine("xe_c_sample_offset += xe_c_64bpp ? uint(" +
+                   std::to_string(advance_64) + ") : uint(" +
+                   std::to_string(advance_32) + ");");
+        } else {
+          EmitLine("xe_c_sample_offset += " + std::to_string(tile_width) +
+                   "u;");
+        }
+      }
+    }
+
+    Outdent();
+    EmitLine("}");
+    Outdent();
+    EmitLine("}");
+  }
+  EmitLine("");
 }
 
 void HlslShaderTranslator::StartTranslation() {
@@ -1774,6 +2974,21 @@ void HlslShaderTranslator::StartTranslation() {
     Indent();
   }
   // For shaders without labels, we emit code directly without the while/switch.
+}
+
+std::vector<uint8_t> HlslShaderTranslator::CreateDepthOnlyPixelShader() {
+  // Translate an empty pixel shader. Under ROV that emits only the output
+  // merger - the EDRAM depth/stencil test and ZPD count, with no color - which
+  // is exactly the shader needed for pixel-shader-less depth-only draws (the
+  // precompiled depth_only_ps is a no-op that skips the in-shader depth write).
+  Shader shader(xenos::ShaderType::kPixel, 0, nullptr, 0);
+  StringBuffer ucode_disasm_buffer;
+  shader.AnalyzeUcode(ucode_disasm_buffer);
+  Shader::Translation& translation = *shader.GetOrCreateTranslation(0);
+  if (!TranslateAnalyzedShader(translation)) {
+    return std::vector<uint8_t>();
+  }
+  return translation.translated_binary();
 }
 
 std::vector<uint8_t> HlslShaderTranslator::CompleteTranslation() {
@@ -2061,6 +3276,17 @@ std::string HlslShaderTranslator::GetWriteMaskString(uint32_t write_mask) {
     mask += "w";
   }
   return mask;
+}
+
+void HlslShaderTranslator::MarkColorWrittenIfRov(
+    const InstructionResult& result) {
+  if (!edram_rov_used_ ||
+      result.storage_target != InstructionStorageTarget::kColor ||
+      result.GetUsedWriteMask() == 0) {
+    return;
+  }
+  EmitLine("xe_color_written |= " +
+           std::to_string(uint32_t(1) << result.storage_index) + "u;");
 }
 
 // Emit an assignment with proper swizzle matching for write masks.

@@ -88,6 +88,12 @@ void HlslShaderTranslator::ProcessAluInstruction(
   // Vector constant components are handled inside ProcessVectorAluInstruction.
   StoreConstantComponents(instr.scalar_result);
 
+  // Record color targets written on this path for the ROV output merger. Inside
+  // the predicate block so a (p0) export only marks the targets it actually
+  // wrote.
+  MarkColorWrittenIfRov(instr.vector_and_constant_result);
+  MarkColorWrittenIfRov(instr.scalar_result);
+
   if (needs_predicate_close) {
     Outdent();
     EmitLine("}");

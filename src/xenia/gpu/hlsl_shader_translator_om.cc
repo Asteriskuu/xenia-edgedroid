@@ -151,7 +151,10 @@ void HlslShaderTranslator::EmitPixelShaderAlphaTest() {
   }
 
   EmitLine("// Alpha test");
-  EmitLine("{");
+  // Under ROV, only test when render target 0 was written on this execution
+  // path (output.xe_color_0 is otherwise zero), matching the DXBC rov_params
+  // 1 << 8 guard.
+  EmitLine(edram_rov_used_ ? "if ((xe_color_written & 1u) != 0u) {" : "{");
   Indent();
   EmitLine("uint xe_alpha_test_function = (xe_flags >> 7u) & 7u;");
   EmitLine("if (xe_alpha_test_function != 7u) {");
@@ -185,6 +188,13 @@ void HlslShaderTranslator::EmitPixelShaderAlphaTest() {
 
 void HlslShaderTranslator::EmitPixelShaderAlphaToCoverage() {
   if (!PixelShaderNeedsCoverageOutput()) {
+    return;
+  }
+
+  if (edram_rov_used_) {
+    // Under ROV there is no SV_Coverage output - alpha to coverage instead
+    // narrows the per-sample ROV coverage mask, applied by the output merger.
+    EmitROVAlphaToCoverage();
     return;
   }
 
@@ -248,6 +258,69 @@ void HlslShaderTranslator::EmitPixelShaderAlphaToCoverage() {
   EmitLine("}");
   EmitLine("output.xe_coverage = xe_atoc_coverage;");
   EmitLine("if (xe_atoc_coverage == 0u) { discard; }");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+}
+
+void HlslShaderTranslator::EmitROVAlphaToCoverage() {
+  // Guest sample order, mirroring xe_rov_coverage and
+  // DxbcShaderTranslator::CompletePixelShader_AlphaToMask. Alpha is read here
+  // before the exponent bias, matching the DXBC. Default all samples passing so
+  // the merger AND is a no-op when alpha to coverage is disabled.
+  EmitLine("// Alpha to coverage (ROV)");
+  EmitLine("uint xe_rov_atoc_coverage = 0xFu;");
+  // Only narrow when render target 0 was written on this execution path,
+  // matching the DXBC rov_params 1 << 8 guard. Otherwise the mask stays full.
+  EmitLine("if (xe_alpha_to_mask != 0u && (xe_color_written & 1u) != 0u) {");
+  Indent();
+  EmitLine("uint2 xe_atoc_pixel = uint2(input.xe_position.xy);");
+  EmitLine(
+      "uint xe_atoc_offset_index = ((xe_atoc_pixel.x & 1u) << 1u) | "
+      "(xe_atoc_pixel.y & 1u);");
+  EmitLine(
+      "float xe_atoc_offset = float((xe_alpha_to_mask >> "
+      "(xe_atoc_offset_index << 1u)) & 3u);");
+  EmitLine("float xe_atoc_alpha = output.xe_color_0.a;");
+  EmitLine("xe_rov_atoc_coverage = 0u;");
+  EmitLine("if (xe_sample_count_log2.y != 0u) {");
+  Indent();
+  EmitLine("if (xe_sample_count_log2.x != 0u) {");
+  Indent();
+  // 4x, guest samples 0..3.
+  EmitLine(
+      "xe_rov_atoc_coverage |= (xe_atoc_alpha >= "
+      "(0.75f - xe_atoc_offset * (1.0f / 16.0f))) ? 1u : 0u;");
+  EmitLine(
+      "xe_rov_atoc_coverage |= (xe_atoc_alpha >= "
+      "(0.25f - xe_atoc_offset * (1.0f / 16.0f))) ? 2u : 0u;");
+  EmitLine(
+      "xe_rov_atoc_coverage |= (xe_atoc_alpha >= "
+      "(0.5f - xe_atoc_offset * (1.0f / 16.0f))) ? 4u : 0u;");
+  EmitLine(
+      "xe_rov_atoc_coverage |= (xe_atoc_alpha >= "
+      "(1.0f - xe_atoc_offset * (1.0f / 16.0f))) ? 8u : 0u;");
+  Outdent();
+  EmitLine("} else {");
+  Indent();
+  // 2x, guest samples 0 and 1.
+  EmitLine(
+      "xe_rov_atoc_coverage |= (xe_atoc_alpha >= "
+      "(0.5f - xe_atoc_offset * (1.0f / 8.0f))) ? 1u : 0u;");
+  EmitLine(
+      "xe_rov_atoc_coverage |= (xe_atoc_alpha >= "
+      "(1.0f - xe_atoc_offset * (1.0f / 8.0f))) ? 2u : 0u;");
+  Outdent();
+  EmitLine("}");
+  Outdent();
+  EmitLine("} else {");
+  Indent();
+  // 1x, guest sample 0.
+  EmitLine(
+      "xe_rov_atoc_coverage = (xe_atoc_alpha >= "
+      "(1.0f - xe_atoc_offset * (1.0f / 4.0f))) ? 1u : 0u;");
+  Outdent();
+  EmitLine("}");
   Outdent();
   EmitLine("}");
   EmitLine("");

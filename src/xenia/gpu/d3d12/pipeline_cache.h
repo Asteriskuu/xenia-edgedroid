@@ -355,6 +355,11 @@ class PipelineCache {
   std::unique_ptr<HlslShaderTranslator> hlsl_shader_translator_;
   bool dxil_shaders_enabled_ = false;
 
+  // Real ROV depth-only pixel shader for pixel-shader-less draws under ROV,
+  // generated once at init. Empty if not ROV or generation failed (falls back
+  // to the no-op depth_only_ps).
+  std::vector<uint8_t> depth_only_rov_pixel_shader_;
+
   // Ucode hash -> shader.
   std::unordered_map<uint64_t, D3D12Shader*, xe::hash::IdentityHasher<uint64_t>>
       shaders_;
