@@ -266,6 +266,11 @@ class KernelState {
   // This DOES NOT RETURN if called from a guest thread!
   void TerminateTitle();
 
+  // Handles a game-requested exit to the dashboard: hands off to the host UI
+  // when it registered a handler, otherwise terminates the title.
+  // This DOES NOT RETURN.
+  void ExitToDashboard();
+
   // Gracefully stops the dispatch thread. Call before force-terminating
   // threads to avoid corrupting the CV it's blocked on.
   void ShutdownDispatchThread();
