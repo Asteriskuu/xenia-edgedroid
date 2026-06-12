@@ -84,6 +84,9 @@ bool DxcCompiler::Compile(const std::string& hlsl_source,
       target_wide.c_str(),
       L"-Od",  // Disable optimizations for debugging
       L"-Zi",  // Enable debug info
+      // Flush float32 denormals.
+      L"-denorm",
+      L"ftz",
       DXC_ARG_WARNINGS_ARE_ERRORS,
   };
 
