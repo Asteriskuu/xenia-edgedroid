@@ -32,15 +32,11 @@ namespace xe {
 namespace gpu {
 
 void HlslShaderTranslator::EmitMemExportHelpers() {
-  // Xbox 360 extended-range float32 -> float16 (exponent 31 is a valid large
-  // value, not Inf/NaN). Mirrors DxbcShaderTranslator's f32_to_f16 path.
+  // XePackFloat16Extended (emitted with the general helpers) handles the Xbox
+  // 360 extended-range float16 encoding.
   Emit(
       R"(uint XeMemExportF16(float v) {
-  uint h = f32tof16(v);
-  if ((h & 0x7C00u) == 0x7C00u) {
-    h = f32tof16(clamp(v, -131008.0, 131008.0) * 0.5) + 0x0400u;
-  }
-  return h & 0xFFFFu;
+  return XePackFloat16Extended(v);
 }
 
 uint XeMemExportPack(float4 v, uint4 widths, bool num_signed, bool num_integer) {

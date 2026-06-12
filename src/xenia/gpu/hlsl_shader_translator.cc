@@ -842,6 +842,40 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   EmitLine("}");
   EmitLine("");
 
+  // Pack/unpack Xbox 360 extended-range float16, where exponent 31 is a large
+  // finite value (up to +-131008), not Inf/NaN.
+  EmitLine("uint XePackFloat16Extended(float v) {");
+  Indent();
+  // The Xbox 360 float16 has no NaN, map it to 0.
+  EmitLine("v = isnan(v) ? 0.0 : v;");
+  EmitLine("uint h = f32tof16(v);");
+  EmitLine("if ((h & 0x7C00u) == 0x7C00u) {");
+  Indent();
+  EmitLine("h = f32tof16(clamp(v, -131008.0, 131008.0) * 0.5) + 0x0400u;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("return h & 0xFFFFu;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
+  EmitLine("float2 XeUnpackFloat16x2Extended(uint packed) {");
+  Indent();
+  EmitLine("uint lo = packed & 0xFFFFu;");
+  EmitLine("uint hi = packed >> 16u;");
+  EmitLine("float2 s = float2(f16tof32(lo), f16tof32(hi));");
+  // Exponent decremented per lane; lo/hi are separate, so no cross-lane borrow.
+  EmitLine(
+      "float2 e = float2(f16tof32(lo - 0x0400u), f16tof32(hi - 0x0400u)) * "
+      "2.0;");
+  EmitLine("float2 r;");
+  EmitLine("r.x = ((lo & 0x7C00u) == 0x7C00u) ? e.x : s.x;");
+  EmitLine("r.y = ((hi & 0x7C00u) == 0x7C00u) ? e.y : s.y;");
+  EmitLine("return r;");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
   EmitLine("int XeSignExtend(uint value, uint bits) {");
   Indent();
   EmitLine("uint mask = (1u << bits) - 1u;");
@@ -1272,16 +1306,13 @@ void HlslShaderTranslator::EmitHelperFunctions() {
     // k_16_16_FLOAT and k_16_16_16_16_FLOAT (64bpp).
     EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_FLOAT));
     Indent();
-    EmitLine(
-        "color.rg = float2(f16tof32(packed.x & 0xFFFFu), "
-        "f16tof32(packed.x >> 16u));");
+    EmitLine("color.rg = XeUnpackFloat16x2Extended(packed.x);");
     EmitLine("break;");
     Outdent();
     EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT));
     Indent();
-    EmitLine(
-        "color = float4(f16tof32(packed.x & 0xFFFFu), f16tof32(packed.x >> "
-        "16u), f16tof32(packed.y & 0xFFFFu), f16tof32(packed.y >> 16u));");
+    EmitLine("color.rg = XeUnpackFloat16x2Extended(packed.x);");
+    EmitLine("color.ba = XeUnpackFloat16x2Extended(packed.y);");
     EmitLine("break;");
     Outdent();
     // k_32_FLOAT and k_32_32_FLOAT.
@@ -1374,13 +1405,19 @@ void HlslShaderTranslator::EmitHelperFunctions() {
     // k_16_16_FLOAT and k_16_16_16_16_FLOAT (64bpp).
     EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_FLOAT));
     Indent();
-    EmitLine("packed.x = f32tof16(color.r) | (f32tof16(color.g) << 16u);");
+    EmitLine(
+        "packed.x = XePackFloat16Extended(color.r) | "
+        "(XePackFloat16Extended(color.g) << 16u);");
     EmitLine("break;");
     Outdent();
     EmitLine(fmt_case(xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT));
     Indent();
-    EmitLine("packed.x = f32tof16(color.r) | (f32tof16(color.g) << 16u);");
-    EmitLine("packed.y = f32tof16(color.b) | (f32tof16(color.a) << 16u);");
+    EmitLine(
+        "packed.x = XePackFloat16Extended(color.r) | "
+        "(XePackFloat16Extended(color.g) << 16u);");
+    EmitLine(
+        "packed.y = XePackFloat16Extended(color.b) | "
+        "(XePackFloat16Extended(color.a) << 16u);");
     EmitLine("break;");
     Outdent();
     // k_32_FLOAT and k_32_32_FLOAT.
