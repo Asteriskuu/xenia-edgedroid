@@ -1,6 +1,6 @@
 // Build-time shader compiler for Xenia's built-in shaders.
 //
-// Usage: xenia-shader-cc [--msl | --dxbc | --slang-dxil] [--depfile <path>]
+// Usage: xenia-shader-cc [--msl | --slang-dxil] [--depfile <path>]
 //                       <input> <output.h>
 //
 // Default: GLSL/XeSL -> SPIR-V, linked in-process via glslang and
@@ -11,10 +11,6 @@
 //
 // --msl (Apple only): .xesl -> .metallib via `xcrun metal -x metal -D
 // SHADING_LANGUAGE_MSL_XE=1`, emitted as `const uint8_t <id>_metallib[]`.
-//
-// --dxbc: HLSL/XeSL -> DXBC via fxc.exe with /Fh writing the header
-// directly (SHADING_LANGUAGE_HLSL_XE=1). FXC_PATH env overrides the
-// auto-detected Windows Kits path; wine is used on non-Windows hosts.
 //
 // --slang-dxil: .slang -> DXIL via a hardcoded local slangc.exe, emitted as
 // `const uint8_t <id>[]`. Phase 1 of the Slang migration; the path will
@@ -52,8 +48,6 @@
 #include "spirv-tools/optimizer.hpp"
 
 #if defined(_WIN32)
-#include <fcntl.h>
-#include <io.h>
 #include <process.h>
 #else
 #include <spawn.h>
@@ -194,7 +188,7 @@ bool WriteSpirvHeader(const std::filesystem::path& path,
 }
 
 #if defined(_WIN32)
-// Quote an argument for the MSVCRT command-line parser, which is what fxc.exe
+// Quote an argument for the MSVCRT command-line parser, which is what slangc
 // (and most MSVC-built tools) use to re-split GetCommandLineW() back into
 // argv. _spawnvp joins argv with literal spaces and no quoting, so any arg
 // containing whitespace -- e.g. "C:\Program Files (x86)\..." -- must be
@@ -227,8 +221,7 @@ std::string QuoteForSpawn(const std::string& arg) {
 }
 #endif
 
-int RunCommand(const std::vector<std::string>& args,
-               bool silent_stdout = false) {
+int RunCommand(const std::vector<std::string>& args) {
   if (args.empty()) return -1;
 #if defined(_WIN32)
   std::vector<std::string> quoted;
@@ -238,22 +231,7 @@ int RunCommand(const std::vector<std::string>& args,
   argv.reserve(quoted.size() + 1);
   for (auto& a : quoted) argv.push_back(a.data());
   argv.push_back(nullptr);
-  int saved_stdout = -1;
-  if (silent_stdout) {
-    std::fflush(stdout);
-    saved_stdout = _dup(_fileno(stdout));
-    int devnull = _open("nul", _O_WRONLY);
-    if (devnull >= 0) {
-      _dup2(devnull, _fileno(stdout));
-      _close(devnull);
-    }
-  }
   intptr_t rc = _spawnvp(_P_WAIT, args[0].c_str(), argv.data());
-  if (saved_stdout >= 0) {
-    std::fflush(stdout);
-    _dup2(saved_stdout, _fileno(stdout));
-    _close(saved_stdout);
-  }
   if (rc < 0) {
     std::fprintf(stderr, "_spawnvp(%s) failed: %s\n", args[0].c_str(),
                  std::strerror(errno));
@@ -366,37 +344,10 @@ const char* SlangStageName(const std::string& stage_key) {
   return nullptr;
 }
 
-// Locates fxc.exe (or dxc.exe) for --dxbc mode: FXC_PATH env var takes
-// priority; otherwise on Windows we walk Windows Kits\10\bin\*\x64\fxc.exe
-// and pick the highest-versioned one. Returns empty on miss.
-std::string FindFxc() {
-  const char* env = std::getenv("FXC_PATH");
-  if (env && *env) return env;
-#ifdef _WIN32
-  const char* pf86 = std::getenv("ProgramFiles(x86)");
-  if (!pf86) return {};
-  std::filesystem::path kits =
-      std::filesystem::path(pf86) / "Windows Kits" / "10" / "bin";
-  std::error_code ec;
-  std::string best;
-  for (auto& entry : std::filesystem::directory_iterator(kits, ec)) {
-    if (!entry.is_directory(ec)) continue;
-    std::filesystem::path candidate = entry.path() / "x64" / "fxc.exe";
-    if (std::filesystem::exists(candidate, ec) && candidate.string() > best) {
-      best = candidate.string();
-    }
-  }
-  return best;
-#else
-  return {};
-#endif
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
   bool msl_mode = false;
-  bool dxbc_mode = false;
   bool slang_dxil_mode = false;
   bool slang_spirv_mode = false;
   bool slang_msl_mode = false;
@@ -410,9 +361,6 @@ int main(int argc, char** argv) {
       return 1;
 #endif
       msl_mode = true;
-      ++arg_idx;
-    } else if (std::strcmp(argv[arg_idx], "--dxbc") == 0) {
-      dxbc_mode = true;
       ++arg_idx;
     } else if (std::strcmp(argv[arg_idx], "--slang-dxil") == 0) {
       slang_dxil_mode = true;
@@ -443,13 +391,13 @@ int main(int argc, char** argv) {
   }
   if (argc - arg_idx != 2) {
     std::fprintf(stderr,
-                 "Usage: %s [--msl | --dxbc | --slang-dxil | --slang-spirv | "
+                 "Usage: %s [--msl | --slang-dxil | --slang-spirv | "
                  "--slang-msl] [--depfile <path>] <input> <output>\n",
                  argv[0]);
     return 1;
   }
-  if (int(msl_mode) + int(dxbc_mode) + int(slang_dxil_mode) +
-          int(slang_spirv_mode) + int(slang_msl_mode) >
+  if (int(msl_mode) + int(slang_dxil_mode) + int(slang_spirv_mode) +
+          int(slang_msl_mode) >
       1) {
     std::fprintf(stderr, "compile mode flags are mutually exclusive\n");
     return 1;
@@ -807,163 +755,6 @@ int main(int argc, char** argv) {
                  "XE_SHADER_CC_METAL)\n");
     return 1;
 #endif
-  }
-
-  if (dxbc_mode) {
-    std::string fxc = FindFxc();
-    if (fxc.empty()) {
-      std::fprintf(stderr,
-                   "ERROR: could not find fxc! Set FXC_PATH or install "
-                   "Windows SDK.\n");
-      return 1;
-    }
-    std::string fxc_name =
-        std::filesystem::path(fxc).filename().string();
-    std::transform(fxc_name.begin(), fxc_name.end(), fxc_name.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    const bool is_dxc = fxc_name.find("dxc") != std::string::npos;
-
-    std::error_code ec;
-    std::filesystem::create_directories(output_path.parent_path(), ec);
-
-    std::vector<std::string> cmd;
-#ifndef _WIN32
-    cmd.push_back("wine");
-#endif
-    cmd.push_back(fxc);
-
-    std::string src_dir = input_path.parent_path().string();
-    std::string target = stage_key + (is_dxc ? "_6_0" : "_5_1");
-    if (is_dxc) {
-      // DXC supports SM 6.0+ only.
-      cmd.insert(cmd.end(), {
-                                "-T", target,
-                                "-HV", "2017",
-                                "-D", "SHADING_LANGUAGE_HLSL_XE=1",
-                                "-I", src_dir,
-                                "-Fh", output_path.string(),
-                                "-Vn", identifier,
-                                "-nologo",
-                                input_path.string(),
-                            });
-    } else {
-      cmd.insert(cmd.end(), {
-                                "/D", "SHADING_LANGUAGE_HLSL_XE=1",
-                                "/I", src_dir,
-                                "/Fh", output_path.string(),
-                                "/T", target,
-                                "/Vn", identifier,
-                                "/O3",
-                                "/Qstrip_reflect",
-                                "/Qstrip_debug",
-                                "/Qstrip_priv",
-                                "/Gfp",
-                                "/nologo",
-                                input_path.string(),
-                            });
-    }
-    if (RunCommand(cmd, /*silent_stdout=*/true) != 0) {
-      std::fprintf(stderr, "fxc failed for %s\n",
-                   input_path.string().c_str());
-      return 1;
-    }
-
-    // Depfile: FXC has no native depfile emission, so re-invoke with /P
-    // (preprocess-only) to a temp file, then scrape `#line N "path"` markers.
-    // DXC supports /P the same way.
-    if (!depfile_path.empty()) {
-      auto tmp_dir = std::filesystem::temp_directory_path();
-      auto tag = identifier + "_" +
-                 std::to_string(
-#ifdef _WIN32
-                     static_cast<int>(_getpid())
-#else
-                     static_cast<int>(::getpid())
-#endif
-                 );
-      auto pp_path = tmp_dir / (tag + ".hlsl");
-
-      std::vector<std::string> pp_cmd;
-#ifndef _WIN32
-      pp_cmd.push_back("wine");
-#endif
-      pp_cmd.push_back(fxc);
-      if (is_dxc) {
-        pp_cmd.insert(pp_cmd.end(), {
-                                        "-P",
-                                        pp_path.string(),
-                                        "-D",
-                                        "SHADING_LANGUAGE_HLSL_XE=1",
-                                        "-I",
-                                        src_dir,
-                                        "-nologo",
-                                        input_path.string(),
-                                    });
-      } else {
-        pp_cmd.insert(pp_cmd.end(), {
-                                        "/P",
-                                        pp_path.string(),
-                                        "/D",
-                                        "SHADING_LANGUAGE_HLSL_XE=1",
-                                        "/I",
-                                        src_dir,
-                                        "/nologo",
-                                        input_path.string(),
-                                    });
-      }
-      if (RunCommand(pp_cmd, /*silent_stdout=*/true) != 0) {
-        std::fprintf(stderr,
-                     "fxc /P failed for %s (depfile won't be written)\n",
-                     input_path.string().c_str());
-        std::filesystem::remove(pp_path, ec);
-        return 1;
-      }
-      std::string pp;
-      if (!ReadFile(pp_path, &pp)) {
-        std::filesystem::remove(pp_path, ec);
-        return 1;
-      }
-      std::filesystem::remove(pp_path, ec);
-      // Extract unique paths from `#line N "path"` markers.
-      std::vector<std::string> deps;
-      std::set<std::string> seen;
-      size_t pos = 0;
-      while ((pos = pp.find("#line ", pos)) != std::string::npos) {
-        // FXC emits two forms: `#line N "path"` (file change) and `#line N`
-        // (line reset, no filename). Constrain the path search to the current
-        // line so a no-filename directive doesn't grab a `"..."` literal from
-        // later shader code (e.g. `[domain("quad")]`).
-        size_t eol = pp.find('\n', pos);
-        size_t quote = pp.find('"', pos);
-        if (quote == std::string::npos ||
-            (eol != std::string::npos && quote > eol)) {
-          pos += 6;
-          continue;
-        }
-        size_t end = pp.find('"', quote + 1);
-        if (end == std::string::npos ||
-            (eol != std::string::npos && end > eol)) {
-          pos += 6;
-          continue;
-        }
-        std::string path = pp.substr(quote + 1, end - quote - 1);
-        // FXC emits paths with escaped backslashes on Windows — unescape.
-        std::string unescaped;
-        unescaped.reserve(path.size());
-        for (size_t i = 0; i < path.size(); ++i) {
-          if (path[i] == '\\' && i + 1 < path.size() && path[i + 1] == '\\') {
-            unescaped.push_back('\\');
-            ++i;
-          } else {
-            unescaped.push_back(path[i]);
-          }
-        }
-        if (seen.insert(unescaped).second) deps.push_back(unescaped);
-        pos = end + 1;
-      }
-      if (!WriteDepfile(depfile_path, output_path, deps)) return 1;
-    }
-    return 0;
   }
 
   std::string source;

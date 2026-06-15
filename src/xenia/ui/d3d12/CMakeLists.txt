@@ -1,6 +1,5 @@
 add_library(xenia-ui-d3d12 STATIC)
 xe_platform_sources(xenia-ui-d3d12 ${CMAKE_CURRENT_SOURCE_DIR})
-xe_shader_rules_dxbc(xenia-ui-d3d12 ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
 xe_shader_rules_slang(xenia-ui-d3d12 ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
                       TARGET dxil)
 target_link_libraries(xenia-ui-d3d12 PUBLIC xenia-base xenia-ui)

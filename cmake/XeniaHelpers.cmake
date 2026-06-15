@@ -259,59 +259,9 @@ function(xe_shader_rules_spirv target shader_dir)
   target_sources(${target} PRIVATE ${_sources})
 endfunction()
 
-# xe_shader_rules_dxbc(target shader_dir)
-#
-# DXBC counterpart to xe_shader_rules_spirv: invokes xenia-shader-cc --dxbc
-# (which shells out to fxc.exe) on each stage-suffixed *.xesl / *.hlsl
-# under shader_dir, emitting to the build tree under
-# ${PROJECT_BINARY_DIR}/generated/<src-relative>/bytecode/d3d12_5_1/.
-function(xe_shader_rules_dxbc target shader_dir)
-  get_filename_component(shader_dir "${shader_dir}" ABSOLUTE)
-  file(GLOB _sources
-    "${shader_dir}/*.xesl" "${shader_dir}/*.hlsl"
-    "${shader_dir}/*.xesli" "${shader_dir}/*.hlsli")
-  file(RELATIVE_PATH _rel_dir "${PROJECT_SOURCE_DIR}/src" "${shader_dir}")
-  set(_generated_root "${PROJECT_BINARY_DIR}/generated")
-  set(_bytecode_dir "${_generated_root}/${_rel_dir}/bytecode/d3d12_5_1")
-  set(_valid_stages vs hs ds gs ps cs)
-  set(_outputs)
-  file(MAKE_DIRECTORY "${_bytecode_dir}")
-  foreach(src ${_sources})
-    get_filename_component(_name ${src} NAME)
-    string(REGEX REPLACE "\\.[^.]+$" "" _basename "${_name}")
-    string(REPLACE "." "_" _id "${_basename}")
-    string(LENGTH "${_id}" _len)
-    if(_len LESS 3)
-      continue()
-    endif()
-    math(EXPR _s "${_len} - 2")
-    string(SUBSTRING "${_id}" ${_s} 2 _stage)
-    if(NOT _stage IN_LIST _valid_stages)
-      continue()
-    endif()
-    set(_out "${_bytecode_dir}/${_id}.h")
-    set(_dep "${_out}.d")
-    list(APPEND _outputs "${_out}")
-    add_custom_command(
-      OUTPUT "${_out}"
-      COMMAND $<TARGET_FILE:xenia-shader-cc> --dxbc --depfile "${_dep}"
-              "${src}" "${_out}"
-      DEPENDS "${src}" xenia-shader-cc
-      DEPFILE "${_dep}"
-      COMMENT "DXBC: ${_name}"
-      VERBATIM
-    )
-  endforeach()
-  add_custom_target(${target}-dxbc-shaders DEPENDS ${_outputs})
-  add_dependencies(${target} ${target}-dxbc-shaders)
-  target_include_directories(${target} BEFORE PRIVATE "${_generated_root}")
-  set_source_files_properties(${_sources} PROPERTIES HEADER_FILE_ONLY TRUE)
-  target_sources(${target} PRIVATE ${_sources})
-endfunction()
-
 # xe_shader_rules_metal(target shader_dir)
 #
-# Metal counterpart to xe_shader_rules_spirv / xe_shader_rules_dxbc. Runs
+# Metal counterpart to xe_shader_rules_spirv. Runs
 # xenia-shader-cc --msl on each cs/ps/vs-stage *.xesl file under shader_dir,
 # emitting to the build tree under ${PROJECT_BINARY_DIR}/generated/<src-
 # relative>/bytecode/metal/ with the metallib bytes embedded as
