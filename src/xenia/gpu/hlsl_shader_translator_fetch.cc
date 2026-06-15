@@ -524,8 +524,7 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
   EmitLine("float4 xe_tf_result = float4(0.0, 0.0, 0.0, 0.0);");
   EmitLine("float3 xe_tf_weight_coord = float3(0.0, 0.0, 0.0);");
   if (instr.opcode == FetchOpcode::kGetTextureComputedLod &&
-      (!is_pixel_shader() || !instr.attributes.use_computed_lod ||
-       instr.attributes.use_register_lod ||
+      (!TextureFetchUsesComputedLod(instr) ||
        instr.attributes.use_register_gradients)) {
     XELOGW(
         "HLSL: getCompTexLOD used with explicit LOD/gradients or outside "
@@ -828,20 +827,18 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
     }
   } else {
     const bool texture_fetch = instr.opcode == FetchOpcode::kTextureFetch;
+    const bool use_computed_lod = TextureFetchUsesComputedLod(instr);
     const bool use_sample_grad =
-        instr.attributes.use_register_gradients && is_pixel_shader() &&
+        use_computed_lod && instr.attributes.use_register_gradients &&
         instr.dimension != xenos::FetchOpDimension::k1D;
-    const bool use_sample_level =
-        !use_sample_grad &&
-        (instr.attributes.use_register_lod || is_vertex_shader() ||
-         !instr.attributes.use_computed_lod);
+    const bool use_sample_level = !use_computed_lod;
     const xenos::TextureFilter sampler_mip_filter =
         instr.opcode == FetchOpcode::kGetTextureComputedLod
             ? xenos::TextureFilter::kLinear
             : instr.attributes.mip_filter;
     const xenos::AnisoFilter sampler_aniso_filter =
-        use_sample_level ? xenos::AnisoFilter::kDisabled
-                         : instr.attributes.aniso_filter;
+        use_computed_lod ? instr.attributes.aniso_filter
+                         : xenos::AnisoFilter::kDisabled;
 
     uint32_t texture_binding_unsigned = UINT32_MAX;
     uint32_t texture_binding_signed = UINT32_MAX;
@@ -955,8 +952,7 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
             const std::string& lod_coord, const std::string& grad_h,
             const std::string& grad_v) {
           if (instr.opcode == FetchOpcode::kGetTextureComputedLod) {
-            if (is_pixel_shader() && !instr.attributes.use_register_lod &&
-                !instr.attributes.use_register_gradients) {
+            if (is_pixel_shader() && !instr.attributes.use_register_gradients) {
               EmitLine("float xe_tf_computed_lod = " + texture_name +
                        ".CalculateLevelOfDetailUnclamped(" + sampler_name +
                        ", " + lod_coord + ");");
