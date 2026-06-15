@@ -2682,6 +2682,13 @@ void SpirvShaderTranslator::FSI_DepthStencilTest(
 
 spv::Id SpirvShaderTranslator::PackFloat16x2ExtendedRange(
     spv::Id float2_value) {
+  // The Xbox 360 float16 has no NaN, map it to 0. Also keeps the overflow
+  // detection below from misreading a NaN's exponent 31 as a finite extended
+  // value, and FClamp's NaN result is undefined.
+  float2_value = builder_->createTriOp(
+      spv::OpSelect, type_float2_,
+      builder_->createUnaryOp(spv::OpIsNan, type_bool2_, float2_value),
+      const_float2_0_, float2_value);
   // Standard conversion handles +-0..65504; larger magnitudes overflow to Inf
   // (exponent field 0x7C00). Re-encode the overflowed lanes using the extended
   // range: halve into the standard range, convert (exponent <= 30), then bump
@@ -3094,18 +3101,14 @@ std::array<spv::Id, 2> SpirvShaderTranslator::FSI_ClampAndPackColor(
   std::array<spv::Id, 2> packed_16_float;
   {
     builder_->setBuildPoint(&block_format_16_float);
-    // The Xbox 360 float16 has no NaN, map it to 0.
-    spv::Id color_no_nan = builder_->createTriOp(
-        spv::OpSelect, type_float4_,
-        builder_->createUnaryOp(spv::OpIsNan, type_bool4_, color_float4),
-        const_float4_0_, color_float4);
+    // NaN is flushed to 0 inside PackFloat16x2ExtendedRange.
     for (uint32_t i = 0; i < 2; ++i) {
       uint_vector_temp_.clear();
       uint_vector_temp_.push_back(2 * i);
       uint_vector_temp_.push_back(2 * i + 1);
       packed_16_float[i] =
           PackFloat16x2ExtendedRange(builder_->createRvalueSwizzle(
-              spv::NoPrecision, type_float2_, color_no_nan, uint_vector_temp_));
+              spv::NoPrecision, type_float2_, color_float4, uint_vector_temp_));
     }
     builder_->createBranch(&block_format_merge);
   }
