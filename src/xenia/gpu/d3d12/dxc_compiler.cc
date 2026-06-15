@@ -9,8 +9,15 @@
 
 #include "xenia/gpu/d3d12/dxc_compiler.h"
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/ui/d3d12/d3d12_provider.h"
+
+DEFINE_bool(dxil_debug, false,
+            "Compile guest DXIL shaders unoptimized and with debug info for "
+            "source-level shader debugging (e.g. in RenderDoc). When off "
+            "(default), shaders are optimized.",
+            "D3D12");
 
 namespace xe {
 namespace gpu {
@@ -75,20 +82,25 @@ bool DxcCompiler::Compile(const std::string& hlsl_source,
   std::wstring target_wide(target.begin(), target.end());
 
   // Set up compilation arguments.
-  // Disable optimizations and keep debug info for better debugging in
-  // RenderDoc.
   std::vector<LPCWSTR> arguments = {
       L"-E",
       entry_point_wide.c_str(),
       L"-T",
       target_wide.c_str(),
-      L"-Od",  // Disable optimizations for debugging
-      L"-Zi",  // Enable debug info
       // Flush float32 denormals.
       L"-denorm",
       L"ftz",
       DXC_ARG_WARNINGS_ARE_ERRORS,
   };
+  if (cvars::dxil_debug) {
+    // Unoptimized with debug info for source-level debugging in RenderDoc.
+    arguments.push_back(L"-Od");
+    arguments.push_back(L"-Zi");
+  } else {
+    // Optimized (DXC defaults to -O3). Strip reflection metadata to shrink the
+    // DXIL blob. The runtime uses translator-gathered bindings, not reflection.
+    arguments.push_back(L"-Qstrip_reflect");
+  }
 
   // Create source buffer.
   DxcBuffer source_buffer;
