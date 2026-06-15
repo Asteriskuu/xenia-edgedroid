@@ -338,9 +338,6 @@ class PipelineCache {
 
   // Temporary storage for AnalyzeUcode calls on the processor thread.
   StringBuffer ucode_disasm_buffer_;
-  // Reusable shader translator for the processor thread.
-  // Background creation threads have their own translators to avoid contention.
-  std::unique_ptr<DxbcShaderTranslator> shader_translator_;
 
   // Command processor thread DXIL conversion/disassembly interfaces, if DXIL
   // disassembly is enabled.
@@ -353,7 +350,6 @@ class PipelineCache {
   // interpolation.
   std::unique_ptr<DxcCompiler> dxc_shader_compiler_;
   std::unique_ptr<HlslShaderTranslator> hlsl_shader_translator_;
-  bool dxil_shaders_enabled_ = false;
 
   // Real ROV depth-only pixel shader for pixel-shader-less draws under ROV,
   // generated once at init. Empty if not ROV or generation failed (falls back

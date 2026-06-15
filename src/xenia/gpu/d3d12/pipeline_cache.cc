@@ -58,11 +58,6 @@ DEFINE_int32(
 DEFINE_bool(d3d12_tessellation_wireframe, false,
             "Display tessellated surfaces as wireframe for debugging.",
             "D3D12");
-DEFINE_bool(d3d12_dxil, true,
-            "Use DXIL shaders via HLSL generation and DXC compilation. "
-            "Enables SM 6.x features. Requires Windows 10 1709+.",
-            "D3D12");
-
 DECLARE_bool(precise_interpolation);
 
 namespace xe {
@@ -95,22 +90,7 @@ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
     : command_processor_(command_processor),
       register_file_(register_file),
       render_target_cache_(render_target_cache),
-      bindless_resources_used_(bindless_resources_used) {
-  const ui::d3d12::D3D12Provider& provider =
-      command_processor_.GetD3D12Provider();
-
-  bool edram_rov_used = render_target_cache.GetPath() ==
-                        RenderTargetCache::Path::kPixelShaderInterlock;
-
-  shader_translator_ = std::make_unique<DxbcShaderTranslator>(
-      provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
-      !(edram_rov_used ||
-        render_target_cache_.gamma_render_target_as_unorm16()),
-      render_target_cache_.msaa_2x_supported(),
-      render_target_cache_.draw_resolution_scale_x(),
-      render_target_cache_.draw_resolution_scale_y(),
-      provider.GetGraphicsAnalysis() != nullptr);
-}
+      bindless_resources_used_(bindless_resources_used) {}
 
 PipelineCache::~PipelineCache() { Shutdown(); }
 
@@ -143,34 +123,31 @@ bool PipelineCache::Initialize() {
     }
   }
 
-  // Initialize DXIL shader compilation infrastructure.
-  dxil_shaders_enabled_ = false;
-  if (cvars::d3d12_dxil) {
-    dxc_shader_compiler_ = std::make_unique<DxcCompiler>(provider);
-    if (dxc_shader_compiler_->Initialize()) {
-      bool edram_rov_used = render_target_cache_.GetPath() ==
-                            RenderTargetCache::Path::kPixelShaderInterlock;
-      hlsl_shader_translator_ = std::make_unique<HlslShaderTranslator>(
-          provider.GetAdapterVendorID(), bindless_resources_used_,
-          edram_rov_used,
-          !(edram_rov_used ||
-            render_target_cache_.gamma_render_target_as_unorm16()),
-          render_target_cache_.msaa_2x_supported(),
-          /*use_shader_model_6_6=*/true,
-          render_target_cache_.draw_resolution_scale_x(),
-          render_target_cache_.draw_resolution_scale_y());
-      hlsl_shader_translator_->SetDxcCompiler(dxc_shader_compiler_.get());
-      hlsl_shader_translator_->SetBindlessSrvHeapOffset(uint32_t(
-          D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart));
-      dxil_shaders_enabled_ = true;
-      XELOGI(
-          "DXIL shader compilation enabled (SM 6.6 with "
-          "ResourceDescriptorHeap)");
-    } else {
-      XELOGW("Failed to initialize DXC compiler, falling back to DXBC shaders");
-      dxc_shader_compiler_.reset();
-    }
+  // DXIL shader compilation is mandatory: guest and system shaders are all
+  // DXIL, so the D3D12 backend can't run without DXC.
+  dxc_shader_compiler_ = std::make_unique<DxcCompiler>(provider);
+  if (!dxc_shader_compiler_->Initialize()) {
+    XELOGE(
+        "Failed to initialize the DXC shader compiler. Place a recent "
+        "dxcompiler.dll next to the executable.");
+    dxc_shader_compiler_.reset();
+    return false;
   }
+  bool edram_rov_used = render_target_cache_.GetPath() ==
+                        RenderTargetCache::Path::kPixelShaderInterlock;
+  hlsl_shader_translator_ = std::make_unique<HlslShaderTranslator>(
+      provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
+      !(edram_rov_used ||
+        render_target_cache_.gamma_render_target_as_unorm16()),
+      render_target_cache_.msaa_2x_supported(),
+      /*use_shader_model_6_6=*/true,
+      render_target_cache_.draw_resolution_scale_x(),
+      render_target_cache_.draw_resolution_scale_y());
+  hlsl_shader_translator_->SetDxcCompiler(dxc_shader_compiler_.get());
+  hlsl_shader_translator_->SetBindlessSrvHeapOffset(
+      uint32_t(D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart));
+  XELOGI(
+      "DXIL shader compilation enabled (SM 6.6 with ResourceDescriptorHeap)");
 
   // Under ROV, pixel-shader-less depth-only draws need a real shader that runs
   // the in-shader EDRAM depth/stencil + ZPD path (the precompiled depth_only_ps
@@ -179,9 +156,7 @@ bool PipelineCache::Initialize() {
   if (render_target_cache_.GetPath() ==
       RenderTargetCache::Path::kPixelShaderInterlock) {
     depth_only_rov_pixel_shader_ =
-        dxil_shaders_enabled_
-            ? hlsl_shader_translator_->CreateDepthOnlyPixelShader()
-            : shader_translator_->CreateDepthOnlyPixelShader();
+        hlsl_shader_translator_->CreateDepthOnlyPixelShader();
     if (depth_only_rov_pixel_shader_.empty()) {
       XELOGW(
           "Failed to generate the ROV depth-only pixel shader, depth-only "
@@ -271,7 +246,6 @@ void PipelineCache::Shutdown() {
   // Shut down DXIL shader compilation.
   hlsl_shader_translator_.reset();
   dxc_shader_compiler_.reset();
-  dxil_shaders_enabled_ = false;
 
   // Shut down shader translation.
   ui::d3d12::util::ReleaseAndNull(dxc_compiler_);
@@ -676,7 +650,7 @@ PipelineCache::GetCurrentVertexShaderModification(
   const auto& regs = register_file_;
 
   DxbcShaderTranslator::Modification modification(
-      shader_translator_->GetDefaultVertexShaderModification(
+      hlsl_shader_translator_->GetDefaultVertexShaderModification(
           shader.GetDynamicAddressableRegisterCount(
               regs.Get<reg::SQ_PROGRAM_CNTL>().vs_num_reg),
           host_vertex_shader_type));
@@ -711,7 +685,7 @@ PipelineCache::GetCurrentPixelShaderModification(
   const auto& regs = register_file_;
 
   DxbcShaderTranslator::Modification modification(
-      shader_translator_->GetDefaultPixelShaderModification(
+      hlsl_shader_translator_->GetDefaultPixelShaderModification(
           shader.GetDynamicAddressableRegisterCount(
               regs.Get<reg::SQ_PROGRAM_CNTL>().ps_num_reg)));
 
@@ -848,15 +822,8 @@ bool PipelineCache::ConfigurePipeline(
   // For async mode, defer VS translation to background thread.
   // For sync mode, translate VS now on main thread.
   if (!vertex_shader->is_translated() && !use_async) {
-    bool translation_ok;
-    if (dxil_shaders_enabled_) {
-      translation_ok = TranslateAnalyzedShader(
-          *hlsl_shader_translator_, *vertex_shader, nullptr, nullptr, nullptr);
-    } else {
-      translation_ok =
-          TranslateAnalyzedShader(*shader_translator_, *vertex_shader,
-                                  dxbc_converter_, dxc_utils_, dxc_compiler_);
-    }
+    bool translation_ok = TranslateAnalyzedShader(
+        *hlsl_shader_translator_, *vertex_shader, nullptr, nullptr, nullptr);
     if (!translation_ok) {
       XELOGE("Failed to translate the vertex shader!");
       return false;
@@ -881,15 +848,8 @@ bool PipelineCache::ConfigurePipeline(
       if (!pixel_shader->shader().is_ucode_analyzed()) {
         pixel_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
       }
-      bool translation_ok;
-      if (dxil_shaders_enabled_) {
-        translation_ok = TranslateAnalyzedShader(
-            *hlsl_shader_translator_, *pixel_shader, nullptr, nullptr, nullptr);
-      } else {
-        translation_ok =
-            TranslateAnalyzedShader(*shader_translator_, *pixel_shader,
-                                    dxbc_converter_, dxc_utils_, dxc_compiler_);
-      }
+      bool translation_ok = TranslateAnalyzedShader(
+          *hlsl_shader_translator_, *pixel_shader, nullptr, nullptr, nullptr);
       if (!translation_ok) {
         XELOGE("Failed to translate the pixel shader!");
         return false;
@@ -1210,30 +1170,18 @@ void PipelineCache::TranslateShadersForStorage(
     const ui::d3d12::D3D12Provider& provider =
         command_processor_.GetD3D12Provider();
     StringBuffer ucode_disasm_buffer;
-    DxbcShaderTranslator dxbc_translator(
+    // HLSL translator for DXIL compilation (one per thread).
+    auto hlsl_translator = std::make_unique<HlslShaderTranslator>(
         provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
         !(edram_rov_used ||
           render_target_cache_.gamma_render_target_as_unorm16()),
         render_target_cache_.msaa_2x_supported(),
+        /*use_shader_model_6_6=*/true,
         render_target_cache_.draw_resolution_scale_x(),
-        render_target_cache_.draw_resolution_scale_y(),
-        provider.GetGraphicsAnalysis() != nullptr);
-    // HLSL translator for DXIL compilation (one per thread).
-    std::unique_ptr<HlslShaderTranslator> hlsl_translator;
-    if (dxil_shaders_enabled_) {
-      hlsl_translator = std::make_unique<HlslShaderTranslator>(
-          provider.GetAdapterVendorID(), bindless_resources_used_,
-          edram_rov_used,
-          !(edram_rov_used ||
-            render_target_cache_.gamma_render_target_as_unorm16()),
-          render_target_cache_.msaa_2x_supported(),
-          /*use_shader_model_6_6=*/true,
-          render_target_cache_.draw_resolution_scale_x(),
-          render_target_cache_.draw_resolution_scale_y());
-      hlsl_translator->SetDxcCompiler(dxc_shader_compiler_.get());
-      hlsl_translator->SetBindlessSrvHeapOffset(uint32_t(
-          D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart));
-    }
+        render_target_cache_.draw_resolution_scale_y());
+    hlsl_translator->SetDxcCompiler(dxc_shader_compiler_.get());
+    hlsl_translator->SetBindlessSrvHeapOffset(uint32_t(
+        D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart));
     // DXIL conversion objects (for DXBC disassembly only).
     IDxbcConverter* dxbc_converter = nullptr;
     IDxcUtils* dxc_utils = nullptr;
@@ -1266,15 +1214,8 @@ void PipelineCache::TranslateShadersForStorage(
             static_cast<D3D12Shader::D3D12Translation*>(
                 shader->GetOrCreateTranslation(modification_it->second));
         if (!translation->is_translated()) {
-          bool translation_ok;
-          if (dxil_shaders_enabled_ && hlsl_translator) {
-            translation_ok = TranslateAnalyzedShader(
-                *hlsl_translator, *translation, nullptr, nullptr, nullptr);
-          } else {
-            translation_ok = TranslateAnalyzedShader(
-                dxbc_translator, *translation, dxbc_converter, dxc_utils,
-                dxc_compiler);
-          }
+          bool translation_ok = TranslateAnalyzedShader(
+              *hlsl_translator, *translation, nullptr, nullptr, nullptr);
           if (!translation_ok) {
             std::lock_guard<std::mutex> lock(shaders_failed_to_translate_mutex);
             shaders_failed_to_translate.push_back(translation);
@@ -3503,31 +3444,22 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
 
   // Geometry shader.
   if (runtime_description.geometry_shader != nullptr) {
-    if (cvars::d3d12_dxil) {
-      // DXIL mode: use HLSL-compiled geometry shaders.
-      GeometryShaderKey gs_key;
-      if (GetGeometryShaderKey(
-              description.geometry_shader,
-              DxbcShaderTranslator::Modification(
-                  runtime_description.vertex_shader->modification()),
-              DxbcShaderTranslator::Modification(
-                  runtime_description.pixel_shader
-                      ? runtime_description.pixel_shader->modification()
-                      : 0),
-              gs_key)) {
-        const std::vector<uint8_t>* dxil_gs = GetDxilGeometryShader(gs_key);
-        if (dxil_gs && !dxil_gs->empty()) {
-          state_desc.GS.pShaderBytecode = dxil_gs->data();
-          state_desc.GS.BytecodeLength = dxil_gs->size();
-        }
+    // Geometry shaders are HLSL-compiled to DXIL.
+    GeometryShaderKey gs_key;
+    if (GetGeometryShaderKey(
+            description.geometry_shader,
+            DxbcShaderTranslator::Modification(
+                runtime_description.vertex_shader->modification()),
+            DxbcShaderTranslator::Modification(
+                runtime_description.pixel_shader
+                    ? runtime_description.pixel_shader->modification()
+                    : 0),
+            gs_key)) {
+      const std::vector<uint8_t>* dxil_gs = GetDxilGeometryShader(gs_key);
+      if (dxil_gs && !dxil_gs->empty()) {
+        state_desc.GS.pShaderBytecode = dxil_gs->data();
+        state_desc.GS.BytecodeLength = dxil_gs->size();
       }
-    } else {
-      // DXBC mode: use dynamically generated DXBC geometry shaders.
-      state_desc.GS.pShaderBytecode =
-          runtime_description.geometry_shader->data();
-      state_desc.GS.BytecodeLength =
-          sizeof(*runtime_description.geometry_shader->data()) *
-          runtime_description.geometry_shader->size();
     }
   }
 
@@ -3774,37 +3706,19 @@ void PipelineCache::CreationThread(size_t thread_index) {
   bool edram_rov_used = render_target_cache_.GetPath() ==
                         RenderTargetCache::Path::kPixelShaderInterlock;
   StringBuffer ucode_disasm_buffer;
-  DxbcShaderTranslator dxbc_translator(
+  // HLSL translator for DXIL compilation (one per thread).
+  auto hlsl_translator = std::make_unique<HlslShaderTranslator>(
       provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
       !(edram_rov_used ||
         render_target_cache_.gamma_render_target_as_unorm16()),
       render_target_cache_.msaa_2x_supported(),
+      /*use_shader_model_6_6=*/true,
       render_target_cache_.draw_resolution_scale_x(),
-      render_target_cache_.draw_resolution_scale_y(),
-      provider.GetGraphicsAnalysis() != nullptr);
-  // HLSL translator for DXIL compilation (one per thread).
-  std::unique_ptr<HlslShaderTranslator> hlsl_translator;
-  if (dxil_shaders_enabled_) {
-    hlsl_translator = std::make_unique<HlslShaderTranslator>(
-        provider.GetAdapterVendorID(), bindless_resources_used_, edram_rov_used,
-        !(edram_rov_used ||
-          render_target_cache_.gamma_render_target_as_unorm16()),
-        render_target_cache_.msaa_2x_supported(),
-        /*use_shader_model_6_6=*/true,
-        render_target_cache_.draw_resolution_scale_x(),
-        render_target_cache_.draw_resolution_scale_y());
-    hlsl_translator->SetDxcCompiler(dxc_shader_compiler_.get());
-    hlsl_translator->SetBindlessSrvHeapOffset(uint32_t(
-        D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart));
-  }
-  // Select the appropriate translator.
-  ShaderTranslator* translator_ptr;
-  if (dxil_shaders_enabled_ && hlsl_translator) {
-    translator_ptr = hlsl_translator.get();
-  } else {
-    translator_ptr = &dxbc_translator;
-  }
-  ShaderTranslator& translator = *translator_ptr;
+      render_target_cache_.draw_resolution_scale_y());
+  hlsl_translator->SetDxcCompiler(dxc_shader_compiler_.get());
+  hlsl_translator->SetBindlessSrvHeapOffset(
+      uint32_t(D3D12CommandProcessor::SystemBindlessView::kUnboundedSRVsStart));
+  ShaderTranslator& translator = *hlsl_translator;
   // Create thread-local DXIL conversion objects if needed (for DXBC
   // disassembly).
   IDxbcConverter* dxbc_converter = nullptr;
@@ -3919,17 +3833,11 @@ void PipelineCache::CreateQueuedPipelinesOnProcessorThread() {
     }
 
     // Translate pending shaders and update root signature.
-    ShaderTranslator* translator_ptr;
-    if (dxil_shaders_enabled_ && hlsl_shader_translator_) {
-      translator_ptr = hlsl_shader_translator_.get();
-    } else {
-      translator_ptr = shader_translator_.get();
-    }
-    EnsurePipelineShadersTranslated(pipeline_to_create, *translator_ptr,
-                                    ucode_disasm_buffer_, dxbc_converter_,
-                                    dxc_utils_, dxc_compiler_,
-                                    /*use_try_claim=*/true,
-                                    /*handle_non_placeholder=*/true);
+    EnsurePipelineShadersTranslated(
+        pipeline_to_create, *hlsl_shader_translator_, ucode_disasm_buffer_,
+        dxbc_converter_, dxc_utils_, dxc_compiler_,
+        /*use_try_claim=*/true,
+        /*handle_non_placeholder=*/true);
 
     ID3D12PipelineState* new_state =
         CreateD3D12Pipeline(pipeline_to_create->description);

@@ -36,7 +36,6 @@ DEFINE_bool(d3d12_bindless, true,
             "D3D12");
 
 DECLARE_bool(clear_memory_page_state);
-DECLARE_bool(d3d12_dxil);
 DECLARE_bool(gpu_debug_markers);
 DECLARE_bool(submit_on_primary_buffer_end);
 DECLARE_bool(readback_memexport_fast);
@@ -977,13 +976,9 @@ bool D3D12CommandProcessor::SetupContext() {
     root_signature_bindless_desc.NumStaticSamplers = 0;
     root_signature_bindless_desc.pStaticSamplers = nullptr;
     // For SM 6.6 DXIL with ResourceDescriptorHeap/SamplerDescriptorHeap.
-    if (cvars::d3d12_dxil) {
-      root_signature_bindless_desc.Flags =
-          D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
-          D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
-    } else {
-      root_signature_bindless_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
-    }
+    root_signature_bindless_desc.Flags =
+        D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+        D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
     // Fetch constants.
     {
       auto& parameter =

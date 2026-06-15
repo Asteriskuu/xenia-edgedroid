@@ -1426,11 +1426,11 @@ bool MetalCommandProcessor::InitializeShaderTranslation() {
   bool gamma_render_target_as_unorm8 = !(
       edram_rov_used || render_target_cache_->gamma_render_target_as_unorm16());
 
-  XELOGI(
-      "DxbcShaderTranslator init: gamma_as_unorm8={}, msaa_2x={}, scale={}x{}",
-      gamma_render_target_as_unorm8, render_target_cache_->msaa_2x_supported(),
-      render_target_cache_->draw_resolution_scale_x(),
-      render_target_cache_->draw_resolution_scale_y());
+  XELOGI("Shader translator init: gamma_as_unorm8={}, msaa_2x={}, scale={}x{}",
+         gamma_render_target_as_unorm8,
+         render_target_cache_->msaa_2x_supported(),
+         render_target_cache_->draw_resolution_scale_x(),
+         render_target_cache_->draw_resolution_scale_y());
 
   // Initialize SPIRV-Cross (MSL) path.
   if (UseSpirvCrossPath()) {
