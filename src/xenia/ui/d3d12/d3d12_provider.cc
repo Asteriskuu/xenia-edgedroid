@@ -15,6 +15,7 @@
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/string.h"
 #include "xenia/ui/d3d12/d3d12_immediate_drawer.h"
 #include "xenia/ui/d3d12/d3d12_presenter.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
@@ -346,6 +347,27 @@ bool D3D12Provider::Initialize() {
     return false;
   }
   adapter->Release();
+
+  // Report whether the bundled DirectX 12 Agility SDK runtime was loaded.
+  // d3d12.dll loads D3D12Core.dll from D3D12SDKPath on the first device
+  // creation, so it is present by now if the SDK is in use.
+  if (HMODULE d3d12_core = GetModuleHandleW(L"D3D12Core.dll")) {
+    WCHAR core_path[MAX_PATH];
+    DWORD core_path_length = GetModuleFileNameW(d3d12_core, core_path,
+                                                DWORD(xe::countof(core_path)));
+    if (core_path_length != 0 && core_path_length < xe::countof(core_path)) {
+      XELOGI(
+          "DirectX 12 Agility SDK runtime loaded: {}",
+          xe::to_utf8(std::u16string_view(
+              reinterpret_cast<const char16_t*>(core_path), core_path_length)));
+    } else {
+      XELOGI("DirectX 12 Agility SDK runtime loaded");
+    }
+  } else {
+    XELOGI(
+        "DirectX 12 Agility SDK runtime not loaded; using the in-box Direct3D "
+        "12 runtime");
+  }
 
   // Configure the Direct3D 12 debug info queue.
   ID3D12InfoQueue* d3d12_info_queue;

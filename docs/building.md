@@ -47,6 +47,17 @@ xb devenv
 xb format
 ```
 
+> **Note:** The shaders Xenia generates need a Direct3D 12 runtime with shader
+> model 6.6, which comes from the runtime, not the GPU driver. The executable
+> loads the [DirectX 12 Agility SDK](https://www.nuget.org/packages/Microsoft.Direct3D.D3D12)
+> runtime (`D3D12Core.dll`) from a `D3D12\` subfolder next to it to guarantee
+> this. Release builds bundle that DLL automatically (see
+> `.github/workflows/build.yml`); a local build does not, so it falls back to
+> your system's in-box runtime. If that runtime predates shader model 6.6, copy
+> `D3D12Core.dll` from the Agility SDK into a `D3D12\` subfolder next to the
+> built `xenia_edge.exe` (its version must match the `D3D12SDKVersion` exported
+> in `src/xenia/ui/windowed_app_main_win.cc`).
+
 #### Cross-compiling (Windows ARM64 ↔ x64)
 
 The build supports cross-compiling between Windows x64 and ARM64 on the same
