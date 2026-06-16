@@ -2821,34 +2821,43 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   }
 
   if (cvars::async_shader_compilation) {
-    if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) == nullptr) {
-      if (!zpd_active_segment_.logical_active) {
-        XELOGI(
-            "Skipping draw - pipeline not ready: VS {:016X} mod {:016X}, PS "
-            "{:016X} mod {:016X}",
-            vertex_shader->ucode_data_hash(), vertex_shader_modification.value,
-            pixel_shader ? pixel_shader->ucode_data_hash() : 0,
-            pixel_shader_modification.value);
-        return true;
+    if (zpd_active_segment_.logical_active) {
+      // Occlusion-query draws need the real pixel shader - the no-op
+      // placeholder skips the guest shader's pixel kills and would miscount.
+      // Wait for it.
+      if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) ==
+              nullptr ||
+          pipeline_cache_->IsPlaceholderPipeline(pipeline_handle)) {
+        if (cvars::occlusion_query_log) {
+          XELOGI(
+              "ZPD: Awaiting real D3D12 pipeline for active query draw "
+              "VS={:016X} PS={:016X}",
+              vertex_shader ? vertex_shader->ucode_data_hash() : 0,
+              pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+        }
+        if (pipeline_cache_->AwaitRealD3D12PipelineByHandle(pipeline_handle) ==
+            nullptr) {
+          XELOGE(
+              "IssueDraw: Pipeline unavailable after await for active query "
+              "draw VS={:016X} PS={:016X}",
+              vertex_shader ? vertex_shader->ucode_data_hash() : 0,
+              pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+          return false;
+        }
       }
-      if (cvars::occlusion_query_log) {
-        XELOGI(
-            "ZPD: Awaiting pending D3D12 pipeline for active query draw "
-            "VS={:016X} PS={:016X}",
-            vertex_shader ? vertex_shader->ucode_data_hash() : 0,
-            pixel_shader ? pixel_shader->ucode_data_hash() : 0);
-      }
-      if (pipeline_cache_->AwaitD3D12PipelineByHandle(pipeline_handle) ==
-          nullptr) {
-        XELOGE(
-            "IssueDraw: Pipeline unavailable after await for active query draw "
-            "VS={:016X} PS={:016X}",
-            vertex_shader ? vertex_shader->ucode_data_hash() : 0,
-            pixel_shader ? pixel_shader->ucode_data_hash() : 0);
-        return false;
-      }
+    } else if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) ==
+               nullptr) {
+      // No pipeline and no placeholder available (bindful async, or placeholder
+      // creation failed) - skip the draw until the real pipeline is ready.
+      XELOGI(
+          "Skipping draw - pipeline not ready: VS {:016X} mod {:016X}, PS "
+          "{:016X} mod {:016X}",
+          vertex_shader->ucode_data_hash(), vertex_shader_modification.value,
+          pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+          pixel_shader_modification.value);
+      return true;
     }
-    // Re-fetch root signature now that pipeline is ready.
+    // Re-fetch root signature now that the pipeline (or placeholder) is bound.
     root_signature = pipeline_cache_->GetRootSignatureByHandle(pipeline_handle);
   }
 

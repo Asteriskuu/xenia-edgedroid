@@ -113,11 +113,23 @@ class PipelineCache {
 
   // Returns a pipeline with deferred creation by its handle. May return nullptr
   // if failed to create the pipeline or still being created asynchronously.
+  // While async creation is in progress this may be a placeholder pipeline
+  // (real vertex shader, no-op pixel shader) that the creation thread swaps for
+  // the real one when ready - check IsPlaceholderPipeline if that matters.
   ID3D12PipelineState* GetD3D12PipelineByHandle(void* handle) const {
     return reinterpret_cast<const Pipeline*>(handle)->state.load(
         std::memory_order_acquire);
   }
+  bool IsPlaceholderPipeline(void* handle) const {
+    return reinterpret_cast<const Pipeline*>(handle)->is_placeholder.load(
+        std::memory_order_acquire);
+  }
   ID3D12PipelineState* AwaitD3D12PipelineByHandle(void* handle);
+  // Waits until the real (non-placeholder) pipeline for the handle is ready,
+  // returning it (or nullptr if its creation failed). Needed by occlusion
+  // queries, where the no-op placeholder would skip the guest shader's pixel
+  // kills and miscount.
+  ID3D12PipelineState* AwaitRealD3D12PipelineByHandle(void* handle);
 
   ID3D12RootSignature* GetRootSignatureByHandle(void* handle) const {
     return reinterpret_cast<const Pipeline*>(handle)
@@ -328,8 +340,13 @@ class PipelineCache {
   static std::string CreateHlslGeometryShaderSource(GeometryShaderKey key);
   const std::vector<uint8_t>* GetDxilGeometryShader(GeometryShaderKey key);
 
+  // When as_placeholder is true, builds a hot-swap placeholder PSO: the real
+  // vertex shader with the no-op placeholder pixel shader, so the pixel shader
+  // does not need to be translated yet. Only valid with a fixed (bindless)
+  // root signature.
   ID3D12PipelineState* CreateD3D12Pipeline(
-      const PipelineRuntimeDescription& runtime_description);
+      const PipelineRuntimeDescription& runtime_description,
+      bool as_placeholder = false);
 
   D3D12CommandProcessor& command_processor_;
   const RegisterFile& register_file_;
@@ -353,7 +370,7 @@ class PipelineCache {
 
   // Real ROV depth-only pixel shader for pixel-shader-less draws under ROV,
   // generated once at init. Empty if not ROV or generation failed (falls back
-  // to the no-op depth_only_ps).
+  // to the no-op placeholder_ps).
   std::vector<uint8_t> depth_only_rov_pixel_shader_;
 
   // Ucode hash -> shader.
@@ -391,10 +408,18 @@ class PipelineCache {
   std::unordered_map<GeometryShaderKey, std::vector<uint8_t>,
                      GeometryShaderKey::Hasher>
       dxil_geometry_shaders_;
+  // Guards both geometry shader caches: CreateD3D12Pipeline runs on several
+  // creation threads, and on the processor thread when it builds a placeholder.
+  // Entries are never erased, so references returned by the getters stay valid.
+  std::mutex geometry_shader_mutex_;
 
   struct Pipeline {
-    // nullptr if creation has failed or still pending.
+    // nullptr if creation has failed or still pending. May hold a placeholder
+    // pipeline (see is_placeholder) until the real one is swapped in.
     std::atomic<ID3D12PipelineState*> state{nullptr};
+    // True while state holds a hot-swap placeholder pipeline, before the
+    // creation thread swaps in the real one.
+    std::atomic<bool> is_placeholder{false};
     PipelineRuntimeDescription description;
     // For background creation: stores the untranslated shaders.
     // Background thread translates both VS and PS together, then creates the
@@ -476,6 +501,14 @@ class PipelineCache {
   // creation_request_cond_ when set.
   size_t creation_threads_shutdown_from_ = SIZE_MAX;
   std::vector<std::unique_ptr<xe::threading::Thread>> creation_threads_;
+
+  // Placeholder pipelines replaced by their real counterpart on a creation
+  // thread, paired with the submission they may still be referenced by. Real
+  // releases happen in ProcessDeferredDestructions once the GPU has passed it.
+  void ProcessDeferredDestructions();
+  std::mutex deferred_destroy_mutex_;
+  std::vector<std::pair<ID3D12PipelineState*, uint64_t>>
+      deferred_destroy_pipelines_;
 };
 inline bool PipelineCache::PipelineDescription::operator==(
     const PipelineDescription& other) const {

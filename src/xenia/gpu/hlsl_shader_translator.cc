@@ -3017,7 +3017,8 @@ std::vector<uint8_t> HlslShaderTranslator::CreateDepthOnlyPixelShader() {
   // Translate an empty pixel shader. Under ROV that emits only the output
   // merger - the EDRAM depth/stencil test and ZPD count, with no color - which
   // is exactly the shader needed for pixel-shader-less depth-only draws (the
-  // precompiled depth_only_ps is a no-op that skips the in-shader depth write).
+  // precompiled placeholder_ps is a no-op that skips the in-shader depth
+  // write).
   Shader shader(xenos::ShaderType::kPixel, 0, nullptr, 0);
   StringBuffer ucode_disasm_buffer;
   shader.AnalyzeUcode(ucode_disasm_buffer);

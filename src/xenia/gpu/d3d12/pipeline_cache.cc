@@ -72,13 +72,13 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/continuous_quad_4cp_hs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/continuous_triangle_1cp_hs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/continuous_triangle_3cp_hs.h"
-#include "xenia/gpu/shaders/bytecode/d3d12_dxil/depth_only_ps.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/discrete_quad_1cp_hs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/discrete_quad_4cp_hs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/discrete_triangle_1cp_hs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/discrete_triangle_3cp_hs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/float24_round_ps.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/float24_truncate_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/placeholder_ps.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/tessellation_adaptive_vs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/tessellation_indexed_vs.h"
 }  // namespace shaders
@@ -150,9 +150,9 @@ bool PipelineCache::Initialize() {
       "DXIL shader compilation enabled (SM 6.6 with ResourceDescriptorHeap)");
 
   // Under ROV, pixel-shader-less depth-only draws need a real shader that runs
-  // the in-shader EDRAM depth/stencil + ZPD path (the precompiled depth_only_ps
-  // is a no-op). Generate it once here on the main thread via the active
-  // translator so pipeline creation only reads the cached bytecode.
+  // the in-shader EDRAM depth/stencil + ZPD path (the precompiled
+  // placeholder_ps is a no-op). Generate it once here on the main thread via
+  // the active translator so pipeline creation only reads the cached bytecode.
   if (render_target_cache_.GetPath() ==
       RenderTargetCache::Path::kPixelShaderInterlock) {
     depth_only_rov_pixel_shader_ =
@@ -217,6 +217,14 @@ void PipelineCache::Shutdown() {
 
   // Shut down the persistent shader / pipeline storage.
   ShutdownShaderStorage();
+
+  // Release placeholder pipelines that were swapped out but not yet reaped (the
+  // creation threads are joined, so no more can be queued). The GPU is idle by
+  // shutdown, so there is nothing to wait for.
+  for (auto& deferred : deferred_destroy_pipelines_) {
+    deferred.first->Release();
+  }
+  deferred_destroy_pipelines_.clear();
 
   // Destroy all pipelines.
   current_pipeline_ = nullptr;
@@ -568,11 +576,34 @@ void PipelineCache::EndSubmission() {
     shader_storage_file_flush_needed_ = false;
     pipeline_storage_file_flush_needed_ = false;
   }
+  // Release placeholder pipelines the GPU is now done with.
+  ProcessDeferredDestructions();
   if (!creation_threads_.empty()) {
     // Don't wait for pipeline creation - let background threads work
-    // asynchronously. Draws will be skipped until pipelines are ready.
-    // This avoids frame-time spikes from blocking on pipeline creation.
+    // asynchronously. Bindless draws use a placeholder pipeline meanwhile;
+    // bindful draws are skipped until the pipeline is ready. This avoids
+    // frame-time spikes from blocking on pipeline creation.
     creation_request_cond_.notify_one();
+  }
+}
+
+void PipelineCache::ProcessDeferredDestructions() {
+  std::vector<ID3D12PipelineState*> pipelines_to_destroy;
+  uint64_t completed_submission = command_processor_.GetCompletedSubmission();
+  {
+    std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
+    auto it = deferred_destroy_pipelines_.begin();
+    while (it != deferred_destroy_pipelines_.end()) {
+      if (it->second <= completed_submission) {
+        pipelines_to_destroy.push_back(it->first);
+        it = deferred_destroy_pipelines_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (ID3D12PipelineState* pipeline : pipelines_to_destroy) {
+    pipeline->Release();
   }
 }
 
@@ -611,6 +642,19 @@ ID3D12PipelineState* PipelineCache::AwaitD3D12PipelineByHandle(void* handle) {
   if (pipeline != nullptr) {
     return pipeline;
   }
+  AwaitPipelineCompletion();
+  return GetD3D12PipelineByHandle(handle);
+}
+
+ID3D12PipelineState* PipelineCache::AwaitRealD3D12PipelineByHandle(
+    void* handle) {
+  // A non-null, non-placeholder state is already the real pipeline.
+  if (GetD3D12PipelineByHandle(handle) != nullptr &&
+      !IsPlaceholderPipeline(handle)) {
+    return GetD3D12PipelineByHandle(handle);
+  }
+  // Drain all background creation; afterwards the real pipeline has been
+  // swapped in (or its creation failed, leaving the placeholder or nullptr).
   AwaitPipelineCompletion();
   return GetD3D12PipelineByHandle(handle);
 }
@@ -813,15 +857,23 @@ bool PipelineCache::ConfigurePipeline(
   // to compile and don't benefit from async (vertex shaders are small).
   bool use_async = cvars::async_shader_compilation &&
                    !creation_threads_.empty() && pixel_shader != nullptr;
+  // An immediate hot-swap placeholder pipeline needs the real vertex shader and
+  // a root signature that does not depend on the (not-yet-translated) pixel
+  // shader. Only bindless mode has such a fixed root signature, so the
+  // placeholder is limited to it; bindful async still defers everything and the
+  // draw is skipped until the real pipeline is ready.
+  bool use_placeholder = use_async && bindless_resources_used_;
 
   // Ensure VS ucode is analyzed (needed for description hash).
   if (!vertex_shader->shader().is_ucode_analyzed()) {
     vertex_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
   }
 
-  // For async mode, defer VS translation to background thread.
-  // For sync mode, translate VS now on main thread.
-  if (!vertex_shader->is_translated() && !use_async) {
+  // Translate the VS now in sync mode, and in placeholder mode (the placeholder
+  // rasterizes the real geometry, so it needs the real VS). Pure async without
+  // a placeholder defers it to the background thread.
+  bool translate_vs_now = !use_async || use_placeholder;
+  if (!vertex_shader->is_translated() && translate_vs_now) {
     bool translation_ok = TranslateAnalyzedShader(
         *hlsl_shader_translator_, *vertex_shader, nullptr, nullptr, nullptr);
     if (!translation_ok) {
@@ -835,8 +887,8 @@ bool PipelineCache::ConfigurePipeline(
       storage_writer_.QueueShaderWrite(&vertex_shader->shader());
     }
   }
-  if (!use_async && !vertex_shader->is_valid()) {
-    // Translation attempted previously, but not valid (sync mode only).
+  if (translate_vs_now && !vertex_shader->is_valid()) {
+    // Translation attempted previously, but not valid.
     return false;
   }
 
@@ -906,8 +958,10 @@ bool PipelineCache::ConfigurePipeline(
   COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
 
   if (use_async) {
-    // Queue for background thread.
-    new_pipeline->pending_vertex_shader = vertex_shader;
+    // Queue for background thread. The VS is already translated in placeholder
+    // mode, so only the PS is left pending there.
+    new_pipeline->pending_vertex_shader =
+        use_placeholder ? nullptr : vertex_shader;
     new_pipeline->pending_pixel_shader = pixel_shader;
     // Calculate priority based on whether shader writes to visible RTs.
     if (pixel_shader) {
@@ -916,6 +970,16 @@ bool PipelineCache::ConfigurePipeline(
       new_pipeline->priority = pipeline_util::CalculatePipelinePriority(
           bound_rts, pixel_shader->shader().writes_color_targets(),
           pixel_shader->shader().writes_depth());
+    }
+    if (use_placeholder) {
+      // Create a placeholder pipeline now (real VS + no-op placeholder PS) so
+      // the draw can proceed immediately; the creation thread swaps in the real
+      // pipeline when it finishes translating the PS.
+      ID3D12PipelineState* placeholder_state =
+          CreateD3D12Pipeline(runtime_description, /*as_placeholder=*/true);
+      new_pipeline->state.store(placeholder_state, std::memory_order_release);
+      new_pipeline->is_placeholder.store(placeholder_state != nullptr,
+                                         std::memory_order_release);
     }
     {
       std::lock_guard<xe_mutex> lock(creation_request_lock_);
@@ -2771,6 +2835,7 @@ void PipelineCache::CreateDxbcGeometryShader(
 
 const std::vector<uint32_t>& PipelineCache::GetGeometryShader(
     GeometryShaderKey key) {
+  std::lock_guard<std::mutex> lock(geometry_shader_mutex_);
   auto it = geometry_shaders_.find(key);
   if (it != geometry_shaders_.end()) {
     return it->second;
@@ -3112,6 +3177,7 @@ std::string PipelineCache::CreateHlslGeometryShaderSource(
 
 const std::vector<uint8_t>* PipelineCache::GetDxilGeometryShader(
     GeometryShaderKey key) {
+  std::lock_guard<std::mutex> lock(geometry_shader_mutex_);
   auto it = dxil_geometry_shaders_.find(key);
   if (it != dxil_geometry_shaders_.end()) {
     return it->second.empty() ? nullptr : &it->second;
@@ -3238,7 +3304,8 @@ void PipelineCache::EnsurePipelineShadersTranslated(
 }
 
 ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
-    const PipelineRuntimeDescription& runtime_description) {
+    const PipelineRuntimeDescription& runtime_description,
+    bool as_placeholder) {
   const PipelineDescription& description = runtime_description.description;
 
   if (runtime_description.pixel_shader != nullptr) {
@@ -3406,7 +3473,12 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   }
 
   // Pixel shader.
-  if (runtime_description.pixel_shader != nullptr) {
+  if (as_placeholder) {
+    // Hot-swap placeholder: the real pixel shader is not translated yet, so use
+    // the no-op placeholder (no color output, leaves render targets untouched).
+    state_desc.PS.pShaderBytecode = shaders::placeholder_ps;
+    state_desc.PS.BytecodeLength = sizeof(shaders::placeholder_ps);
+  } else if (runtime_description.pixel_shader != nullptr) {
     if (!runtime_description.pixel_shader->is_translated()) {
       XELOGE("Pixel shader {:016X} not translated",
              runtime_description.pixel_shader->shader().ucode_data_hash());
@@ -3419,13 +3491,13 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
         runtime_description.pixel_shader->translated_binary().size();
   } else if (edram_rov_used) {
     // Real ROV depth-only shader (writes EDRAM depth/stencil); the no-op
-    // depth_only_ps is only a fallback if generation failed.
+    // placeholder_ps is only a fallback if generation failed.
     if (!depth_only_rov_pixel_shader_.empty()) {
       state_desc.PS.pShaderBytecode = depth_only_rov_pixel_shader_.data();
       state_desc.PS.BytecodeLength = depth_only_rov_pixel_shader_.size();
     } else {
-      state_desc.PS.pShaderBytecode = shaders::depth_only_ps;
-      state_desc.PS.BytecodeLength = sizeof(shaders::depth_only_ps);
+      state_desc.PS.pShaderBytecode = shaders::placeholder_ps;
+      state_desc.PS.BytecodeLength = sizeof(shaders::placeholder_ps);
     }
   } else {
     if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
@@ -3793,11 +3865,25 @@ void PipelineCache::CreationThread(size_t thread_index) {
     ID3D12PipelineState* new_state =
         CreateD3D12Pipeline(pipeline_to_create->description);
 
-    // Store the pipeline. If creation failed, state stays nullptr and draws
-    // will be skipped.
     if (new_state != nullptr) {
-      pipeline_to_create->state.store(new_state, std::memory_order_release);
+      // Swap in the real pipeline. If a placeholder was in use, defer its
+      // destruction until the GPU has passed the submissions that may reference
+      // it. Without a placeholder the old value is null and this is a plain
+      // store.
+      ID3D12PipelineState* old_state = pipeline_to_create->state.exchange(
+          new_state, std::memory_order_acq_rel);
+      pipeline_to_create->is_placeholder.store(false,
+                                               std::memory_order_release);
+      if (old_state != nullptr) {
+        std::lock_guard<std::mutex> lock(deferred_destroy_mutex_);
+        deferred_destroy_pipelines_.emplace_back(
+            old_state, command_processor_.GetCurrentSubmission());
+      }
     } else {
+      // Real creation failed. Keep any placeholder in use, but stop reporting
+      // it as a placeholder so occlusion-query awaits do not block forever.
+      pipeline_to_create->is_placeholder.store(false,
+                                               std::memory_order_release);
       XELOGE("Pipeline creation failed (VS {:016X}, PS {:016X})",
              pipeline_to_create->description.vertex_shader
                  ? pipeline_to_create->description.vertex_shader->shader()
