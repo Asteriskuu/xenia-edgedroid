@@ -484,6 +484,12 @@ def fetch_data_repos():
             ],
         },
         {
+            "name": "x360db",
+            "url": "https://github.com/xenia-manager/x360db.git",
+            "branch": "main",
+            "sparse_paths": ["games.json"],
+        },
+        {
             "name": "SDL_GameControllerDB",
             "url": "https://github.com/mdqinc/SDL_GameControllerDB.git",
             "branch": "master",

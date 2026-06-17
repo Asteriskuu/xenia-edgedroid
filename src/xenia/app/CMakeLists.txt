@@ -208,5 +208,11 @@ xe_embed_binary_assets(xenia-app
 xe_embed_compressed_bundle(xenia-app
     "${PROJECT_SOURCE_DIR}/build/data_repos/xenia-manager-database/data/game-compatibility"
     game_compat)
+
+# Bake the x360db title database (games.json from xenia-manager/x360db).
+xe_embed_compressed_bundle(xenia-app
+    "${PROJECT_SOURCE_DIR}/build/data_repos/x360db/games.json"
+    game_db)
+
 target_include_directories(xenia-app PRIVATE
     "${PROJECT_SOURCE_DIR}/third_party/rapidjson/include")

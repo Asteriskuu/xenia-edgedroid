@@ -14,6 +14,7 @@
 
 #include "rapidjson/document.h"
 
+#include "xenia/app/title_id_util.h"
 #include "xenia/base/embedded_bundle.h"
 #include "xenia/base/logging.h"
 
@@ -38,28 +39,6 @@ CompatState ParseState(std::string_view s) {
     return CompatState::kUnplayable;
   }
   return CompatState::kUnknown;
-}
-
-uint32_t ParseTitleId(const char* hex, size_t len) {
-  if (len != 8) {
-    return 0;
-  }
-  uint32_t v = 0;
-  for (size_t i = 0; i < len; ++i) {
-    char c = hex[i];
-    uint32_t d;
-    if (c >= '0' && c <= '9') {
-      d = static_cast<uint32_t>(c - '0');
-    } else if (c >= 'a' && c <= 'f') {
-      d = static_cast<uint32_t>(c - 'a' + 10);
-    } else if (c >= 'A' && c <= 'F') {
-      d = static_cast<uint32_t>(c - 'A' + 10);
-    } else {
-      return 0;
-    }
-    v = (v << 4) | d;
-  }
-  return v;
 }
 
 const std::unordered_map<uint32_t, CompatState>& GetCompatIndex() {
@@ -94,8 +73,8 @@ const std::unordered_map<uint32_t, CompatState>& GetCompatIndex() {
         if (!id_it->value.IsString() || !state_it->value.IsString()) {
           continue;
         }
-        uint32_t title_id = ParseTitleId(id_it->value.GetString(),
-                                         id_it->value.GetStringLength());
+        uint32_t title_id = ParseHexTitleId(id_it->value.GetString(),
+                                            id_it->value.GetStringLength());
         if (title_id == 0) {
           continue;
         }
