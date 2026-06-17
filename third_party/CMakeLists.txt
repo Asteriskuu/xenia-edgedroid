@@ -729,7 +729,15 @@ endif()
 # SDL3's target_precompile_headers emits /Yu on MSVC, which sccache cannot
 # cache. Disable PCH so each source compiles standalone and caches across CI.
 set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
+# SDL3 puts /GL- on SDL_mslibc.c to keep its hand-written memcpy out of
+# whole-program opt. Our inherited Release /GL then trips D9025, so drop /GL
+# for the SDL3 subtree and restore it afterward.
+get_directory_property(_xe_save_opts COMPILE_OPTIONS)
+set(_xe_sdl_opts "${_xe_save_opts}")
+list(FILTER _xe_sdl_opts EXCLUDE REGEX "/GL>$")
+set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "${_xe_sdl_opts}")
 add_subdirectory(SDL3 EXCLUDE_FROM_ALL)
+set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "${_xe_save_opts}")
 # Consistent target name for downstream link calls.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_library(SDL3 ALIAS SDL3-shared)
