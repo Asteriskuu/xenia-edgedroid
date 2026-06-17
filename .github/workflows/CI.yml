@@ -51,25 +51,25 @@ jobs:
           fetch-depth: 0
 
       - name: Download Linux artifacts
-        uses: actions/download-artifact@main
+        uses: actions/download-artifact@v8
         with:
           name: xenia_edge_linux
           path: linux_artifacts
 
       - name: Download Windows artifacts
-        uses: actions/download-artifact@main
+        uses: actions/download-artifact@v8
         with:
           name: xenia_edge_windows
           path: windows_artifacts
 
       - name: Download macOS arm64 app bundle
-        uses: actions/download-artifact@main
+        uses: actions/download-artifact@v8
         with:
           name: xenia_edge_macos_arm64_app
           path: macos_arm64_app
 
       - name: Download macOS x86_64 app bundle
-        uses: actions/download-artifact@main
+        uses: actions/download-artifact@v8
         with:
           name: xenia_edge_macos_x86_64_app
           path: macos_x86_64_app

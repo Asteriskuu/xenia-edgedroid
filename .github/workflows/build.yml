@@ -11,7 +11,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@v6
       - name: Setup
         run: |
           pipx install clang-format==21.1.8
@@ -26,13 +26,13 @@ jobs:
     # the build host) stays low enough for Ubuntu 22.04 / Debian 12 users.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Cache linuxdeploy tools
         id: cache-linuxdeploy
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: ~/linuxdeploy
           key: ${{ runner.os }}-linuxdeploy-tools
@@ -41,7 +41,7 @@ jobs:
 
       - name: Cache Slang
         id: cache-slang
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: .slang
           # Keep in sync with SLANG_VERSION in xenia-build.py.
@@ -83,7 +83,7 @@ jobs:
           # Fetch data repos (game-patches)
           ./xenia-build.py fetchdata
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@main
+        uses: mozilla-actions/sccache-action@v0.0.10
       - name: Build
         env:
           CC: clang-21
@@ -149,7 +149,7 @@ jobs:
           cp LICENSE artifacts/release/
       - name: Upload xenia edge artifacts
         if: steps.prepare_artifacts.outcome == 'success'
-        uses: actions/upload-artifact@main
+        uses: actions/upload-artifact@v7
         with:
           name: xenia_edge_linux
           path: artifacts/release
@@ -160,13 +160,13 @@ jobs:
     needs: lint
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Cache Slang
         id: cache-slang
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: .slang
           # Keep in sync with SLANG_VERSION in xenia-build.py.
@@ -209,7 +209,7 @@ jobs:
           exit 1
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@main
+        uses: mozilla-actions/sccache-action@v0.0.10
       - name: Build
         env:
           SCCACHE_GHA_ENABLED: "true"
@@ -248,7 +248,7 @@ jobs:
 
       - name: Upload xenia edge macOS arm64 app bundle
         if: steps.prepare_artifacts.outcome == 'success'
-        uses: actions/upload-artifact@main
+        uses: actions/upload-artifact@v7
         with:
           name: xenia_edge_macos_arm64_app
           path: artifacts/Xenia-edge.app.tar
@@ -262,13 +262,13 @@ jobs:
     # x86_64 binary either way.
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Cache Slang
         id: cache-slang
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: .slang
           # Keep in sync with SLANG_VERSION in xenia-build.py.
@@ -304,7 +304,7 @@ jobs:
           exit 1
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@main
+        uses: mozilla-actions/sccache-action@v0.0.10
       - name: Build
         env:
           SCCACHE_GHA_ENABLED: "true"
@@ -341,7 +341,7 @@ jobs:
 
       - name: Upload xenia edge macOS x86_64 app bundle
         if: steps.prepare_artifacts.outcome == 'success'
-        uses: actions/upload-artifact@main
+        uses: actions/upload-artifact@v7
         with:
           name: xenia_edge_macos_x86_64_app
           path: artifacts/Xenia-edge.app.tar
@@ -354,14 +354,14 @@ jobs:
     env:
       POWERSHELL_TELEMETRY_OPTOUT: 1
     steps:
-      - uses: actions/checkout@main
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: false
 
       - name: Cache Slang
         id: cache-slang
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: .slang
           # Keep in sync with SLANG_VERSION in xenia-build.py.
@@ -389,7 +389,7 @@ jobs:
 
       - name: Cache DXC redistributables
         id: cache-dxc
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: dxc-redist
           # Keyed on the release tag so a new upstream DXC release refreshes it.
@@ -408,7 +408,7 @@ jobs:
 
       - name: Cache D3D12 Agility SDK
         id: cache-agility
-        uses: actions/cache@v3
+        uses: actions/cache@v5
         with:
           path: agility-redist
           # Pinned, not latest: preview releases (e.g. the SM 6.9 line) require
@@ -453,7 +453,7 @@ jobs:
           python xenia-build.py fetchdata
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@main
+        uses: mozilla-actions/sccache-action@v0.0.10
       - name: Build
         env:
           SCCACHE_GHA_ENABLED: "true"
@@ -483,7 +483,7 @@ jobs:
           If ($LastExitCode -le 7) { echo "LastExitCode = $LastExitCode";$LastExitCode = 0 }
       - name: Upload xenia edge artifacts
         if: steps.prepare_artifacts.outcome == 'success'
-        uses: actions/upload-artifact@main
+        uses: actions/upload-artifact@v7
         with:
           name: xenia_edge_windows
           path: artifacts\xenia_edge
