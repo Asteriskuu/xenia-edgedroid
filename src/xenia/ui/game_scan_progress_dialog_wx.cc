@@ -58,7 +58,7 @@ wxString FormatCounters(const app::DirectoryScanner::Progress& p,
 }
 
 wxString PickDisplayName(const app::DiscoveredGame& g) {
-  const std::string& name = app::PreferredName(g);
+  std::string name = app::ResolveImportName(g);
   return name.empty() ? wxString(_("(unknown title)"))
                       : wxString::FromUTF8(name);
 }
@@ -318,7 +318,7 @@ void GameScanProgressDialog::StartFinalization() {
       group_index[key] = rows.size();
     }
     FinalRow r;
-    r.sort_key = ToLowerAsciiCopy(app::PreferredName(g));
+    r.sort_key = ToLowerAsciiCopy(app::ResolveImportName(g));
     r.sources.push_back(std::move(g));
     rows.push_back(std::move(r));
   }

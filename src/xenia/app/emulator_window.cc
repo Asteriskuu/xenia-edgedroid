@@ -1823,7 +1823,7 @@ void EmulatorWindow::FileAddGames() {
         continue;
       }
       const auto& primary = group.front().game;
-      const std::string name = app::PreferredName(primary);
+      const std::string name = ResolveImportName(primary);
       bool changed = false;
       for (const auto& pi : group) {
         changed |= library->AddDisc(primary.title_id, name, pi.game.path,

@@ -17,6 +17,7 @@
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "third_party/stb/stb_image.h"
+#include "xenia/app/game_title_db.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/vfs/iso_metadata.h"
@@ -120,6 +121,22 @@ DiscoveredGame MakeFromStfs(const std::filesystem::path& path,
 }
 
 }  // namespace
+
+std::string ResolveImportName(const DiscoveredGame& g) {
+  // STFS header title is authoritative.
+  if (g.format == "stfs") {
+    const std::string& stfs_name = PreferredName(g);
+    if (!stfs_name.empty()) {
+      return stfs_name;
+    }
+  }
+  // Otherwise prefer the x360db title, which also resolves alternative ids.
+  if (const GameTitleInfo* info = GetGameTitleInfo(g.title_id);
+      info && !info->name.empty()) {
+    return info->name;
+  }
+  return PreferredName(g);
+}
 
 DirectoryScanner::DirectoryScanner() = default;
 
