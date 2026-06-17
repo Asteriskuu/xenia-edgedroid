@@ -26,8 +26,10 @@ float XeApplyPWLGamma(uint input_value, uint2_xe ramp_value) {
 
 #ifdef XE_APPLY_GAMMA_FXAA_LUMA
   #define XE_APPLY_GAMMA_DEST_FORMAT image_format_rgba16f_xe
+  #define XE_APPLY_GAMMA_DEST_FORMAT_SPIRV "rgba16f"
 #else
   #define XE_APPLY_GAMMA_DEST_FORMAT image_format_rgb10_a2_xe
+  #define XE_APPLY_GAMMA_DEST_FORMAT_SPIRV "rgb10_a2"
 #endif
 push_const_begin_xe(b0, space0)
   uint2_xe xe_apply_gamma_size;
@@ -44,7 +46,8 @@ entry_bindings_begin_compute_xe
   texture_xe(texture_2d_xe, xe_apply_gamma_source, 1, 0, t1, space0,
              texture(1))
   entry_binding_next_xe
-  image_wo_xe(image_2d_xe, XE_APPLY_GAMMA_DEST_FORMAT, xe_apply_gamma_dest,
+  image_wo_xe(image_2d_xe, XE_APPLY_GAMMA_DEST_FORMAT,
+              XE_APPLY_GAMMA_DEST_FORMAT_SPIRV, xe_apply_gamma_dest,
               2, 0, u0, space0, texture(2))
 entry_bindings_end_inputs_begin_compute_xe
   entry_in_global_thread_id_xe

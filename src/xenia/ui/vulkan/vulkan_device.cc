@@ -174,7 +174,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 #if XE_PLATFORM_WIN32
     // #256. Windows-only extension to control fullscreen exclusive behavior.
     // Used to prevent HDR state corruption during fullscreen transitions.
-    XE_UI_VULKAN_STRUCT_EXTENSION(EXT_full_screen_exclusive)
+    // Requires the VK_KHR_get_surface_capabilities2 instance extension.
+    if (vulkan_instance->extensions().ext_KHR_get_surface_capabilities2) {
+      XE_UI_VULKAN_STRUCT_EXTENSION(EXT_full_screen_exclusive)
+    }
 #endif
   }
 
@@ -304,6 +307,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VkPhysicalDeviceFeatures2 supported_features_2 = {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 
+  VulkanFeatures<VkPhysicalDeviceVulkan11Features,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES>
+      features_1_1;
   VulkanFeatures<VkPhysicalDeviceVulkan12Features,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES>
       features_1_2;
@@ -363,6 +369,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
       features_EXT_device_fault;
 
   if (get_physical_device_properties2_supported) {
+    if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
+      features_1_1.Link(supported_features_2, device_create_info);
+    }
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
       features_1_2.Link(supported_features_2, device_create_info);
     } else {
@@ -416,8 +425,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (ext_1_3_EXT_subgroup_size_control) {
       properties_1_3_EXT_subgroup_size_control.pNext = properties_2.pNext;
       properties_2.pNext = &properties_1_3_EXT_subgroup_size_control;
-      features_1_3_EXT_subgroup_size_control.Link(supported_features_2,
-                                                  device_create_info);
+      // On Vulkan 1.3 these features come from VkPhysicalDeviceVulkan13Features
+      // (linked above). The standalone structure must not also be in the chain.
+      if (properties.apiVersion < VK_MAKE_API_VERSION(0, 1, 3, 0)) {
+        features_1_3_EXT_subgroup_size_control.Link(supported_features_2,
+                                                    device_create_info);
+      }
     }
     // VK_KHR_fragment_shader_barycentric / VK_NV_fragment_shader_barycentric.
     if (ext_KHR_fragment_shader_barycentric ||
@@ -748,6 +761,18 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   device->extensions_.ext_1_2_EXT_host_query_reset =
       ext_1_2_EXT_host_query_reset;
 
+  // shaderDrawParameters (Vulkan 1.1). Needed by shaders reading SV_VertexID
+  // with Direct3D semantics, which are compiled to VertexIndex minus BaseVertex
+  // (declaring the DrawParameters SPIR-V capability). The guest output triangle
+  // strip vertex shader used by the presenter is one such shader.
+  if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
+    features_1_1.enabled.shaderDrawParameters =
+        features_1_1.supported.shaderDrawParameters;
+    if (features_1_1.supported.shaderDrawParameters) {
+      XELOGI("* shaderDrawParameters");
+    }
+  }
+
   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
     if (with_gpu_emulation) {
       XE_UI_VULKAN_FEATURE_2(features_1_3, shaderDemoteToHelperInvocation);
@@ -842,10 +867,17 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     XE_UI_VULKAN_PROPERTY_2(properties_1_3_EXT_subgroup_size_control,
                             maxSubgroupSize);
     if (with_gpu_emulation) {
-      XE_UI_VULKAN_FEATURE_2(features_1_3_EXT_subgroup_size_control,
-                             subgroupSizeControl);
-      XE_UI_VULKAN_FEATURE_2(features_1_3_EXT_subgroup_size_control,
-                             computeFullSubgroups);
+      // On Vulkan 1.3 these are enabled through
+      // VkPhysicalDeviceVulkan13Features.
+      if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 3, 0)) {
+        XE_UI_VULKAN_FEATURE_2(features_1_3, subgroupSizeControl);
+        XE_UI_VULKAN_FEATURE_2(features_1_3, computeFullSubgroups);
+      } else {
+        XE_UI_VULKAN_FEATURE_2(features_1_3_EXT_subgroup_size_control,
+                               subgroupSizeControl);
+        XE_UI_VULKAN_FEATURE_2(features_1_3_EXT_subgroup_size_control,
+                               computeFullSubgroups);
+      }
     }
   }
   device->extensions_.ext_1_3_EXT_subgroup_size_control =

@@ -71,6 +71,15 @@
   #define XE_VK_PUSH_CONST
 #endif
 
+// Slang defaults writable images to the rgba8 SPIR-V format without this,
+// failing validation against views of other formats. SPIR-V targets only. The
+// fxc, dxc, GLSL and MSL paths ignore it.
+#if XE_SLANG_SPIRV
+  #define XE_VK_IMAGE_FORMAT(spirv_format) [[vk::image_format(spirv_format)]]
+#else
+  #define XE_VK_IMAGE_FORMAT(spirv_format)
+#endif
+
 // Vectors.
 
 #if SHADING_LANGUAGE_GLSL_XE
@@ -764,8 +773,8 @@ float4_xe float_x4_xe(float x) { return float4_xe(x, x, x, x); }
                      hlsl_t_space, hlsl_s, hlsl_s_space, msl_texture,    \
                      msl_sampler)                                        \
       layout(set = glsl_set, binding = glsl_binding) uniform sampler_type name;
-  #define image_wo_xe(type, format, name, glsl_set, glsl_binding, hlsl_u, \
-                      hlsl_u_space, msl_texture)                          \
+  #define image_wo_xe(type, format, spirv_format, name, glsl_set, glsl_binding, \
+                      hlsl_u, hlsl_u_space, msl_texture)                        \
       layout(format, set = glsl_set, binding = glsl_binding) uniform writeonly \
           type name;
   // Fetching and storing.
@@ -815,9 +824,10 @@ float4_xe float_x4_xe(float x) { return float4_xe(x, x, x, x); }
                            msl_sampler)                                        \
       XE_VK_BINDING(glsl_set, glsl_binding)                                    \
       SamplerState name : register(hlsl_s, hlsl_s_space);
-  #define image_wo_xe(type, format, name, glsl_set, glsl_binding, hlsl_u, \
-                      hlsl_u_space, msl_texture)                          \
+  #define image_wo_xe(type, format, spirv_format, name, glsl_set, glsl_binding, \
+                      hlsl_u, hlsl_u_space, msl_texture)                        \
       XE_VK_BINDING(glsl_set, glsl_binding)                               \
+      XE_VK_IMAGE_FORMAT(spirv_format)                                    \
       type<format> name : register(hlsl_u, hlsl_u_space);
   // Fetching and storing.
   #define texel_fetch_buffer_xe(texture_name, position) \
@@ -854,8 +864,8 @@ float4_xe float_x4_xe(float x) { return float4_xe(x, x, x, x); }
   #define sampler_state_xe(name, glsl_set, glsl_binding, hlsl_s, hlsl_s_space, \
                            msl_sampler)                                        \
       sampler name [[msl_sampler]]
-  #define image_wo_xe(type, format, name, glsl_set, glsl_binding, hlsl_u, \
-                      hlsl_u_space, msl_texture)                          \
+  #define image_wo_xe(type, format, spirv_format, name, glsl_set, glsl_binding, \
+                      hlsl_u, hlsl_u_space, msl_texture)                        \
       type<format, access::write> name [[msl_texture]]
   // Fetching and storing.
   #define texel_fetch_buffer_xe(texture_name, position) \

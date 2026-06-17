@@ -154,6 +154,10 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
     // #1.
     requested_extensions.emplace("VK_KHR_surface",
                                  &vulkan_instance->extensions_.ext_KHR_surface);
+    // #120. Required by VK_EXT_full_screen_exclusive.
+    requested_extensions.emplace(
+        "VK_KHR_get_surface_capabilities2",
+        &vulkan_instance->extensions_.ext_KHR_get_surface_capabilities2);
 #ifdef VK_USE_PLATFORM_XCB_KHR
     // #6.
     requested_extensions.emplace(
