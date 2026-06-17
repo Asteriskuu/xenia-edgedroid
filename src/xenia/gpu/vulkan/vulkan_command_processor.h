@@ -906,6 +906,16 @@ class VulkanCommandProcessor final : public CommandProcessor {
       SpirvShaderTranslator::kDescriptorSetCount <=
           sizeof(current_graphics_descriptor_sets_bound_up_to_date_) * CHAR_BIT,
       "Bit fields storing descriptor set validity must be large enough");
+  // For reusing the texture/sampler descriptor sets across draws while their
+  // contents stay valid - the shaders and the samplers the currently valid
+  // texture descriptor sets were written for (texture image view changes are
+  // tracked separately via VulkanTextureCache::texture_bindings_changed).
+  const VulkanShader* current_textures_vertex_shader_ = nullptr;
+  const VulkanShader* current_textures_pixel_shader_ = nullptr;
+  std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>
+      current_written_samplers_vertex_;
+  std::vector<std::pair<VulkanTextureCache::SamplerParameters, VkSampler>>
+      current_written_samplers_pixel_;
 
   // Float constant usage masks of the last draw call.
   uint64_t current_float_constant_map_vertex_[4];

@@ -6967,10 +6967,35 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     sampler_count_pixel = 0;
     texture_count_pixel = 0;
   }
-  // TODO(Triang3l): Reuse texture and sampler bindings if not changed.
-  current_graphics_descriptor_set_values_up_to_date_ &=
-      ~((UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex) |
-        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
+  // Reuse the texture and sampler descriptor sets across draws while their
+  // contents stay valid. A set becomes stale when the shader (and thus its
+  // binding list) changes, when a used texture's host image view changes, or
+  // when a sampler changes. The validity bits are cleared at the start of every
+  // frame, and the transient sets aren't recycled until the frame completes, so
+  // a kept set's handle is always still alive.
+  uint32_t textures_changed = texture_cache_->texture_bindings_changed();
+  uint32_t used_texture_mask_vertex =
+      vertex_shader->GetUsedTextureMaskAfterTranslation();
+  uint32_t used_texture_mask_pixel =
+      pixel_shader ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0;
+  if ((current_graphics_descriptor_set_values_up_to_date_ &
+       (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex)) &&
+      (current_textures_vertex_shader_ != vertex_shader ||
+       (textures_changed & used_texture_mask_vertex) ||
+       current_written_samplers_vertex_ != current_samplers_vertex_)) {
+    current_graphics_descriptor_set_values_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex);
+  }
+  if ((current_graphics_descriptor_set_values_up_to_date_ &
+       (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel)) &&
+      (current_textures_pixel_shader_ != pixel_shader ||
+       (textures_changed & used_texture_mask_pixel) ||
+       current_written_samplers_pixel_ != current_samplers_pixel_)) {
+    current_graphics_descriptor_set_values_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel);
+  }
+  texture_cache_->ResetTextureBindingsChanged(used_texture_mask_vertex |
+                                              used_texture_mask_pixel);
 
   // Make sure new descriptor sets are bound to the command buffer.
 
@@ -7116,6 +7141,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     current_graphics_descriptor_sets_
         [SpirvShaderTranslator::kDescriptorSetTexturesVertex] =
             write_textures[0].dstSet;
+    // Remember what this set was written for, to reuse it in later draws.
+    current_textures_vertex_shader_ = vertex_shader;
+    current_written_samplers_vertex_ = current_samplers_vertex_;
   }
   // Pixel shader textures and samplers.
   if (write_pixel_textures) {
@@ -7137,6 +7165,9 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     current_graphics_descriptor_sets_
         [SpirvShaderTranslator::kDescriptorSetTexturesPixel] =
             write_textures[0].dstSet;
+    // Remember what this set was written for, to reuse it in later draws.
+    current_textures_pixel_shader_ = pixel_shader;
+    current_written_samplers_pixel_ = current_samplers_pixel_;
   }
   // Write.
   if (write_descriptor_set_count) {

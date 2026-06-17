@@ -1805,6 +1805,9 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
 
 void VulkanTextureCache::UpdateTextureBindingsImpl(
     uint32_t fetch_constant_mask) {
+  // These image views are about to change - let the command processor know the
+  // texture descriptor sets referencing them need to be rewritten.
+  texture_bindings_changed_ |= fetch_constant_mask;
   uint32_t bindings_remaining = fetch_constant_mask;
   uint32_t binding_index;
   while (xe::bit_scan_forward(bindings_remaining, &binding_index)) {
