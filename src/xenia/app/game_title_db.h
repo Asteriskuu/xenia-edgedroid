@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace xe {
 namespace app {
@@ -26,6 +27,12 @@ struct GameTitleInfo {
 // Returns nullptr when the id is unknown. The pointer is stable for the
 // lifetime of the process.
 const GameTitleInfo* GetGameTitleInfo(uint32_t title_id);
+
+// Returns every title id the game is known by (primary id first, then its
+// alternative ids), or nullptr if the id is unknown. The pointer is stable
+// for the lifetime of the process. Useful for resolving data recorded under a
+// sibling id, e.g. compat state stored under a different release's id.
+const std::vector<uint32_t>* GetTitleIdGroup(uint32_t title_id);
 
 }  // namespace app
 }  // namespace xe

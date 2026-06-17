@@ -12,6 +12,7 @@
 #include <deque>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "rapidjson/document.h"
 
@@ -26,10 +27,16 @@ namespace app {
 
 namespace {
 
+// One x360db game: its metadata plus every title id it is known by.
+struct Record {
+  GameTitleInfo info;
+  std::vector<uint32_t> ids;  // Primary id first, then alternative ids.
+};
+
 struct TitleIndex {
-  // Owns the metadata; pointers into it stay valid (deque never reallocates).
-  std::deque<GameTitleInfo> entries;
-  std::unordered_map<uint32_t, const GameTitleInfo*> by_id;
+  // Owns the records; pointers into it stay valid (deque never reallocates).
+  std::deque<Record> records;
+  std::unordered_map<uint32_t, const Record*> by_id;
 };
 
 std::string GetMemberString(const rapidjson::Value& entry, const char* key) {
@@ -72,13 +79,13 @@ const TitleIndex& GetTitleIndex() {
         if (title_id == 0) {
           continue;
         }
-        const GameTitleInfo& info = idx.entries.emplace_back(GameTitleInfo{
-            GetMemberString(entry, "title"),
-            GetMemberString(entry, "boxart"),
-        });
-        // First writer wins so the primary id is never shadowed by another
+        Record& rec = idx.records.emplace_back();
+        rec.info.name = GetMemberString(entry, "title");
+        rec.info.boxart = GetMemberString(entry, "boxart");
+        rec.ids.push_back(title_id);
+        // First writer wins so a primary id is never shadowed by another
         // game's alternative id.
-        idx.by_id.emplace(title_id, &info);
+        idx.by_id.emplace(title_id, &rec);
         auto alt_it = entry.FindMember("alternative_id");
         if (alt_it != entry.MemberEnd() && alt_it->value.IsArray()) {
           for (const auto& alt : alt_it->value.GetArray()) {
@@ -88,7 +95,8 @@ const TitleIndex& GetTitleIndex() {
             uint32_t alt_id =
                 ParseHexTitleId(alt.GetString(), alt.GetStringLength());
             if (alt_id != 0) {
-              idx.by_id.emplace(alt_id, &info);
+              rec.ids.push_back(alt_id);
+              idx.by_id.emplace(alt_id, &rec);
             }
           }
         }
@@ -110,7 +118,19 @@ const GameTitleInfo* GetGameTitleInfo(uint32_t title_id) {
   if (it == idx.by_id.end()) {
     return nullptr;
   }
-  return it->second;
+  return &it->second->info;
+}
+
+const std::vector<uint32_t>* GetTitleIdGroup(uint32_t title_id) {
+  if (title_id == 0) {
+    return nullptr;
+  }
+  const auto& idx = GetTitleIndex();
+  auto it = idx.by_id.find(title_id);
+  if (it == idx.by_id.end()) {
+    return nullptr;
+  }
+  return &it->second->ids;
 }
 
 }  // namespace app

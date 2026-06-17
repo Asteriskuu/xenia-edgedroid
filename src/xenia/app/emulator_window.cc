@@ -9,6 +9,7 @@
 
 #include "xenia/app/emulator_window.h"
 
+#include "xenia/app/game_compat_db.h"
 #include "xenia/ui/advanced_settings_dialog_wx.h"
 #include "xenia/ui/game_list_panel_wx.h"
 #include "xenia/ui/game_scan_progress_dialog_wx.h"
@@ -2876,7 +2877,8 @@ void EmulatorWindow::ShowCompatibility() {
   if (!title_id) {
     url = base_url;
   } else {
-    url = fmt::format("{}?q=is%3Aissue+is%3Aopen+{:08X}", base_url, title_id);
+    url = fmt::format("{}?q=is%3Aissue+is%3Aopen+{}", base_url,
+                      CompatSearchQuery(title_id));
   }
   LaunchWebBrowser(url);
 }
