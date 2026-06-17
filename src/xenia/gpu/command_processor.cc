@@ -235,6 +235,12 @@ bool CommandProcessor::Initialize() {
 }
 
 void CommandProcessor::Shutdown() {
+  // Already stopped if drained early during relaunch (stopped again at
+  // teardown).
+  if (!worker_thread_) {
+    return;
+  }
+
   EndTracing();
 
   worker_running_ = false;

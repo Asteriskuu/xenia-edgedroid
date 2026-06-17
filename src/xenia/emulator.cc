@@ -1311,6 +1311,12 @@ void Emulator::RelaunchTitle(const std::string& host_path,
   // otherwise TerminateThread corrupts the CV it's blocked on.
   kernel_state_->ShutdownDispatchThread();
 
+  // Stop the GPU command processor before terminating guest threads so its
+  // worker can cleanly run ShutdownContext and free its Vulkan resources.
+  if (graphics_system_ && graphics_system_->command_processor()) {
+    graphics_system_->command_processor()->Shutdown();
+  }
+
   // Force-terminate remaining threads.
   {
     auto threads =
@@ -1359,6 +1365,12 @@ void Emulator::ResetTitle() {
   relaunching_ = true;
 
   kernel_state_->ShutdownDispatchThread();
+
+  // Stop the GPU command processor before terminating guest threads so its
+  // worker can cleanly run ShutdownContext and free its Vulkan resources.
+  if (graphics_system_ && graphics_system_->command_processor()) {
+    graphics_system_->command_processor()->Shutdown();
+  }
 
   // Stop the dispatch thread before tearing down guest threads. Their fibers
   // run on it, so terminating one from this host thread while the dispatcher is
