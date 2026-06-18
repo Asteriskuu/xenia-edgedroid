@@ -1641,7 +1641,23 @@ bool Emulator::ExceptionCallbackThunk(Exception* ex, void* data) {
   }
 }
 
+// Parks a guest thread that faults during an in-process relaunch off the freed
+// code; teardown's pending cancel exits it at this NanoSleep.
+[[noreturn]] static void HaltDuringRelaunchThunk() {
+  while (true) {
+    xe::threading::NanoSleep(int64_t(1'000'000'000));
+  }
+}
+
 bool Emulator::ExceptionCallback(Exception* ex) {
+  // In-process relaunch/reset frees state under still-running guest threads;
+  // their faults are expected, so park them instead of crashing. The teardown
+  // thread isn't a guest thread, so its own faults still surface.
+  if (relaunching_ && kernel::XThread::IsInThread()) {
+    ex->set_resume_pc(reinterpret_cast<uint64_t>(&HaltDuringRelaunchThunk));
+    return true;
+  }
+
   // Check to see if the exception occurred in guest code.
   auto code_cache = processor()->backend()->code_cache();
   auto code_base = code_cache->execute_base_address();

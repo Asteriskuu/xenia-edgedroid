@@ -13,6 +13,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
+#include "xenia/base/threading.h"
 #include "xenia/base/utf8.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
@@ -327,10 +328,11 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
     XELOGI("XamLoaderLaunchTitle: normalized host_path={}, launch_path={}",
            xe::path_to_utf8(host_path), launch_path);
 
-    // Handle title launch in-process via full Shutdown/Setup cycle.
-    // Disabled on Linux — pthread_cancel corrupts global mutex state and
-    // cooperative shutdown is not yet reliable. Windows uses TerminateThread.
-#if XE_PLATFORM_WIN32
+    // Handle title launch in-process via full Shutdown/Setup cycle. Disabled
+    // on macOS — pthread_cancel there doesn't run C++ destructors, so
+    // force-terminated guest threads leak locks and deadlock teardown; spawn a
+    // fresh process instead.
+#if !XE_PLATFORM_MAC
     if (cvars::in_process_title_relaunch) {
       auto emulator = kernel_state()->emulator();
 
@@ -352,12 +354,14 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
                                 std::move(new_data));
       }).detach();
 
+      // Stop running guest code; RelaunchTitle terminates us. Suspend can
+      // return on POSIX, so park rather than fall through to spawn.
       current_thread->Suspend(nullptr);
-
-      // Unreachable — thread is terminated during relaunch.
-      assert_always();
+      while (true) {
+        xe::threading::NanoSleep(int64_t(1'000'000'000));
+      }
     }
-#endif  // XE_PLATFORM_WIN32
+#endif  // !XE_PLATFORM_MAC
 
     std::string launch_data_hex;
     for (uint8_t byte : loader_data.launch_data) {

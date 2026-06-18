@@ -341,6 +341,36 @@ const char* RosettaArchFlagIfSwitchNeeded(bool want_rosetta) {
 }
 #endif
 
+#if XE_PLATFORM_LINUX
+// gamemoderun injects libgamemodeauto via LD_PRELOAD, which fork inherits.
+// Strip it so a child spawned to drop GameMode isn't left wrapped.
+void StripGameModeFromLdPreload() {
+  const char* preload = getenv("LD_PRELOAD");
+  if (!preload) {
+    return;
+  }
+  std::string kept;
+  std::string_view sv(preload);
+  for (size_t i = 0; i < sv.size();) {
+    size_t sep = sv.find_first_of(" :", i);
+    size_t len = (sep == std::string_view::npos) ? sv.size() - i : sep - i;
+    std::string_view tok = sv.substr(i, len);
+    if (!tok.empty() && tok.find("gamemodeauto") == std::string_view::npos) {
+      if (!kept.empty()) {
+        kept += ':';
+      }
+      kept.append(tok);
+    }
+    i = (sep == std::string_view::npos) ? sv.size() : sep + 1;
+  }
+  if (kept.empty()) {
+    unsetenv("LD_PRELOAD");
+  } else {
+    setenv("LD_PRELOAD", kept.c_str(), 1);
+  }
+}
+#endif
+
 // The first tool flips between "Open" (no title) and "Back" (title running).
 constexpr int kToolIdOpenBack = 11000;
 constexpr int kToolIdSettings = 11001;
@@ -1874,13 +1904,12 @@ bool EmulatorWindow::StopTitleAndReturnToList() {
     return false;
   }
   target_pending_launch_ = false;
-  // Match xam_info.cc: in-process relaunch only on Windows (Linux's
-  // pthread_cancel corrupts global mutex state). Elsewhere, fall back to
-  // spawning a fresh process with no target.
-#if XE_PLATFORM_WIN32
-  const bool in_process = cvars::in_process_title_relaunch;
-#else
+  // When in-process relaunch is off, spawn a fresh process with no target.
+  // macOS always spawns (see XamLoaderLaunchTitle).
+#if XE_PLATFORM_MAC
   const bool in_process = false;
+#else
+  const bool in_process = cvars::in_process_title_relaunch;
 #endif
   if (!in_process) {
     if (auto cb = emulator_->on_launch_new_title()) {
@@ -3537,6 +3566,8 @@ void EmulatorWindow::LaunchTitleInNewProcess(
     if (cvars::use_gamemode) {
       gamemode_cmd = "gamemoderun";
       argv.push_back(gamemode_cmd.c_str());
+    } else {
+      StripGameModeFromLdPreload();  // GameMode off → drop any inherited wrap
     }
 #endif
 #if XE_PLATFORM_MAC
@@ -3654,26 +3685,25 @@ xe::X_STATUS EmulatorWindow::RunTitle(
       }
     }
     auto host_path = xe::path_to_utf8(abs_path);
-#if XE_PLATFORM_WIN32
-    // In-process relaunch via the same path the kernel takes for title-to-title
-    // (xam_info.cc XamLoaderLaunchTitle). Must run on a detached non-guest
-    // thread because RelaunchTitle terminates all guest threads.
-    auto* emulator = emulator_;
-    std::thread([emulator, host_path = std::move(host_path)]() mutable {
-      emulator->RelaunchTitle(host_path, /*launch_module=*/{},
-                              /*launch_flags=*/0, /*launch_data=*/{});
-    }).detach();
-    return X_STATUS_SUCCESS;
-#else
-    // POSIX: spawn a fresh process with the new title and exit, same path as
-    // the kernel's title-to-title launch (set_on_launch_new_title callback).
+    // macOS always relaunches out-of-process (see XamLoaderLaunchTitle).
+#if !XE_PLATFORM_MAC
+    if (cvars::in_process_title_relaunch) {
+      // Detached non-guest thread: RelaunchTitle terminates all guest threads.
+      auto* emulator = emulator_;
+      std::thread([emulator, host_path = std::move(host_path)]() mutable {
+        emulator->RelaunchTitle(host_path, /*launch_module=*/{},
+                                /*launch_flags=*/0, /*launch_data=*/{});
+      }).detach();
+      return X_STATUS_SUCCESS;
+    }
+#endif  // !XE_PLATFORM_MAC
+    // Otherwise spawn a fresh process (same path as the kernel relaunch).
     auto cb = emulator_->on_launch_new_title();
     if (cb) {
       cb(host_path, /*launch_module=*/{}, /*launch_flags=*/0,
          /*launch_data=*/{});
     }
     return X_STATUS_UNSUCCESSFUL;
-#endif
   }
 
   // Guard against re-entry — a rapid double-click would otherwise spawn
@@ -3700,16 +3730,44 @@ xe::X_STATUS EmulatorWindow::RunTitle(
     return X_STATUS_UNSUCCESSFUL;
   }
 
-#if XE_PLATFORM_LINUX || XE_PLATFORM_MAC
-  // In-process launch is unstable here; spawn a fresh process. Apply the
-  // title's overrides first — LaunchTitleInNewProcess reads cvars (e.g.
-  // use_rosetta, use_gamemode) before fork, so the child needs the
-  // overridden values inherited from the parent.
-  config::ReloadConfig();
-  config::LoadGameConfigForFile(abs_path);
-  LaunchTitleInNewProcess(abs_path);
-  return X_STATUS_SUCCESS;
+  // macOS always relaunches out-of-process (see XamLoaderLaunchTitle).
+#if XE_PLATFORM_MAC
+  bool spawn_fresh = true;
+#else
+  bool spawn_fresh = !cvars::in_process_title_relaunch;
 #endif
+#if XE_PLATFORM_LINUX
+  // gamemoderun wraps the process via LD_PRELOAD (which fork inherits) and an
+  // in-process launch can't add or drop it. Like the gpu/apu respawn below,
+  // spawn when the desired state (cvar) differs from the actual (already
+  // wrapped?), so toggling GameMode takes effect on the next launch.
+  const char* ld_preload = std::getenv("LD_PRELOAD");
+  const bool already_under_gamemode =
+      ld_preload && std::strstr(ld_preload, "gamemodeauto");
+  spawn_fresh |= cvars::use_gamemode != already_under_gamemode;
+  // MangoHud reads MANGOHUD at Vulkan init, so an in-process launch can't turn
+  // it on. Spawn when the cvar wants it but it's not already in the environment
+  // (inherited from an earlier launch, or set externally).
+  const char* mangohud = std::getenv("MANGOHUD");
+  const bool mangohud_active = mangohud && mangohud[0] != '0';
+  spawn_fresh |= cvars::use_mangohud && !mangohud_active;
+#endif
+#if XE_PLATFORM_MAC
+  // The Metal HUD reads MTL_HUD_ENABLED at Metal init, so an in-process launch
+  // can't turn it on. Spawn when the cvar wants it but it's not already set
+  // (inherited from an earlier launch, or set externally).
+  const char* mtl_hud = std::getenv("MTL_HUD_ENABLED");
+  const bool mtl_hud_active = mtl_hud && mtl_hud[0] != '0';
+  spawn_fresh |= cvars::use_metal_hud && !mtl_hud_active;
+#endif
+  if (spawn_fresh) {
+    // Per-game overrides first — the spawned child inherits the resulting
+    // cvars.
+    config::ReloadConfig();
+    config::LoadGameConfigForFile(abs_path);
+    LaunchTitleInNewProcess(abs_path);
+    return X_STATUS_SUCCESS;
+  }
 
   // Drop the previous title's subsystems (if any) and pick up current cvars
   // — including per-game gpu/apu overrides applied by LoadGameConfigForFile —

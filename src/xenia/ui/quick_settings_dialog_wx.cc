@@ -321,13 +321,14 @@ void QuickSettingsDialog::Build() {
     remember_label("discord", discord_label);
     add_form_row(grid, discord_label, discord);
 
-#if XE_PLATFORM_WIN32
-    // Other platforms always relaunch out-of-process (see RunTitle), so the
-    // cvar has no effect there.
     auto* in_proc = add_check(box, "in_process_title_relaunch");
     auto* in_proc_label = add_label(box, _("In-Process Title Relaunch:"));
     remember_label("in_process_title_relaunch", in_proc_label);
     add_form_row(grid, in_proc_label, in_proc);
+#if XE_PLATFORM_MAC
+    // macOS always relaunches out-of-process; the cvar has no effect there.
+    in_proc->Disable();
+    in_proc->SetToolTip(_("Not supported on macOS"));
 #endif
 
     auto* lang = add_combo(box, "user_language", find_options("user_language"));

@@ -870,9 +870,14 @@ void KernelState::ExitToDashboard() {
   XELOGI("KernelState::ExitToDashboard");
   if (auto on_exit_to_dashboard = emulator_->on_exit_to_dashboard()) {
     if (on_exit_to_dashboard()) {
-      // The in-process reset is about to terminate this thread.
-      XThread::GetCurrentThread()->Suspend(nullptr);
-      assert_always();
+      // Park off guest code until the in-process reset terminates us; Suspend
+      // can return on POSIX, so loop rather than fall through to
+      // TerminateTitle.
+      auto* current_thread = XThread::GetCurrentThread();
+      current_thread->Suspend(nullptr);
+      while (true) {
+        xe::threading::NanoSleep(int64_t(1'000'000'000));
+      }
     }
   }
   TerminateTitle();

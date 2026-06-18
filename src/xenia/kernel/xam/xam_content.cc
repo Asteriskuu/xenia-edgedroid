@@ -8,10 +8,13 @@
  */
 
 #include <atomic>
+#include <thread>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_util.h"
+#include "xenia/base/threading.h"
+#include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/smc.h"
 #include "xenia/kernel/user_module.h"
@@ -22,11 +25,14 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xenumerator.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/vfs/devices/stfs_xbox.h"
 #include "xenia/vfs/devices/xcontent_container_device.h"
 #include "xenia/xbox.h"
+
+DECLARE_bool(in_process_title_relaunch);
 
 DEFINE_int32(
     license_mask, 0,
@@ -920,6 +926,23 @@ dword_result_t XamContentLaunchImageFromFileInternal_entry(
         entry, kernel_state()->emulator()->content_root(), progress, true);
   }
 
+  // In-process relaunch is disabled on macOS — see XamLoaderLaunchTitle.
+#if !XE_PLATFORM_MAC
+  if (cvars::in_process_title_relaunch) {
+    auto* emulator = kernel_state()->emulator();
+    auto host_path_utf8 = xe::path_to_utf8(host_path);
+    std::thread([emulator, host_path_utf8, module = xex_name_]() mutable {
+      emulator->RelaunchTitle(host_path_utf8, module, 0, {});
+    }).detach();
+    // Park off guest code until RelaunchTitle terminates us (Suspend can return
+    // on POSIX).
+    XThread::GetCurrentThread()->Suspend(nullptr);
+    while (true) {
+      xe::threading::NanoSleep(int64_t(1'000'000'000));
+    }
+  }
+#endif  // !XE_PLATFORM_MAC
+
   auto on_launch_new_title = kernel_state()->emulator()->on_launch_new_title();
   if (on_launch_new_title) {
     XELOGI("XamContentLaunchImageFromFileInternal: spawning new title process");
@@ -961,6 +984,24 @@ dword_result_t XamContentLaunchImageInternal_entry(lpvoid_t content_data_ptr,
     kernel_state()->file_system()->ExtractContentFile(
         entry, kernel_state()->emulator()->content_root(), progress, true);
   }
+
+  // In-process relaunch is disabled on macOS — see XamLoaderLaunchTitle.
+#if !XE_PLATFORM_MAC
+  if (cvars::in_process_title_relaunch) {
+    auto* emulator = kernel_state()->emulator();
+    auto host_path_utf8 = xe::path_to_utf8(host_path);
+    std::thread([emulator, host_path_utf8,
+                 module = xex_path.value()]() mutable {
+      emulator->RelaunchTitle(host_path_utf8, module, 0, {});
+    }).detach();
+    // Park off guest code until RelaunchTitle terminates us (Suspend can return
+    // on POSIX).
+    XThread::GetCurrentThread()->Suspend(nullptr);
+    while (true) {
+      xe::threading::NanoSleep(int64_t(1'000'000'000));
+    }
+  }
+#endif  // !XE_PLATFORM_MAC
 
   auto on_launch_new_title = kernel_state()->emulator()->on_launch_new_title();
   if (on_launch_new_title) {
