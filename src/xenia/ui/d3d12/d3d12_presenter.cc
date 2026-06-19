@@ -1101,9 +1101,13 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
   paint_context_.present_completion_timeline->SignalAndAdvance(direct_queue);
   switch (present_result) {
     case DXGI_ERROR_DEVICE_REMOVED:
-      return PaintResult::kGpuLostExternally;
     case DXGI_ERROR_DEVICE_RESET:
-      return PaintResult::kGpuLostResponsible;
+      XELOGE("Direct3D 12 device removed on Present, reason: 0x{:08X}",
+             uint32_t(provider_.GetDevice()->GetDeviceRemovedReason()));
+      provider_.DumpDeviceRemovedData();
+      return present_result == DXGI_ERROR_DEVICE_REMOVED
+                 ? PaintResult::kGpuLostExternally
+                 : PaintResult::kGpuLostResponsible;
     default:
       return SUCCEEDED(present_result) ? PaintResult::kPresented
                                        : PaintResult::kNotPresented;

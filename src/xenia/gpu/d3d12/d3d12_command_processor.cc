@@ -3885,6 +3885,9 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   HRESULT device_removed_reason = device->GetDeviceRemovedReason();
   if (FAILED(device_removed_reason)) {
     device_removed_ = true;
+    XELOGE("Direct3D 12 device removed, reason: 0x{:08X}",
+           uint32_t(device_removed_reason));
+    GetD3D12Provider().DumpDeviceRemovedData();
     graphics_system_->OnHostGpuLossFromAnyThread(device_removed_reason !=
                                                  DXGI_ERROR_DEVICE_REMOVED);
     return false;

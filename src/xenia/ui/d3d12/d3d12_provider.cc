@@ -21,6 +21,11 @@
 #include "xenia/ui/d3d12/d3d12_util.h"
 DEFINE_bool(d3d12_debug, false, "Enable Direct3D 12 and DXGI debug layer.",
             "D3D12");
+DEFINE_bool(d3d12_dred, false,
+            "Enable Direct3D 12 Device Removed Extended Data (DRED) to log the "
+            "operation and allocations involved in a device removal. Works "
+            "without the debug layer.",
+            "D3D12");
 DEFINE_bool(d3d12_break_on_error, false,
             "Break on Direct3D 12 validation errors.", "D3D12");
 DEFINE_bool(d3d12_break_on_warning, false,
@@ -51,6 +56,66 @@ bool D3D12Provider::IsD3D12APIAvailable() {
 
 const std::string& D3D12Provider::GetAdapterDescription() const {
   return adapter_description_;
+}
+
+void D3D12Provider::DumpDeviceRemovedData() const {
+  ID3D12DeviceRemovedExtendedData* dred;
+  if (FAILED(device_->QueryInterface(IID_PPV_ARGS(&dred)))) {
+    return;
+  }
+  bool any_data = false;
+  // Breadcrumbs identify the last GPU operation that ran before the removal.
+  D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs;
+  if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs))) {
+    for (const D3D12_AUTO_BREADCRUMB_NODE* node =
+             breadcrumbs.pHeadAutoBreadcrumbNode;
+         node; node = node->pNext) {
+      uint32_t op_count = node->BreadcrumbCount;
+      uint32_t completed =
+          node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+      if (completed >= op_count) {
+        // This command list finished, so it is not where the GPU stopped.
+        continue;
+      }
+      any_data = true;
+      XELOGE(
+          "DRED: command list '{}' on queue '{}' stopped after {} of {} ops, "
+          "next op was {}",
+          node->pCommandListDebugNameA ? node->pCommandListDebugNameA
+                                       : "<unnamed>",
+          node->pCommandQueueDebugNameA ? node->pCommandQueueDebugNameA
+                                        : "<unnamed>",
+          completed, op_count, uint32_t(node->pCommandHistory[completed]));
+    }
+  }
+  // Page-fault data names the allocation a bad GPU address belonged to.
+  D3D12_DRED_PAGE_FAULT_OUTPUT page_fault;
+  if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&page_fault)) &&
+      page_fault.PageFaultVA) {
+    any_data = true;
+    XELOGE("DRED: GPU page fault at virtual address 0x{:016X}",
+           uint64_t(page_fault.PageFaultVA));
+    for (const D3D12_DRED_ALLOCATION_NODE* node =
+             page_fault.pHeadExistingAllocationNode;
+         node; node = node->pNext) {
+      XELOGE("DRED:   live allocation '{}' (type {})",
+             node->ObjectNameA ? node->ObjectNameA : "<unnamed>",
+             uint32_t(node->AllocationType));
+    }
+    for (const D3D12_DRED_ALLOCATION_NODE* node =
+             page_fault.pHeadRecentFreedAllocationNode;
+         node; node = node->pNext) {
+      XELOGE("DRED:   recently freed allocation '{}' (type {})",
+             node->ObjectNameA ? node->ObjectNameA : "<unnamed>",
+             uint32_t(node->AllocationType));
+    }
+  }
+  if (!any_data) {
+    XELOGW(
+        "DRED: no device-removed data; restart with --d3d12_dred to capture "
+        "the faulting operation");
+  }
+  dred->Release();
 }
 
 // Check for Intel Arc cards and Intel Graphics iGPUs which use
@@ -268,6 +333,22 @@ bool D3D12Provider::Initialize() {
     } else {
       XELOGW("Failed to enable the Direct3D 12 debug layer");
       debug = false;
+    }
+  }
+
+  // Enable Device Removed Extended Data. Must be set before device creation,
+  // and unlike the debug layer it does not need the Graphics Tools feature.
+  if (cvars::d3d12_dred) {
+    ID3D12DeviceRemovedExtendedDataSettings* dred_settings;
+    if (SUCCEEDED(
+            pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&dred_settings)))) {
+      dred_settings->SetAutoBreadcrumbsEnablement(
+          D3D12_DRED_ENABLEMENT_FORCED_ON);
+      dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+      dred_settings->Release();
+      XELOGI("Direct3D 12 DRED enabled");
+    } else {
+      XELOGW("Failed to enable Direct3D 12 DRED");
     }
   }
 
