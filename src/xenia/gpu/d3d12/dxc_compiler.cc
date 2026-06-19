@@ -97,8 +97,11 @@ bool DxcCompiler::Compile(const std::string& hlsl_source,
     arguments.push_back(L"-Od");
     arguments.push_back(L"-Zi");
   } else {
-    // Optimized (DXC defaults to -O3). Strip reflection metadata to shrink the
-    // DXIL blob. The runtime uses translator-gathered bindings, not reflection.
+    // Optimized (DXC defaults to -O3). Force IEEE strictness. DXC fast-math
+    // reassociation miscompiles guest shaders that rely on precise float
+    // semantics. Strip reflection metadata to shrink the DXIL blob. The runtime
+    // uses translator-gathered bindings, not reflection.
+    arguments.push_back(L"-Gis");
     arguments.push_back(L"-Qstrip_reflect");
   }
 
