@@ -719,9 +719,14 @@ int main(int argc, char** argv) {
       std::filesystem::remove(air_path, mec);
       std::filesystem::remove(lib_path, mec);
     };
+    // Pin the deployment target so the AIR (and the metallib linked from it)
+    // carries XE_METAL_MIN_OS. Without this, the macOS 26 SDK stamps the
+    // SDK-default target into the library (deployment target 0x00020008),
+    // which the loader rejects on older OSes. Mirrors the --msl path above.
     if (RunCommand({"xcrun", "-sdk", "macosx", "metal", "-x", "metal",
-                    "-std=macos-metal2.3", "-w", "-c", slang_out.string(), "-o",
-                    air_path.string()}) != 0) {
+                    "-std=macos-metal2.3",
+                    "-mmacosx-version-min=" XE_METAL_MIN_OS, "-w", "-c",
+                    slang_out.string(), "-o", air_path.string()}) != 0) {
       std::fprintf(stderr, "metal failed for %s\n",
                    input_path.string().c_str());
       cleanup_slang();
