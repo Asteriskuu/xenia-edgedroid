@@ -36,6 +36,7 @@ DEFINE_bool(d3d12_bindless, true,
             "D3D12");
 
 DECLARE_bool(clear_memory_page_state);
+DECLARE_bool(d3d12_debug);
 DECLARE_bool(gpu_debug_markers);
 DECLARE_bool(submit_on_primary_buffer_end);
 DECLARE_bool(readback_memexport_fast);
@@ -3888,6 +3889,9 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
     XELOGE("Direct3D 12 device removed, reason: 0x{:08X}",
            uint32_t(device_removed_reason));
     GetD3D12Provider().DumpDeviceRemovedData();
+    if (cvars::d3d12_debug) {
+      GetD3D12Provider().LogD3D12DebugMessages();
+    }
     graphics_system_->OnHostGpuLossFromAnyThread(device_removed_reason !=
                                                  DXGI_ERROR_DEVICE_REMOVED);
     return false;

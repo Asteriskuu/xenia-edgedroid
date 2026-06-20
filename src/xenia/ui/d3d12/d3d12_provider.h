@@ -178,6 +178,11 @@ class D3D12Provider : public GraphicsProvider {
   static bool EnableIncreaseBasePriorityPrivilege();
   bool Initialize();
 
+  // Opts into the Agility runtime (D3D12Core.dll in the D3D12 subfolder) via
+  // ID3D12SDKConfiguration. Must precede the first device creation. Returns
+  // true if the runtime was selected.
+  bool TryEnableAgilitySdk();
+
   typedef HRESULT(WINAPI* PFNCreateDXGIFactory2)(UINT Flags, REFIID riid,
                                                  _COM_Outptr_ void** ppFactory);
   typedef HRESULT(WINAPI* PFNDXGIGetDebugInterface1)(
@@ -201,6 +206,11 @@ class D3D12Provider : public GraphicsProvider {
 
   HMODULE library_dxcompiler_ = nullptr;
   DxcCreateInstanceProc pfn_dxcompiler_dxc_create_instance_ = nullptr;
+
+  // Pre-loaded by full path so dxcompiler.dll's own plain-name load of dxil.dll
+  // resolves to the copy in the D3D12 folder. May be nullptr (system-wide
+  // dxil.dll, if any, still resolves on dxcompiler's own).
+  HMODULE library_dxil_ = nullptr;
 
   IDXGIFactory2* dxgi_factory_ = nullptr;
   ID3D12Device* device_ = nullptr;

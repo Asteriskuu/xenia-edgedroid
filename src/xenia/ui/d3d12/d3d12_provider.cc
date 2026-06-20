@@ -19,6 +19,7 @@
 #include "xenia/ui/d3d12/d3d12_immediate_drawer.h"
 #include "xenia/ui/d3d12/d3d12_presenter.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
+#include "xenia/ui/redist_installer_wx.h"
 DEFINE_bool(d3d12_debug, false, "Enable Direct3D 12 and DXGI debug layer.",
             "D3D12");
 DEFINE_bool(d3d12_dred, false,
@@ -170,6 +171,9 @@ D3D12Provider::~D3D12Provider() {
   if (library_dxcompiler_ != nullptr) {
     FreeLibrary(library_dxcompiler_);
   }
+  if (library_dxil_ != nullptr) {
+    FreeLibrary(library_dxil_);
+  }
   if (library_dxilconv_ != nullptr) {
     FreeLibrary(library_dxilconv_);
   }
@@ -201,6 +205,33 @@ bool D3D12Provider::EnableIncreaseBasePriorityPrivilege() {
                  GetLastError() != ERROR_NOT_ALL_ASSIGNED;
   CloseHandle(token);
   return enabled;
+}
+
+bool D3D12Provider::TryEnableAgilitySdk() {
+  auto pfn_d3d12_get_interface = PFN_D3D12_GET_INTERFACE(
+      GetProcAddress(library_d3d12_, "D3D12GetInterface"));
+  if (!pfn_d3d12_get_interface) {
+    // d3d12.dll predates Agility SDK support, so only the in-box runtime
+    // exists.
+    return false;
+  }
+  ID3D12SDKConfiguration* sdk_configuration;
+  if (FAILED(pfn_d3d12_get_interface(CLSID_D3D12SDKConfiguration,
+                                     IID_PPV_ARGS(&sdk_configuration)))) {
+    return false;
+  }
+  // Version must match the Agility SDK the installer downloads (1.619.3 ->
+  // 619).
+  HRESULT hr = sdk_configuration->SetSDKVersion(619, ".\\D3D12\\");
+  sdk_configuration->Release();
+  if (FAILED(hr)) {
+    XELOGW(
+        "Failed to enable the DirectX 12 Agility SDK runtime (HRESULT {:08X})",
+        static_cast<unsigned int>(hr));
+    return false;
+  }
+  XELOGI("DirectX 12 Agility SDK runtime enabled");
+  return true;
 }
 
 bool D3D12Provider::Initialize() {
@@ -268,19 +299,29 @@ bool D3D12Provider::Initialize() {
         "will be unavailable - DXIL may be unsupported by your OS version");
   }
 
-  // Load optional dxcompiler.dll - prefer the one next to the executable
-  // to avoid loading an older system version.
+  // Load the required DXIL shader compiler runtime (dxcompiler.dll + dxil.dll)
+  // from the D3D12 folder next to the executable. The D3D12 backend can't run
+  // without it, so offer to download it if it's missing.
+  auto d3d12_dir = xe::filesystem::GetExecutablePath().parent_path() / "D3D12";
   pfn_dxcompiler_dxc_create_instance_ = nullptr;
   {
-    auto exe_dir = xe::filesystem::GetExecutablePath().parent_path();
-    auto dxcompiler_path = exe_dir / "dxcompiler.dll";
-    auto dxcompiler_path_utf16 = xe::path_to_utf16(dxcompiler_path);
+    EnsureShaderCompilerRuntime(d3d12_dir);
+
+    // Pre-load dxil.dll by full path so dxcompiler's later plain-name load of
+    // it resolves here. That search skips D3D12/, so without this the DXIL
+    // would be left unsigned.
+    auto dxil_path_utf16 = xe::path_to_utf16(d3d12_dir / "dxil.dll");
+    library_dxil_ =
+        LoadLibraryW(reinterpret_cast<LPCWSTR>(dxil_path_utf16.c_str()));
+
+    auto dxcompiler_path_utf16 =
+        xe::path_to_utf16(d3d12_dir / "dxcompiler.dll");
     library_dxcompiler_ =
         LoadLibraryW(reinterpret_cast<LPCWSTR>(dxcompiler_path_utf16.c_str()));
     if (library_dxcompiler_) {
-      XELOGI("Loaded dxcompiler.dll from executable directory");
+      XELOGI("Loaded dxcompiler.dll from the D3D12 directory");
     } else {
-      // Fall back to system search path.
+      // Fall back to the system search path (system-wide, or next to the exe).
       library_dxcompiler_ = LoadLibraryW(L"dxcompiler.dll");
     }
   }
@@ -301,6 +342,13 @@ bool D3D12Provider::Initialize() {
         "unavailable - download from "
         "https://github.com/microsoft/DirectXShaderCompiler/releases",
         error);
+  }
+
+  // Opt into the Agility runtime if D3D12Core.dll was downloaded (older in-box
+  // runtimes lack SM 6.6). Must precede the first device creation.
+  bool agility_active = false;
+  if (std::filesystem::exists(d3d12_dir / "D3D12Core.dll")) {
+    agility_active = TryEnableAgilitySdk();
   }
 
   // Configure the DXGI debug info queue.
@@ -330,7 +378,11 @@ bool D3D12Provider::Initialize() {
             pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&debug_interface)))) {
       debug_interface->EnableDebugLayer();
       debug_interface->Release();
+      XELOGI("Direct3D 12 debug layer enabled");
     } else {
+      // The debug layer (D3D12SDKLayers.dll) isn't redistributable on its own.
+      // Offer to fetch it from the Agility SDK and restart.
+      EnsureDebugLayer(d3d12_dir);
       XELOGW("Failed to enable the Direct3D 12 debug layer");
       debug = false;
     }
@@ -429,25 +481,26 @@ bool D3D12Provider::Initialize() {
   }
   adapter->Release();
 
-  // Report whether the bundled DirectX 12 Agility SDK runtime was loaded.
-  // d3d12.dll loads D3D12Core.dll from D3D12SDKPath on the first device
-  // creation, so it is present by now if the SDK is in use.
-  if (HMODULE d3d12_core = GetModuleHandleW(L"D3D12Core.dll")) {
-    WCHAR core_path[MAX_PATH];
-    DWORD core_path_length = GetModuleFileNameW(d3d12_core, core_path,
-                                                DWORD(xe::countof(core_path)));
-    if (core_path_length != 0 && core_path_length < xe::countof(core_path)) {
-      XELOGI(
-          "DirectX 12 Agility SDK runtime loaded: {}",
-          xe::to_utf8(std::u16string_view(
-              reinterpret_cast<const char16_t*>(core_path), core_path_length)));
-    } else {
-      XELOGI("DirectX 12 Agility SDK runtime loaded");
+  // The DXIL path requires Shader Model 6.6. If the runtime lacks it and
+  // Agility wasn't opted in, download D3D12Core.dll and restart (the opt-in
+  // must precede device creation).
+  if (!agility_active) {
+    D3D12_FEATURE_DATA_SHADER_MODEL shader_model;
+    shader_model.HighestShaderModel = D3D_SHADER_MODEL_6_6;
+    bool shader_model_6_6_supported =
+        SUCCEEDED(device->CheckFeatureSupport(
+            D3D12_FEATURE_SHADER_MODEL, &shader_model, sizeof(shader_model))) &&
+        shader_model.HighestShaderModel >= D3D_SHADER_MODEL_6_6;
+    if (!shader_model_6_6_supported) {
+      device->Release();
+      dxgi_factory->Release();
+      // Returns only on decline or failure. On success it restarts.
+      EnsureAgilityRuntime(d3d12_dir);
+      XELOGE(
+          "The in-box Direct3D 12 runtime lacks Shader Model 6.6 required for "
+          "DXIL shaders");
+      return false;
     }
-  } else {
-    XELOGI(
-        "DirectX 12 Agility SDK runtime not loaded; using the in-box Direct3D "
-        "12 runtime");
   }
 
   // Configure the Direct3D 12 debug info queue.

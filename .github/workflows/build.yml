@@ -371,62 +371,6 @@ jobs:
         if: steps.cache-slang.outputs.cache-hit != 'true'
         run: python xenia-build.py slang
 
-      - name: Resolve latest DXC release
-        id: dxc-meta
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $headers = @{ 'User-Agent' = 'xenia-edge-ci'; 'Authorization' = "Bearer $env:GH_TOKEN" }
-          $rel = Invoke-RestMethod -Headers $headers `
-            -Uri 'https://api.github.com/repos/microsoft/DirectXShaderCompiler/releases/latest'
-          # Skip the linux_dxc_*.tar.gz and pdb_*.zip assets; we want the
-          # Windows redistributable zip (dxc_<date>.zip).
-          $asset = $rel.assets | Where-Object { $_.name -like 'dxc_*.zip' } | Select-Object -First 1
-          if (-not $asset) { echo "::error::No dxc_*.zip asset in DXC release $($rel.tag_name)"; exit 1 }
-          echo "tag=$($rel.tag_name)" >> $env:GITHUB_OUTPUT
-          echo "url=$($asset.browser_download_url)" >> $env:GITHUB_OUTPUT
-
-      - name: Cache DXC redistributables
-        id: cache-dxc
-        uses: actions/cache@v5
-        with:
-          path: dxc-redist
-          # Keyed on the release tag so a new upstream DXC release refreshes it.
-          key: ${{ runner.os }}-${{ runner.arch }}-dxc-redist-${{ steps.dxc-meta.outputs.tag }}
-
-      - name: Download DXC redistributables
-        if: steps.cache-dxc.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri '${{ steps.dxc-meta.outputs.url }}' -OutFile dxc.zip
-          Expand-Archive -Path dxc.zip -DestinationPath dxc-unzip -Force
-          New-Item -ItemType Directory -Force -Path dxc-redist | Out-Null
-          Copy-Item dxc-unzip\bin\x64\dxcompiler.dll dxc-redist\
-          Copy-Item dxc-unzip\bin\x64\dxil.dll dxc-redist\
-          Remove-Item dxc.zip, dxc-unzip -Recurse -Force
-
-      - name: Cache D3D12 Agility SDK
-        id: cache-agility
-        uses: actions/cache@v5
-        with:
-          path: agility-redist
-          # Pinned, not latest: preview releases (e.g. the SM 6.9 line) require
-          # Developer Mode, and the version must match D3D12SDKVersion exported
-          # by the exe (src/xenia/ui/windowed_app_main_win.cc).
-          key: ${{ runner.os }}-${{ runner.arch }}-agility-1.619.3
-
-      - name: Download D3D12 Agility SDK
-        if: steps.cache-agility.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -OutFile agility.zip `
-            -Uri 'https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.619.3'
-          Expand-Archive -Path agility.zip -DestinationPath agility-unzip -Force
-          New-Item -ItemType Directory -Force -Path agility-redist\D3D12 | Out-Null
-          Copy-Item agility-unzip\build\native\bin\x64\D3D12Core.dll agility-redist\D3D12\
-          Remove-Item agility.zip, agility-unzip -Recurse -Force
-
       - name: Disable Defender scanning for build paths
         run: |
           Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
@@ -471,12 +415,6 @@ jobs:
             echo "::error::$binary is too small."
           }
           robocopy . build\bin\Windows\Release LICENSE /r:0 /w:0
-          # Bundle the DXC redistributables (dxcompiler.dll + dxil.dll) next to
-          # the binary so DXIL shader translation works out of the box.
-          robocopy dxc-redist build\bin\Windows\Release dxcompiler.dll dxil.dll /r:0 /w:0
-          # Bundle the Agility SDK runtime in the D3D12 subfolder the exe points
-          # D3D12SDKPath at, giving a newer Direct3D 12 runtime than the OS.
-          robocopy agility-redist\D3D12 build\bin\Windows\Release\D3D12 D3D12Core.dll /r:0 /w:0
           # Copy all files and directories next to the binary, excluding
           # build intermediates.
           robocopy build\bin\Windows\Release artifacts\xenia_edge /MIR /r:0 /w:0 /XF *.lib *.idb *.exp
