@@ -22,6 +22,10 @@
 #include "xenia/ui/redist_installer_wx.h"
 DEFINE_bool(d3d12_debug, false, "Enable Direct3D 12 and DXGI debug layer.",
             "D3D12");
+DEFINE_bool(d3d12_gpu_validation, false,
+            "Enable Direct3D 12 GPU-based validation to catch out-of-bounds "
+            "shader resource access. Requires --d3d12_debug. Very slow.",
+            "D3D12");
 DEFINE_bool(d3d12_dred, false,
             "Enable Direct3D 12 Device Removed Extended Data (DRED) to log the "
             "operation and allocations involved in a device removal. Works "
@@ -377,8 +381,21 @@ bool D3D12Provider::Initialize() {
     if (SUCCEEDED(
             pfn_d3d12_get_debug_interface_(IID_PPV_ARGS(&debug_interface)))) {
       debug_interface->EnableDebugLayer();
+      // GPU-based validation catches out-of-bounds shader resource access that
+      // the CPU-side layer misses, but is very slow, so keep it opt-in.
+      bool gpu_validation = false;
+      if (cvars::d3d12_gpu_validation) {
+        ID3D12Debug1* debug_interface1;
+        if (SUCCEEDED(debug_interface->QueryInterface(
+                IID_PPV_ARGS(&debug_interface1)))) {
+          debug_interface1->SetEnableGPUBasedValidation(TRUE);
+          debug_interface1->Release();
+          gpu_validation = true;
+        }
+      }
       debug_interface->Release();
-      XELOGI("Direct3D 12 debug layer enabled");
+      XELOGI("Direct3D 12 debug layer enabled{}",
+             gpu_validation ? " with GPU-based validation" : "");
     } else {
       // The debug layer (D3D12SDKLayers.dll) isn't redistributable on its own.
       // Offer to fetch it from the Agility SDK and restart.
