@@ -1536,3 +1536,36 @@ msgstr "macOS"
 #: src/xenia/ui/game_list_panel_wx.cc:1072
 msgid "title %08X"
 msgstr "titel %08X"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "dxcompiler.dll en dxil.dll niet gevonden, vereist voor Direct3D 12-shaders. Nu downloaden (~26 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "D3D12Core.dll niet gevonden, vereist voor Shader Model 6.6. Nu downloaden (~35 MB) en opnieuw opstarten?"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "D3D12SDKLayers.dll niet gevonden, vereist voor de Direct3D 12-debuglaag. Nu downloaden (~35 MB) en opnieuw opstarten?"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "Download mislukt. Controleer je internetverbinding en probeer het opnieuw."
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "Het gedownloade bestand is niet door de integriteitscontrole gekomen en is verwijderd."
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "Kan de gedownloade bestanden niet installeren."
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "DirectX 12 Agility SDK-runtime geïnstalleerd, maar automatisch opnieuw opstarten is mislukt. Start Xenia opnieuw op."
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "Direct3D 12-debuglaag geïnstalleerd, maar automatisch opnieuw opstarten is mislukt. Start Xenia opnieuw op."

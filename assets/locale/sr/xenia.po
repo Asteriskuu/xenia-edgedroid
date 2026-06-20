@@ -1533,3 +1533,36 @@ msgstr "macOS"
 #: src/xenia/ui/game_list_panel_wx.cc:1072
 msgid "title %08X"
 msgstr "игра %08X"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "dxcompiler.dll и dxil.dll нису пронађени, потребни за Direct3D 12 шејдере. Преузети сада (~26 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "D3D12Core.dll није пронађен, потребан за Shader Model 6.6. Преузети сада (~35 MB) и поново покренути?"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "D3D12SDKLayers.dll није пронађен, потребан за Direct3D 12 слој за отклањање грешака. Преузети сада (~35 MB) и поново покренути?"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "Преузимање није успело. Проверите интернет везу и покушајте поново."
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "Преузета датотека није прошла проверу интегритета и одбачена је."
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "Преузете датотеке није могуће инсталирати."
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "DirectX 12 Agility SDK рантајм инсталиран, али аутоматско поновно покретање није успело. Поново покрените Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "Direct3D 12 слој за отклањање грешака инсталиран, али аутоматско поновно покретање није успело. Поново покрените Xenia."

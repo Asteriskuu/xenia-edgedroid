@@ -1537,3 +1537,36 @@ msgstr "macOS"
 #: src/xenia/ui/game_list_panel_wx.cc:1072
 msgid "title %08X"
 msgstr "title %08X"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "Hindi nahanap ang dxcompiler.dll at dxil.dll, kailangan para sa mga Direct3D 12 shader. I-download na ngayon (~26 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "Hindi nahanap ang D3D12Core.dll, kailangan para sa Shader Model 6.6. I-download na ngayon (~35 MB) at i-restart?"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "Hindi nahanap ang D3D12SDKLayers.dll, kailangan para sa Direct3D 12 debug layer. I-download na ngayon (~35 MB) at i-restart?"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "Nabigo ang pag-download. Tingnan ang iyong koneksyon sa internet at subukang muli."
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "Nabigo ang na-download na file sa pagberipika ng integridad at itinapon."
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "Nabigong i-install ang mga na-download na file."
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Na-install ang DirectX 12 Agility SDK runtime, ngunit nabigo ang awtomatikong pag-restart. Pakirestart ang Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "Na-install ang Direct3D 12 debug layer, ngunit nabigo ang awtomatikong pag-restart. Pakirestart ang Xenia."

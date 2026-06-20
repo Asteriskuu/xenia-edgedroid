@@ -1533,3 +1533,36 @@ msgstr "macOS"
 #: src/xenia/ui/game_list_panel_wx.cc:1072
 msgid "title %08X"
 msgstr "naslov %08X"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "dxcompiler.dll i dxil.dll nisu pronađeni, potrebni za Direct3D 12 shadere. Preuzeti sada (~26 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "D3D12Core.dll nije pronađen, potreban za Shader Model 6.6. Preuzeti sada (~35 MB) i ponovno pokrenuti?"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "D3D12SDKLayers.dll nije pronađen, potreban za Direct3D 12 sloj za otklanjanje pogrešaka. Preuzeti sada (~35 MB) i ponovno pokrenuti?"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "Preuzimanje nije uspjelo. Provjerite internetsku vezu i pokušajte ponovno."
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "Preuzeta datoteka nije prošla provjeru integriteta i odbačena je."
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "Preuzete datoteke nije moguće instalirati."
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "DirectX 12 Agility SDK runtime instaliran, ali automatsko ponovno pokretanje nije uspjelo. Ponovno pokrenite Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "Direct3D 12 sloj za otklanjanje pogrešaka instaliran, ali automatsko ponovno pokretanje nije uspjelo. Ponovno pokrenite Xenia."

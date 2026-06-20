@@ -1531,3 +1531,36 @@ msgstr "macOS"
 #: src/xenia/ui/game_list_panel_wx.cc:1072
 msgid "title %08X"
 msgstr "টাইটেল %08X"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "dxcompiler.dll এবং dxil.dll পাওয়া যায়নি, যা Direct3D 12 শেডারের জন্য প্রয়োজন। এখনই ডাউনলোড করবেন (~26 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "D3D12Core.dll পাওয়া যায়নি, যা Shader Model 6.6-এর জন্য প্রয়োজন। এখনই ডাউনলোড করে পুনরায় চালু করবেন (~35 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "D3D12SDKLayers.dll পাওয়া যায়নি, যা Direct3D 12 ডিবাগ লেয়ারের জন্য প্রয়োজন। এখনই ডাউনলোড করে পুনরায় চালু করবেন (~35 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "ডাউনলোড ব্যর্থ হয়েছে। আপনার ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।"
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "ডাউনলোড করা ফাইলটি অখণ্ডতা যাচাইয়ে ব্যর্থ হয়েছে এবং বাতিল করা হয়েছে।"
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "ডাউনলোড করা ফাইলগুলি ইনস্টল করা যায়নি।"
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "DirectX 12 Agility SDK রানটাইম ইনস্টল হয়েছে, কিন্তু স্বয়ংক্রিয়ভাবে পুনরায় চালু করা যায়নি। অনুগ্রহ করে Xenia পুনরায় চালু করুন।"
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "Direct3D 12 ডিবাগ লেয়ার ইনস্টল হয়েছে, কিন্তু স্বয়ংক্রিয়ভাবে পুনরায় চালু করা যায়নি। অনুগ্রহ করে Xenia পুনরায় চালু করুন।"

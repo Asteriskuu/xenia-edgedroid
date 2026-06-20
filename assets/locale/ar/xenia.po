@@ -1530,3 +1530,36 @@ msgstr "macOS"
 #: src/xenia/ui/game_list_panel_wx.cc:1072
 msgid "title %08X"
 msgstr "اللعبة %08X"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "لم يتم العثور على dxcompiler.dll و dxil.dll، وهما مطلوبان لمظللات Direct3D 12. التنزيل الآن (~26 MB)؟"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "لم يتم العثور على D3D12Core.dll، وهو مطلوب لـ Shader Model 6.6. التنزيل الآن (~35 MB) وإعادة التشغيل؟"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "لم يتم العثور على D3D12SDKLayers.dll، وهو مطلوب لطبقة تصحيح أخطاء Direct3D 12. التنزيل الآن (~35 MB) وإعادة التشغيل؟"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "فشل التنزيل. تحقق من اتصالك بالإنترنت وحاول مرة أخرى."
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "فشل الملف الذي تم تنزيله في التحقق من السلامة وتم تجاهله."
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "تعذّر تثبيت الملفات التي تم تنزيلها."
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "تم تثبيت بيئة تشغيل DirectX 12 Agility SDK، لكن تعذّرت إعادة التشغيل تلقائيًا. يُرجى إعادة تشغيل Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "تم تثبيت طبقة تصحيح أخطاء Direct3D 12، لكن تعذّرت إعادة التشغيل تلقائيًا. يُرجى إعادة تشغيل Xenia."

@@ -1536,3 +1536,36 @@ msgstr "macOS"
 #: src/xenia/ui/game_list_panel_wx.cc:1072
 msgid "title %08X"
 msgstr "%08X cím"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "A dxcompiler.dll és a dxil.dll nem található, a Direct3D 12 árnyékolókhoz szükséges. Letöltés most (~26 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "A D3D12Core.dll nem található, a Shader Model 6.6-hoz szükséges. Letöltés most (~35 MB) és újraindítás?"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "A D3D12SDKLayers.dll nem található, a Direct3D 12 hibakeresési réteghez szükséges. Letöltés most (~35 MB) és újraindítás?"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "A letöltés sikertelen. Ellenőrizze az internetkapcsolatát, és próbálja újra."
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "A letöltött fájl nem ment át az integritás-ellenőrzésen, és el lett vetve."
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "A letöltött fájlok telepítése sikertelen."
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "A DirectX 12 Agility SDK futtatókörnyezet telepítve, de az automatikus újraindítás sikertelen. Indítsa újra a Xeniát."
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "A Direct3D 12 hibakeresési réteg telepítve, de az automatikus újraindítás sikertelen. Indítsa újra a Xeniát."

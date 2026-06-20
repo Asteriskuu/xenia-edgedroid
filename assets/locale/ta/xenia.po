@@ -1534,3 +1534,36 @@ msgstr "macOS"
 #: src/xenia/ui/game_list_panel_wx.cc:1072
 msgid "title %08X"
 msgstr "தலைப்பு %08X"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "dxcompiler.dll மற்றும் dxil.dll கிடைக்கவில்லை; Direct3D 12 ஷேடர்களுக்கு இவை தேவை. இப்போது பதிவிறக்கவா (~26 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "D3D12Core.dll கிடைக்கவில்லை; Shader Model 6.6-க்கு இது தேவை. இப்போது பதிவிறக்கி மீண்டும் தொடங்கவா (~35 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "D3D12SDKLayers.dll கிடைக்கவில்லை; Direct3D 12 பிழைத்திருத்த அடுக்குக்கு இது தேவை. இப்போது பதிவிறக்கி மீண்டும் தொடங்கவா (~35 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "பதிவிறக்கம் தோல்வியடைந்தது. உங்கள் இணைய இணைப்பைச் சரிபார்த்து மீண்டும் முயற்சிக்கவும்."
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "பதிவிறக்கிய கோப்பு ஒருமைப்பாட்டுச் சரிபார்ப்பில் தோல்வியடைந்து நிராகரிக்கப்பட்டது."
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "பதிவிறக்கிய கோப்புகளை நிறுவ முடியவில்லை."
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "DirectX 12 Agility SDK இயக்க நேரம் நிறுவப்பட்டது, ஆனால் தானாக மீண்டும் தொடங்க முடியவில்லை. Xenia-வை மீண்டும் தொடங்கவும்."
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "Direct3D 12 பிழைத்திருத்த அடுக்கு நிறுவப்பட்டது, ஆனால் தானாக மீண்டும் தொடங்க முடியவில்லை. Xenia-வை மீண்டும் தொடங்கவும்."

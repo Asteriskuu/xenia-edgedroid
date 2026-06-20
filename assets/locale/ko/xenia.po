@@ -1532,3 +1532,36 @@ msgstr "macOS"
 #: src/xenia/ui/game_list_panel_wx.cc:1072
 msgid "title %08X"
 msgstr "게임 %08X"
+
+
+#: src/xenia/ui/redist_installer_wx.cc:396
+msgid "dxcompiler.dll and dxil.dll not found, required for Direct3D 12 shaders. Download now (~26 MB)?"
+msgstr "dxcompiler.dll 및 dxil.dll을 찾을 수 없습니다. Direct3D 12 셰이더에 필요합니다. 지금 다운로드할까요 (~26 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:438
+msgid "D3D12Core.dll not found, required for Shader Model 6.6. Download now (~35 MB) and restart?"
+msgstr "D3D12Core.dll을 찾을 수 없습니다. Shader Model 6.6에 필요합니다. 지금 다운로드하고 다시 시작할까요 (~35 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:485
+msgid "D3D12SDKLayers.dll not found, required for the Direct3D 12 debug layer. Download now (~35 MB) and restart?"
+msgstr "D3D12SDKLayers.dll을 찾을 수 없습니다. Direct3D 12 디버그 레이어에 필요합니다. 지금 다운로드하고 다시 시작할까요 (~35 MB)?"
+
+#: src/xenia/ui/redist_installer_wx.cc:358
+msgid "Download failed. Check your internet connection and try again."
+msgstr "다운로드에 실패했습니다. 인터넷 연결을 확인하고 다시 시도하세요."
+
+#: src/xenia/ui/redist_installer_wx.cc:364
+msgid "The downloaded file failed integrity verification and was discarded."
+msgstr "다운로드한 파일이 무결성 검사를 통과하지 못해 삭제되었습니다."
+
+#: src/xenia/ui/redist_installer_wx.cc:369
+msgid "Failed to install the downloaded files."
+msgstr "다운로드한 파일을 설치하지 못했습니다."
+
+#: src/xenia/ui/redist_installer_wx.cc:456
+msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "DirectX 12 Agility SDK 런타임을 설치했지만 자동으로 다시 시작하지 못했습니다. Xenia를 다시 시작하세요."
+
+#: src/xenia/ui/redist_installer_wx.cc:503
+msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
+msgstr "Direct3D 12 디버그 레이어를 설치했지만 자동으로 다시 시작하지 못했습니다. Xenia를 다시 시작하세요."
