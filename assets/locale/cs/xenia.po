@@ -1576,3 +1576,7 @@ msgstr "Běhové prostředí Microsoft Visual C++ nainstalováno, ale automatick
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Ladicí vrstva Direct3D 12 nainstalována, ale automatický restart selhal. Restartujte prosím Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "vulkan-1.dll nenalezen, vyžadován pro grafický backend Vulkan. Stáhnout nyní (~20 MB)?"

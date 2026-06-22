@@ -1579,3 +1579,7 @@ msgstr "Microsoft Visual C++ இயக்க நேரம் நிறுவப�
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Direct3D 12 பிழைத்திருத்த அடுக்கு நிறுவப்பட்டது, ஆனால் தானாக மீண்டும் தொடங்க முடியவில்லை. Xenia-வை மீண்டும் தொடங்கவும்."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "vulkan-1.dll கிடைக்கவில்லை; Vulkan வரைகலை பின்தளத்துக்கு இது தேவை. இப்போது பதிவிறக்கவா (~20 MB)?"

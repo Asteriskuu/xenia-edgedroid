@@ -1584,3 +1584,7 @@ msgstr "Runtime Microsoft Visual C++ installé, mais le redémarrage automatique
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Couche de débogage Direct3D 12 installée, mais le redémarrage automatique a échoué. Veuillez redémarrer Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "vulkan-1.dll introuvable, requis pour le backend graphique Vulkan. Télécharger maintenant (~20 MB) ?"

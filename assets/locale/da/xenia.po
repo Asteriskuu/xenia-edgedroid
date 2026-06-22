@@ -1578,3 +1578,7 @@ msgstr "Microsoft Visual C++-runtime installeret, men automatisk genstart mislyk
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Direct3D 12-fejlretningslag installeret, men automatisk genstart mislykkedes. Genstart Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "vulkan-1.dll blev ikke fundet, kræves til Vulkan-grafikbackenden. Download nu (~20 MB)?"

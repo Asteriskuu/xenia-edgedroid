@@ -1578,3 +1578,7 @@ msgstr "Microsoft Visual C++ рантајм инсталиран, али аут�
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Direct3D 12 слој за отклањање грешака инсталиран, али аутоматско поновно покретање није успело. Поново покрените Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "vulkan-1.dll није пронађен, потребан за Vulkan графички бекенд. Преузети сада (~20 MB)?"

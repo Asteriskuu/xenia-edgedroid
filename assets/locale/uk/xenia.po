@@ -1580,3 +1580,7 @@ msgstr "Середовище виконання Microsoft Visual C++ встан�
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Шар налагодження Direct3D 12 встановлено, але автоматичний перезапуск не вдався. Перезапустіть Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "vulkan-1.dll не знайдено, потрібен для графічного бекенда Vulkan. Завантажити зараз (~20 MB)?"

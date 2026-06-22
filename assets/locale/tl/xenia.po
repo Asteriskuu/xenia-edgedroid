@@ -1582,3 +1582,7 @@ msgstr "Na-install ang Microsoft Visual C++ runtime, ngunit nabigo ang awtomatik
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Na-install ang Direct3D 12 debug layer, ngunit nabigo ang awtomatikong pag-restart. Pakirestart ang Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "Hindi nahanap ang vulkan-1.dll, kailangan para sa Vulkan graphics backend. I-download na ngayon (~20 MB)?"

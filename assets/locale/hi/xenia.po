@@ -1573,3 +1573,7 @@ msgstr "Microsoft Visual C++ रनटाइम स्थापित हो ग
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Direct3D 12 डिबग लेयर स्थापित हो गई, लेकिन स्वचालित रूप से पुनः आरंभ नहीं हो सका। कृपया Xenia पुनः आरंभ करें।"
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "vulkan-1.dll नहीं मिली, जो Vulkan ग्राफ़िक्स बैकएंड के लिए आवश्यक है। अभी डाउनलोड करें (~20 MB)?"

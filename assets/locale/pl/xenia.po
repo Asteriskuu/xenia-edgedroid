@@ -1582,3 +1582,7 @@ msgstr "Zainstalowano środowisko uruchomieniowe Microsoft Visual C++, ale nie u
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Zainstalowano warstwę debugowania Direct3D 12, ale nie udało się automatycznie uruchomić ponownie. Uruchom ponownie Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "Nie znaleziono vulkan-1.dll, wymaganego dla backendu graficznego Vulkan. Pobrać teraz (~20 MB)?"

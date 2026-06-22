@@ -1581,3 +1581,7 @@ msgstr "Microsoft Visual C++-Laufzeit installiert, aber der automatische Neustar
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Direct3D 12-Debug-Layer installiert, aber der automatische Neustart ist fehlgeschlagen. Bitte starten Sie Xenia neu."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "vulkan-1.dll nicht gefunden, erforderlich für das Vulkan-Grafik-Backend. Jetzt herunterladen (~20 MB)?"

@@ -1583,3 +1583,7 @@ msgstr "Εγκαταστάθηκε ο χρόνος εκτέλεσης Microsoft 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
 msgstr "Εγκαταστάθηκε το επίπεδο εντοπισμού σφαλμάτων Direct3D 12, αλλά η αυτόματη επανεκκίνηση απέτυχε. Επανεκκινήστε το Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:746
+msgid "vulkan-1.dll not found, required for the Vulkan graphics backend. Download now (~20 MB)?"
+msgstr "Δεν βρέθηκε το vulkan-1.dll, απαιτείται για το backend γραφικών Vulkan. Λήψη τώρα (~20 MB);"
