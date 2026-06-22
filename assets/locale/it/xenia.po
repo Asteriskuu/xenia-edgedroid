@@ -1555,9 +1555,17 @@ msgstr "D3D12SDKLayers.dll non trovato, necessario per il livello di debug Direc
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Download non riuscito. Controlla la connessione a Internet e riprova."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Il runtime Microsoft Visual C++ (%u.%u o successivo) non è installato. Scaricare da Microsoft ora (~25 MB) e installare?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "Il file scaricato non ha superato la verifica di integrità ed è stato scartato."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Il runtime Microsoft Visual C++ %u.%u.%u installato è precedente alla versione %u.%u richiesta da questa build di Xenia. Scaricare il più recente da Microsoft ora (~25 MB) e installare?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1566,6 +1574,10 @@ msgstr "Impossibile installare i file scaricati."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "Runtime DirectX 12 Agility SDK installato, ma il riavvio automatico non è riuscito. Riavvia Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Runtime Microsoft Visual C++ installato, ma il riavvio automatico non è riuscito. Riavvia Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

@@ -1551,9 +1551,17 @@ msgstr "D3D12SDKLayers.dll nije pronađen, potreban za Direct3D 12 sloj za otkla
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Preuzimanje nije uspjelo. Provjerite internetsku vezu i pokušajte ponovno."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Microsoft Visual C++ runtime (%u.%u ili noviji) nije instaliran. Preuzeti s Microsofta sada (~25 MB) i instalirati?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "Preuzeta datoteka nije prošla provjeru integriteta i odbačena je."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Instalirani Microsoft Visual C++ runtime %u.%u.%u stariji je od %u.%u koji zahtijeva ova verzija Xenije. Preuzeti najnoviji s Microsofta sada (~25 MB) i instalirati?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1562,6 +1570,10 @@ msgstr "Preuzete datoteke nije moguće instalirati."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "DirectX 12 Agility SDK runtime instaliran, ali automatsko ponovno pokretanje nije uspjelo. Ponovno pokrenite Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Microsoft Visual C++ runtime instaliran, ali automatsko ponovno pokretanje nije uspjelo. Ponovno pokrenite Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

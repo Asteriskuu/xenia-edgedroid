@@ -1550,9 +1550,17 @@ msgstr "D3D12SDKLayers.dll sa nenašiel, vyžadovaný pre ladiacu vrstvu Direct3
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Sťahovanie zlyhalo. Skontrolujte pripojenie na internet a skúste to znova."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Behové prostredie Microsoft Visual C++ (%u.%u alebo novšie) nie je nainštalované. Stiahnuť z Microsoftu teraz (~25 MB) a nainštalovať?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "Stiahnutý súbor neprešiel overením integrity a bol zahodený."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Nainštalované behové prostredie Microsoft Visual C++ %u.%u.%u je staršie než %u.%u, ktoré vyžaduje toto zostavenie Xenia. Stiahnuť najnovšie z Microsoftu teraz (~25 MB) a nainštalovať?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1561,6 +1569,10 @@ msgstr "Stiahnuté súbory sa nepodarilo nainštalovať."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "Behové prostredie DirectX 12 Agility SDK bolo nainštalované, ale automatický reštart zlyhal. Reštartujte Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Behové prostredie Microsoft Visual C++ bolo nainštalované, ale automatický reštart zlyhal. Reštartujte Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

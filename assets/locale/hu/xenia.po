@@ -1554,9 +1554,17 @@ msgstr "A D3D12SDKLayers.dll nem található, a Direct3D 12 hibakeresési réteg
 msgid "Download failed. Check your internet connection and try again."
 msgstr "A letöltés sikertelen. Ellenőrizze az internetkapcsolatát, és próbálja újra."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "A Microsoft Visual C++ futtatókörnyezet (%u.%u vagy újabb) nincs telepítve. Letöltés a Microsofttól most (~25 MB) és telepítés?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "A letöltött fájl nem ment át az integritás-ellenőrzésen, és el lett vetve."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "A telepített Microsoft Visual C++ futtatókörnyezet %u.%u.%u régebbi, mint a Xenia ezen változata által igényelt %u.%u. A legújabb letöltése a Microsofttól most (~25 MB) és telepítés?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1565,6 +1573,10 @@ msgstr "A letöltött fájlok telepítése sikertelen."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "A DirectX 12 Agility SDK futtatókörnyezet telepítve, de az automatikus újraindítás sikertelen. Indítsa újra a Xeniát."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "A Microsoft Visual C++ futtatókörnyezet telepítve, de az automatikus újraindítás sikertelen. Indítsa újra a Xeniát."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

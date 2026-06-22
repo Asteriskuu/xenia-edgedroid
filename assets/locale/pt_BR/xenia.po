@@ -1556,9 +1556,17 @@ msgstr "D3D12SDKLayers.dll não encontrado, necessário para a camada de depura�
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Falha no download. Verifique sua conexão com a Internet e tente novamente."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "O runtime do Microsoft Visual C++ (%u.%u ou mais recente) não está instalado. Baixar da Microsoft agora (~25 MB) e instalar?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "O arquivo baixado falhou na verificação de integridade e foi descartado."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "O runtime do Microsoft Visual C++ %u.%u.%u instalado é mais antigo que a versão %u.%u exigida por esta build do Xenia. Baixar o mais recente da Microsoft agora (~25 MB) e instalar?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1567,6 +1575,10 @@ msgstr "Falha ao instalar os arquivos baixados."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "Runtime do DirectX 12 Agility SDK instalado, mas não foi possível reiniciar automaticamente. Reinicie o Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Runtime do Microsoft Visual C++ instalado, mas não foi possível reiniciar automaticamente. Reinicie o Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

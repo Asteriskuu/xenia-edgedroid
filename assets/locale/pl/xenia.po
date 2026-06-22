@@ -1555,9 +1555,17 @@ msgstr "Nie znaleziono D3D12SDKLayers.dll, wymaganego dla warstwy debugowania Di
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Pobieranie nie powiodło się. Sprawdź połączenie internetowe i spróbuj ponownie."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Środowisko uruchomieniowe Microsoft Visual C++ (%u.%u lub nowsze) nie jest zainstalowane. Pobrać z Microsoftu teraz (~25 MB) i zainstalować?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "Pobrany plik nie przeszedł weryfikacji integralności i został odrzucony."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Zainstalowane środowisko uruchomieniowe Microsoft Visual C++ %u.%u.%u jest starsze niż %u.%u wymagane przez tę kompilację Xenia. Pobrać najnowsze z Microsoftu teraz (~25 MB) i zainstalować?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1566,6 +1574,10 @@ msgstr "Nie udało się zainstalować pobranych plików."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "Zainstalowano środowisko uruchomieniowe DirectX 12 Agility SDK, ale nie udało się automatycznie uruchomić ponownie. Uruchom ponownie Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Zainstalowano środowisko uruchomieniowe Microsoft Visual C++, ale nie udało się automatycznie uruchomić ponownie. Uruchom ponownie Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

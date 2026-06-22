@@ -1556,9 +1556,17 @@ msgstr "Δεν βρέθηκε το D3D12SDKLayers.dll, απαιτείται γι
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Η λήψη απέτυχε. Ελέγξτε τη σύνδεσή σας στο διαδίκτυο και δοκιμάστε ξανά."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Ο χρόνος εκτέλεσης Microsoft Visual C++ (%u.%u ή νεότερος) δεν είναι εγκατεστημένος. Λήψη από τη Microsoft τώρα (~25 MB) και εγκατάσταση;"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "Το αρχείο που λήφθηκε απέτυχε στον έλεγχο ακεραιότητας και απορρίφθηκε."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Ο εγκατεστημένος χρόνος εκτέλεσης Microsoft Visual C++ %u.%u.%u είναι παλαιότερος από τον %u.%u που απαιτεί αυτή η έκδοση του Xenia. Λήψη του νεότερου από τη Microsoft τώρα (~25 MB) και εγκατάσταση;"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1567,6 +1575,10 @@ msgstr "Δεν ήταν δυνατή η εγκατάσταση των ληφθέ
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "Εγκαταστάθηκε ο χρόνος εκτέλεσης DirectX 12 Agility SDK, αλλά η αυτόματη επανεκκίνηση απέτυχε. Επανεκκινήστε το Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Εγκαταστάθηκε ο χρόνος εκτέλεσης Microsoft Visual C++, αλλά η αυτόματη επανεκκίνηση απέτυχε. Επανεκκινήστε το Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

@@ -1555,9 +1555,17 @@ msgstr "Hindi nahanap ang D3D12SDKLayers.dll, kailangan para sa Direct3D 12 debu
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Nabigo ang pag-download. Tingnan ang iyong koneksyon sa internet at subukang muli."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Hindi naka-install ang Microsoft Visual C++ runtime (%u.%u o mas bago). I-download mula sa Microsoft ngayon (~25 MB) at i-install?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "Nabigo ang na-download na file sa pagberipika ng integridad at itinapon."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Mas luma ang naka-install na Microsoft Visual C++ runtime %u.%u.%u kaysa sa %u.%u na kailangan ng build na ito ng Xenia. I-download ang pinakabago mula sa Microsoft ngayon (~25 MB) at i-install?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1566,6 +1574,10 @@ msgstr "Nabigong i-install ang mga na-download na file."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "Na-install ang DirectX 12 Agility SDK runtime, ngunit nabigo ang awtomatikong pag-restart. Pakirestart ang Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Na-install ang Microsoft Visual C++ runtime, ngunit nabigo ang awtomatikong pag-restart. Pakirestart ang Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

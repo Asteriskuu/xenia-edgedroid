@@ -1553,9 +1553,17 @@ msgstr "D3D12SDKLayers.dll-tiedostoa ei löytynyt, vaaditaan Direct3D 12 -virhee
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Lataus epäonnistui. Tarkista internetyhteytesi ja yritä uudelleen."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Microsoft Visual C++ -ajonaikaista ympäristöä (%u.%u tai uudempi) ei ole asennettu. Ladataanko Microsoftilta nyt (~25 MB) ja asennetaanko?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "Ladattu tiedosto ei läpäissyt eheystarkistusta ja hylättiin."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Asennettu Microsoft Visual C++ -ajonaikainen ympäristö %u.%u.%u on vanhempi kuin tämän Xenia-koonnin vaatima %u.%u. Ladataanko uusin Microsoftilta nyt (~25 MB) ja asennetaanko?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1564,6 +1572,10 @@ msgstr "Ladattujen tiedostojen asennus epäonnistui."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "DirectX 12 Agility SDK -ajonaikainen ympäristö asennettiin, mutta automaattinen uudelleenkäynnistys epäonnistui. Käynnistä Xenia uudelleen."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Microsoft Visual C++ -ajonaikainen ympäristö asennettiin, mutta automaattinen uudelleenkäynnistys epäonnistui. Käynnistä Xenia uudelleen."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

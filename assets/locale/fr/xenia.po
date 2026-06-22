@@ -1557,9 +1557,17 @@ msgstr "D3D12SDKLayers.dll introuvable, requis pour la couche de débogage Direc
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Échec du téléchargement. Vérifiez votre connexion Internet et réessayez."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Le runtime Microsoft Visual C++ (%u.%u ou plus récent) n'est pas installé. Télécharger depuis Microsoft maintenant (~25 MB) et installer ?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "Le fichier téléchargé a échoué à la vérification d'intégrité et a été supprimé."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Le runtime Microsoft Visual C++ %u.%u.%u installé est plus ancien que la version %u.%u requise par cette build de Xenia. Télécharger le plus récent depuis Microsoft maintenant (~25 MB) et installer ?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1568,6 +1576,10 @@ msgstr "Échec de l'installation des fichiers téléchargés."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "Runtime DirectX 12 Agility SDK installé, mais le redémarrage automatique a échoué. Veuillez redémarrer Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Runtime Microsoft Visual C++ installé, mais le redémarrage automatique a échoué. Veuillez redémarrer Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

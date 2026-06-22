@@ -1549,9 +1549,17 @@ msgstr "D3D12SDKLayers.dll nenalezen, vyžadován pro ladicí vrstvu Direct3D 12
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Stahování selhalo. Zkontrolujte připojení k internetu a zkuste to znovu."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Běhové prostředí Microsoft Visual C++ (%u.%u nebo novější) není nainstalováno. Stáhnout nyní z Microsoftu (~25 MB) a nainstalovat?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "Stažený soubor neprošel ověřením integrity a byl zahozen."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "Nainstalované běhové prostředí Microsoft Visual C++ %u.%u.%u je starší než %u.%u, které vyžaduje toto sestavení Xenia. Stáhnout nejnovější z Microsoftu (~25 MB) a nainstalovat?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1560,6 +1568,10 @@ msgstr "Stažené soubory se nepodařilo nainstalovat."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "Běhové prostředí DirectX 12 Agility SDK nainstalováno, ale automatický restart selhal. Restartujte prosím Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Běhové prostředí Microsoft Visual C++ nainstalováno, ale automatický restart selhal. Restartujte prosím Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

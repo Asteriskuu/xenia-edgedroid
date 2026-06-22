@@ -1552,9 +1552,17 @@ msgstr "D3D12SDKLayers.dll கிடைக்கவில்லை; Direct3D 12 
 msgid "Download failed. Check your internet connection and try again."
 msgstr "பதிவிறக்கம் தோல்வியடைந்தது. உங்கள் இணைய இணைப்பைச் சரிபார்த்து மீண்டும் முயற்சிக்கவும்."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Microsoft Visual C++ இயக்க நேரம் (%u.%u அல்லது புதியது) நிறுவப்படவில்லை. இப்போது Microsoft-இலிருந்து பதிவிறக்கி நிறுவவா (~25 MB)?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "பதிவிறக்கிய கோப்பு ஒருமைப்பாட்டுச் சரிபார்ப்பில் தோல்வியடைந்து நிராகரிக்கப்பட்டது."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "நிறுவப்பட்ட Microsoft Visual C++ இயக்க நேரம் %u.%u.%u, இந்த Xenia பதிப்பிற்குத் தேவையான %u.%u-ஐ விட பழையது. இப்போது Microsoft-இலிருந்து சமீபத்தியதைப் பதிவிறக்கி நிறுவவா (~25 MB)?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1563,6 +1571,10 @@ msgstr "பதிவிறக்கிய கோப்புகளை நிற�
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "DirectX 12 Agility SDK இயக்க நேரம் நிறுவப்பட்டது, ஆனால் தானாக மீண்டும் தொடங்க முடியவில்லை. Xenia-வை மீண்டும் தொடங்கவும்."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Microsoft Visual C++ இயக்க நேரம் நிறுவப்பட்டது, ஆனால் தானாக மீண்டும் தொடங்க முடியவில்லை. Xenia-வை மீண்டும் தொடங்கவும்."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

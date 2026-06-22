@@ -1549,9 +1549,17 @@ msgstr "D3D12SDKLayers.dll পাওয়া যায়নি, যা Direct3
 msgid "Download failed. Check your internet connection and try again."
 msgstr "ডাউনলোড ব্যর্থ হয়েছে। আপনার ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।"
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "Microsoft Visual C++ রানটাইম (%u.%u বা নতুনতর) ইনস্টল করা নেই। এখনই Microsoft থেকে ডাউনলোড করে ইনস্টল করবেন (~25 MB)?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "ডাউনলোড করা ফাইলটি অখণ্ডতা যাচাইয়ে ব্যর্থ হয়েছে এবং বাতিল করা হয়েছে।"
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "ইনস্টল করা Microsoft Visual C++ রানটাইম %u.%u.%u এই Xenia বিল্ডের প্রয়োজনীয় %u.%u-এর চেয়ে পুরোনো। এখনই Microsoft থেকে সর্বশেষ সংস্করণ ডাউনলোড করে ইনস্টল করবেন (~25 MB)?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1560,6 +1568,10 @@ msgstr "ডাউনলোড করা ফাইলগুলি ইনস্ট
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "DirectX 12 Agility SDK রানটাইম ইনস্টল হয়েছে, কিন্তু স্বয়ংক্রিয়ভাবে পুনরায় চালু করা যায়নি। অনুগ্রহ করে Xenia পুনরায় চালু করুন।"
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Microsoft Visual C++ রানটাইম ইনস্টল হয়েছে, কিন্তু স্বয়ংক্রিয়ভাবে পুনরায় চালু করা যায়নি। অনুগ্রহ করে Xenia পুনরায় চালু করুন।"
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."

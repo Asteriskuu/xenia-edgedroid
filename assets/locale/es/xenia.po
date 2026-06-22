@@ -1557,9 +1557,17 @@ msgstr "No se encontró D3D12SDKLayers.dll, necesario para la capa de depuració
 msgid "Download failed. Check your internet connection and try again."
 msgstr "Error en la descarga. Comprueba tu conexión a Internet e inténtalo de nuevo."
 
+#: src/xenia/ui/redist_installer_wx.cc:703
+msgid "The Microsoft Visual C++ runtime (%u.%u or newer) isn't installed. Download it from Microsoft now (~25 MB) and install?"
+msgstr "El entorno de ejecución de Microsoft Visual C++ (%u.%u o posterior) no está instalado. ¿Descargar de Microsoft ahora (~25 MB) e instalar?"
+
 #: src/xenia/ui/redist_installer_wx.cc:364
 msgid "The downloaded file failed integrity verification and was discarded."
 msgstr "El archivo descargado no superó la verificación de integridad y se descartó."
+
+#: src/xenia/ui/redist_installer_wx.cc:695
+msgid "The installed Microsoft Visual C++ runtime %u.%u.%u is older than the %u.%u this build of Xenia requires. Download the latest from Microsoft now (~25 MB) and install?"
+msgstr "El entorno de ejecución de Microsoft Visual C++ %u.%u.%u instalado es anterior al %u.%u que requiere esta compilación de Xenia. ¿Descargar el más reciente de Microsoft ahora (~25 MB) e instalar?"
 
 #: src/xenia/ui/redist_installer_wx.cc:369
 msgid "Failed to install the downloaded files."
@@ -1568,6 +1576,10 @@ msgstr "No se pudieron instalar los archivos descargados."
 #: src/xenia/ui/redist_installer_wx.cc:456
 msgid "Installed the DirectX 12 Agility SDK runtime, but couldn't restart automatically. Please restart Xenia."
 msgstr "Se instaló el entorno de ejecución de DirectX 12 Agility SDK, pero no se pudo reiniciar automáticamente. Reinicia Xenia."
+
+#: src/xenia/ui/redist_installer_wx.cc:781
+msgid "Installed the Microsoft Visual C++ runtime, but couldn't restart automatically. Please restart Xenia."
+msgstr "Se instaló el entorno de ejecución de Microsoft Visual C++, pero no se pudo reiniciar automáticamente. Reinicia Xenia."
 
 #: src/xenia/ui/redist_installer_wx.cc:503
 msgid "Installed the Direct3D 12 debug layer, but couldn't restart automatically. Please restart Xenia."
