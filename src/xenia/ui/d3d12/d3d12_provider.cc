@@ -211,33 +211,6 @@ bool D3D12Provider::EnableIncreaseBasePriorityPrivilege() {
   return enabled;
 }
 
-bool D3D12Provider::TryEnableAgilitySdk() {
-  auto pfn_d3d12_get_interface = PFN_D3D12_GET_INTERFACE(
-      GetProcAddress(library_d3d12_, "D3D12GetInterface"));
-  if (!pfn_d3d12_get_interface) {
-    // d3d12.dll predates Agility SDK support, so only the in-box runtime
-    // exists.
-    return false;
-  }
-  ID3D12SDKConfiguration* sdk_configuration;
-  if (FAILED(pfn_d3d12_get_interface(CLSID_D3D12SDKConfiguration,
-                                     IID_PPV_ARGS(&sdk_configuration)))) {
-    return false;
-  }
-  // Version must match the Agility SDK the installer downloads (1.619.3 ->
-  // 619).
-  HRESULT hr = sdk_configuration->SetSDKVersion(619, ".\\D3D12\\");
-  sdk_configuration->Release();
-  if (FAILED(hr)) {
-    XELOGW(
-        "Failed to enable the DirectX 12 Agility SDK runtime (HRESULT {:08X})",
-        static_cast<unsigned int>(hr));
-    return false;
-  }
-  XELOGI("DirectX 12 Agility SDK runtime enabled");
-  return true;
-}
-
 bool D3D12Provider::Initialize() {
   // Load the core libraries.
   library_dxgi_ = LoadLibraryW(L"dxgi.dll");
@@ -348,12 +321,18 @@ bool D3D12Provider::Initialize() {
         error);
   }
 
-  // Opt into the Agility runtime if D3D12Core.dll was downloaded (older in-box
-  // runtimes lack SM 6.6). Must precede the first device creation.
-  bool agility_active = false;
+  // The D3D12SDKVersion exports make d3d12.dll load D3D12Core.dll at the first
+  // device creation, which fails outright if it's missing, so fetch it first.
   std::error_code ec;
-  if (std::filesystem::exists(d3d12_dir / "D3D12Core.dll", ec)) {
-    agility_active = TryEnableAgilitySdk();
+  if (!std::filesystem::exists(d3d12_dir / "D3D12Core.dll", ec)) {
+    // Returns only on decline or failure. On success it restarts.
+    EnsureAgilityRuntime(d3d12_dir);
+    if (!std::filesystem::exists(d3d12_dir / "D3D12Core.dll", ec)) {
+      XELOGE(
+          "The DirectX 12 Agility SDK runtime (D3D12Core.dll) is required but "
+          "was not installed");
+      return false;
+    }
   }
 
   // Configure the DXGI debug info queue.
@@ -499,10 +478,8 @@ bool D3D12Provider::Initialize() {
   }
   adapter->Release();
 
-  // The DXIL path requires Shader Model 6.6. If the runtime lacks it and
-  // Agility wasn't opted in, download D3D12Core.dll and restart (the opt-in
-  // must precede device creation).
-  if (!agility_active) {
+  // Safety net: the Agility runtime should provide Shader Model 6.6 for DXIL.
+  {
     D3D12_FEATURE_DATA_SHADER_MODEL shader_model;
     shader_model.HighestShaderModel = D3D_SHADER_MODEL_6_6;
     bool shader_model_6_6_supported =
@@ -512,11 +489,9 @@ bool D3D12Provider::Initialize() {
     if (!shader_model_6_6_supported) {
       device->Release();
       dxgi_factory->Release();
-      // Returns only on decline or failure. On success it restarts.
-      EnsureAgilityRuntime(d3d12_dir);
       XELOGE(
-          "The in-box Direct3D 12 runtime lacks Shader Model 6.6 required for "
-          "DXIL shaders");
+          "The Direct3D 12 runtime lacks Shader Model 6.6 required for DXIL "
+          "shaders");
       return false;
     }
   }

@@ -85,7 +85,8 @@ constexpr char kDxcSha256[] =
     "cf658aacf070d3045e31b8f1f8a696c2945f37c1095019481ef7c513368db3b4";
 
 // Pinned DirectX 12 Agility SDK redistributable (a NuGet .nupkg = zip). Version
-// must match SetSDKVersion in d3d12_provider (1.619.3 maps to 619).
+// must match the D3D12SDKVersion export in windowed_app_main_win (1.619.3 ->
+// 619).
 constexpr wchar_t kAgilityUrl[] =
     L"https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.619.3";
 constexpr char kAgilitySha256[] =

@@ -178,11 +178,6 @@ class D3D12Provider : public GraphicsProvider {
   static bool EnableIncreaseBasePriorityPrivilege();
   bool Initialize();
 
-  // Opts into the Agility runtime (D3D12Core.dll in the D3D12 subfolder) via
-  // ID3D12SDKConfiguration. Must precede the first device creation. Returns
-  // true if the runtime was selected.
-  bool TryEnableAgilitySdk();
-
   typedef HRESULT(WINAPI* PFNCreateDXGIFactory2)(UINT Flags, REFIID riid,
                                                  _COM_Outptr_ void** ppFactory);
   typedef HRESULT(WINAPI* PFNDXGIGetDebugInterface1)(

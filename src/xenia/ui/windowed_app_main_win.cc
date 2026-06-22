@@ -19,6 +19,15 @@
 
 #include <Psapi.h>
 
+// DirectX 12 Agility SDK opt-in. d3d12.dll reads these exports and loads
+// D3D12Core.dll from the D3D12 subfolder next to the exe.
+extern "C" {
+__declspec(dllexport) extern const UINT D3D12SDKVersion = 619;
+}
+extern "C" {
+__declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
+}
+
 static uintptr_t g_xenia_exe_base = 0;
 static size_t g_xenia_exe_size = 0;
 
