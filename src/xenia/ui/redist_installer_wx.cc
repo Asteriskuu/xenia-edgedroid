@@ -63,6 +63,12 @@ DEFINE_bool(
     "it manually.",
     "Win32");
 
+DEFINE_bool(
+    vulkan_install_missing_loader, true,
+    "When the Vulkan loader (vulkan-1.dll) is missing, offer to download it "
+    "from LunarG. Disable to manage it manually.",
+    "Vulkan");
+
 namespace xe {
 namespace ui {
 
@@ -84,6 +90,18 @@ constexpr wchar_t kAgilityUrl[] =
     L"https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.619.3";
 constexpr char kAgilitySha256[] =
     "43a7d5a3973812eb4b42623fae5275c790a005b8e48b8d7f5bb43cef39e073c5";
+
+// Pinned LunarG Vulkan runtime components (a zip). vulkan-1.dll is the Khronos
+// Vulkan-Loader (Apache-2.0, redistributable). Update the SHA-256 and the
+// kVulkanLoaderEntries zip path together when bumping the URL version. The zip
+// ships only x64 and x86 loaders, no arm64.
+#if !XE_ARCH_ARM64
+constexpr wchar_t kVulkanLoaderUrl[] =
+    L"https://sdk.lunarg.com/sdk/download/1.4.350.0/windows/"
+    L"vulkan-runtime-components.zip";
+constexpr char kVulkanLoaderSha256[] =
+    "23ce69f32cef3e2799617e2b1776cd0c71030d23a91f8375821cc40d76b185b9";
+#endif
 
 // Both archives ship per-arch binaries. Pick the one matching the build target.
 #if XE_ARCH_ARM64
@@ -115,6 +133,12 @@ constexpr RedistEntry kDebugLayerEntries[] = {
 };
 
 #undef XE_D3D12_REDIST_ARCH
+
+#if !XE_ARCH_ARM64
+constexpr RedistEntry kVulkanLoaderEntries[] = {
+    {"VulkanRT-X64-1.4.350.0-Components/x64/vulkan-1.dll", L"vulkan-1.dll"},
+};
+#endif
 
 // Microsoft Visual C++ 2015-2022 redistributable. The aka.ms link always
 // resolves to the latest build, so there's no stable SHA-256 to pin; the
@@ -167,6 +191,23 @@ bool ShaderCompilerPresent(const std::filesystem::path& d3d12_dir) {
   return present;
 }
 
+#if !XE_ARCH_ARM64
+// True if vulkan-1.dll resolves, either from vulkan_dir or anywhere on the
+// default DLL search path (system-wide or next to the exe).
+bool VulkanLoaderPresent(const std::filesystem::path& vulkan_dir) {
+  std::error_code ec;
+  if (std::filesystem::exists(vulkan_dir / "vulkan-1.dll", ec)) {
+    return true;
+  }
+  HMODULE loader = LoadLibraryW(L"vulkan-1.dll");
+  if (loader) {
+    FreeLibrary(loader);
+    return true;
+  }
+  return false;
+}
+#endif
+
 // Native MessageBox (not wxMessageBox) since the provider may initialize off
 // the GUI thread; only the translated string comes from wx.
 bool AskYesNo(const wxString& message) {
@@ -191,6 +232,14 @@ void RememberVCDecline() {
   OVERRIDE_PERSIST_bool(update_vc_runtime, false);
   config::SaveConfig();
 }
+
+#if !XE_ARCH_ARM64
+// Same, but for the Vulkan loader's own cvar.
+void RememberVulkanDecline() {
+  OVERRIDE_PERSIST_bool(vulkan_install_missing_loader, false);
+  config::SaveConfig();
+}
+#endif
 
 bool DownloadToMemory(const wchar_t* url, std::vector<uint8_t>& out) {
   out.clear();
@@ -672,6 +721,47 @@ bool EnsureDebugLayer(const std::filesystem::path& d3d12_dir) {
   return false;
 }
 
+#if XE_ARCH_ARM64
+// LunarG's runtime components ship only x64/x86 loaders, not arm64.
+bool EnsureVulkanLoader(const std::filesystem::path&) { return false; }
+#else
+bool EnsureVulkanLoader(const std::filesystem::path& vulkan_dir) {
+  if (VulkanLoaderPresent(vulkan_dir)) {
+    return true;
+  }
+  if (!cvars::vulkan_install_missing_loader) {
+    XELOGW(
+        "Vulkan loader (vulkan-1.dll) is missing and auto-install is disabled "
+        "(vulkan_install_missing_loader=false)");
+    return false;
+  }
+
+  static bool prompted = false;
+  if (prompted) {
+    return false;
+  }
+  prompted = true;
+
+  if (!AskYesNo(
+          _("vulkan-1.dll not found, required for the Vulkan graphics backend. "
+            "Download now (~20 MB)?"))) {
+    XELOGW("User declined the Vulkan loader download");
+    RememberVulkanDecline();
+    return false;
+  }
+
+  XELOGI("Downloading the Vulkan loader from LunarG...");
+  if (!DownloadAndExtract(kVulkanLoaderUrl, kVulkanLoaderSha256,
+                          kVulkanLoaderEntries,
+                          xe::countof(kVulkanLoaderEntries), vulkan_dir)) {
+    return false;
+  }
+
+  XELOGI("Vulkan loader installed to {}", xe::path_to_utf8(vulkan_dir));
+  return true;
+}
+#endif
+
 bool EnsureVCRuntime() {
   VCRuntimeStatus status = QueryVCRuntime();
   if (status.up_to_date) {
@@ -788,6 +878,7 @@ bool EnsureVCRuntime() {
 bool EnsureShaderCompilerRuntime(const std::filesystem::path&) { return false; }
 bool EnsureAgilityRuntime(const std::filesystem::path&) { return false; }
 bool EnsureDebugLayer(const std::filesystem::path&) { return false; }
+bool EnsureVulkanLoader(const std::filesystem::path&) { return false; }
 bool EnsureVCRuntime() { return false; }
 
 #endif  // XE_PLATFORM_WIN32

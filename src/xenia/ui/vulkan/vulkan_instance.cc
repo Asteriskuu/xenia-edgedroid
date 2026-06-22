@@ -17,8 +17,10 @@
 #include <vector>
 
 #include "xenia/base/cvar.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
+#include "xenia/ui/redist_installer_wx.h"
 #include "xenia/ui/vulkan/vulkan_presenter.h"
 
 #if XE_PLATFORM_LINUX
@@ -80,7 +82,18 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(
   // MoltenVK is statically linked; the vk* entry points are real symbols.
 #define XE_VULKAN_LOAD_LOADER_FUNCTION(name) ifn.name = &::name;
 #elif XE_PLATFORM_WIN32
-  vulkan_instance->loader_ = LoadLibraryW(L"vulkan-1.dll");
+  // Offer to download the loader into a "Vulkan" folder next to the executable
+  // if it's missing, then load it from there by full path. Fall back to the
+  // system search path.
+  auto vulkan_dir =
+      xe::filesystem::GetExecutablePath().parent_path() / "Vulkan";
+  xe::ui::EnsureVulkanLoader(vulkan_dir);
+  auto loader_path = xe::path_to_utf16(vulkan_dir / "vulkan-1.dll");
+  vulkan_instance->loader_ =
+      LoadLibraryW(reinterpret_cast<LPCWSTR>(loader_path.c_str()));
+  if (!vulkan_instance->loader_) {
+    vulkan_instance->loader_ = LoadLibraryW(L"vulkan-1.dll");
+  }
   if (!vulkan_instance->loader_) {
     XELOGE("Failed to load vulkan-1.dll");
     return nullptr;

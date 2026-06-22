@@ -36,6 +36,13 @@ bool EnsureAgilityRuntime(const std::filesystem::path& d3d12_dir);
 // Same return contract as EnsureAgilityRuntime.
 bool EnsureDebugLayer(const std::filesystem::path& d3d12_dir);
 
+// If the Vulkan loader (vulkan-1.dll) isn't loadable from vulkan_dir or the
+// system, prompts once and downloads it into vulkan_dir (loaded in-process, no
+// restart). Returns true if present already or after a successful install. The
+// loader still needs a GPU Vulkan driver behind it. This supplies only the
+// loader, not a device.
+bool EnsureVulkanLoader(const std::filesystem::path& vulkan_dir);
+
 // If the Microsoft Visual C++ runtime isn't installed (a missing/outdated one
 // crashes deep in the CRT during startup), prompts once, downloads
 // vc_redist from Microsoft, verifies it carries a Microsoft Authenticode
