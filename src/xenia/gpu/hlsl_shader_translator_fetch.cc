@@ -942,8 +942,7 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
                std::to_string(descriptor_index) +
                "u) + kXeResourceDescriptorHeapStart;");
       EmitLine(std::string(type) + "<float4> " + local_name +
-               " = ResourceDescriptorHeap[NonUniformResourceIndex(" +
-               local_name + "_idx)];");
+               " = ResourceDescriptorHeap[" + local_name + "_idx];");
       return local_name;
     };
     auto emit_sample =
@@ -998,7 +997,7 @@ void HlslShaderTranslator::ProcessTextureFetchInstruction(
                std::to_string(sampler_descriptor_index) + "u);");
       EmitLine(
           "SamplerState xe_tf_smp = "
-          "SamplerDescriptorHeap[NonUniformResourceIndex(xe_tf_smp_idx)];");
+          "SamplerDescriptorHeap[xe_tf_smp_idx];");
       sampler_var = "xe_tf_smp";
     } else {
       sampler_var = "xe_sampler" + std::to_string(sampler_binding_index);
