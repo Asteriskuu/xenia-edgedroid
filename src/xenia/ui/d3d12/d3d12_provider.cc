@@ -351,7 +351,8 @@ bool D3D12Provider::Initialize() {
   // Opt into the Agility runtime if D3D12Core.dll was downloaded (older in-box
   // runtimes lack SM 6.6). Must precede the first device creation.
   bool agility_active = false;
-  if (std::filesystem::exists(d3d12_dir / "D3D12Core.dll")) {
+  std::error_code ec;
+  if (std::filesystem::exists(d3d12_dir / "D3D12Core.dll", ec)) {
     agility_active = TryEnableAgilitySdk();
   }
 

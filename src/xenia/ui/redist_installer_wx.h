@@ -36,6 +36,14 @@ bool EnsureAgilityRuntime(const std::filesystem::path& d3d12_dir);
 // Same return contract as EnsureAgilityRuntime.
 bool EnsureDebugLayer(const std::filesystem::path& d3d12_dir);
 
+// If the Microsoft Visual C++ runtime isn't installed (a missing/outdated one
+// crashes deep in the CRT during startup), prompts once, downloads
+// vc_redist from Microsoft, verifies it carries a Microsoft Authenticode
+// signature, runs it elevated, and restarts. Returns true if already present;
+// on a successful install it relaunches and never returns; on decline or any
+// failure it returns false and startup should continue.
+bool EnsureVCRuntime();
+
 }  // namespace ui
 }  // namespace xe
 
