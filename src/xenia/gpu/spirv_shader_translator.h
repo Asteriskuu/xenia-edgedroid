@@ -42,7 +42,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // TODO(Triang3l): Change to 0xYYYYMMDD once it's out of the rapid
     // prototyping stage (easier to do small granular updates with an
     // incremental counter).
-    static constexpr uint32_t kVersion = 13;
+    static constexpr uint32_t kVersion = 14;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -317,27 +317,29 @@ class SpirvShaderTranslator : public ShaderTranslator {
 
     // The constant blend factor for the respective modes.
     float edram_blend_constant[4];
-  };
 
-  // Separate constant buffer for user clip planes
-  struct ClipPlaneConstants {
+    // User clip planes. Also read by the GLSL tessellation helpers in
+    // xenos_draw.glsli at fixed std140 offsets, guarded by the static_assert
+    // below.
     float user_clip_planes[6][4];
+    // Tessellation factor range: [0] = min, [1] = max. 1.0 is added on the CPU
+    // per Xbox 360 docs. fractional_even partitioning needs min >= 2.0.
+    float tessellation_factor_range[2];
+    float tessellation_padding0[2];
+    uint32_t tessellation_vertex_index_endian;
+    uint32_t tessellation_vertex_index_offset;
+    uint32_t tessellation_vertex_index_min_max[2];
   };
 
-  // Separate constant buffer for tessellation parameters.
-  // Must match the layout in xenos_draw.glsli (std140).
-  struct TessellationConstants {
-    // Tessellation factor range: [0] = min, [1] = max.
-    // 1.0 is added on the CPU according to Xbox 360 tessellation documentation.
-    // For fractional_even partitioning, minimum factor must be >= 2.0.
-    float tessellation_factor_range[2];
-    // Padding to align next member to 8 bytes (std140 rules).
-    float padding0[2];
-    // Vertex/index processing parameters.
-    uint32_t vertex_index_endian;
-    uint32_t vertex_index_offset;
-    uint32_t vertex_index_min_max[2];
-  };
+  // xenos_draw.glsli reads these tessellation fields from the system constants
+  // UBO at these fixed std140 offsets. Keep them in sync.
+  static_assert(
+      offsetof(SystemConstants, tessellation_factor_range) == 512 &&
+          offsetof(SystemConstants, tessellation_vertex_index_endian) == 528 &&
+          offsetof(SystemConstants, tessellation_vertex_index_offset) == 532 &&
+          offsetof(SystemConstants, tessellation_vertex_index_min_max) == 536,
+      "Keep xenos_draw.glsli tessellation offsets in sync with "
+      "SystemConstants");
 
   enum ConstantBuffer : uint32_t {
     kConstantBufferSystem,
@@ -345,8 +347,6 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kConstantBufferFloatPixel,
     kConstantBufferBoolLoop,
     kConstantBufferFetch,
-    kConstantBufferClipPlanes,
-    kConstantBufferTessellation,
 
     kConstantBufferCount,
   };
@@ -1024,9 +1024,13 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kSystemConstantEdramRTKeepMask,
     kSystemConstantEdramRTClamp,
     kSystemConstantEdramBlendConstant,
+    kSystemConstantUserClipPlanes,
+    kSystemConstantTessellationFactorRange,
+    kSystemConstantTessellationVertexIndexEndian,
+    kSystemConstantTessellationVertexIndexOffset,
+    kSystemConstantTessellationVertexIndexMinMax,
   };
   spv::Id uniform_system_constants_;
-  spv::Id uniform_clip_plane_constants_;
   spv::Id uniform_float_constants_;
   spv::Id uniform_bool_loop_constants_;
   spv::Id uniform_fetch_constants_;

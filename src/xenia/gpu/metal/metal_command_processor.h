@@ -294,10 +294,8 @@ class MetalCommandProcessor : public CommandProcessor {
   // SPIRV-Cross (MSL) path - shader translator and cache.
   std::unique_ptr<SpirvShaderTranslator> spirv_shader_translator_;
   std::unordered_map<uint64_t, std::unique_ptr<MslShader>> msl_shader_cache_;
+  // Includes user clip planes and tessellation constants.
   SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};
-  SpirvShaderTranslator::ClipPlaneConstants spirv_clip_plane_constants_ = {};
-  SpirvShaderTranslator::TessellationConstants spirv_tessellation_constants_ =
-      {};
   struct MslShaderCompileRequest {
     MslShader::MslTranslation* translation = nullptr;
     uint64_t shader_hash = 0;
@@ -449,14 +447,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // Each ring-table slot tracks the last source version copied into it so
   // draws can skip per-draw memcmp/copy churn for unchanged constants.
   uint64_t msl_system_constants_version_ = 1;
-  uint64_t msl_clip_plane_constants_version_ = 1;
-  uint64_t msl_tessellation_constants_version_ = 1;
   MTL::Buffer* msl_constants_versioned_uniform_buffer_ = nullptr;
   std::vector<uint64_t> msl_system_constants_written_vertex_versions_;
   std::vector<uint64_t> msl_system_constants_written_pixel_versions_;
-  std::vector<uint64_t> msl_clip_plane_constants_written_vertex_versions_;
-  std::vector<uint64_t> msl_tessellation_constants_written_vertex_versions_;
-  std::vector<uint64_t> msl_tessellation_constants_written_pixel_versions_;
   // SPIRV-Cross path: highest texture/sampler slot counts bound on the current
   // render encoder. Used to clear trailing slots when a later draw uses fewer
   // resources, preventing stale state leakage between draws.

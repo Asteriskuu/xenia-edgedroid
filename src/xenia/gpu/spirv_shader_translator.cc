@@ -470,6 +470,17 @@ void SpirvShaderTranslator::StartTranslation() {
        type_float4_array_4},
       {"edram_blend_constant", offsetof(SystemConstants, edram_blend_constant),
        type_float4_},
+      {"user_clip_planes", offsetof(SystemConstants, user_clip_planes),
+       type_float4_array_6},
+      {"tessellation_factor_range",
+       offsetof(SystemConstants, tessellation_factor_range), type_float2_},
+      {"tessellation_vertex_index_endian",
+       offsetof(SystemConstants, tessellation_vertex_index_endian), type_uint_},
+      {"tessellation_vertex_index_offset",
+       offsetof(SystemConstants, tessellation_vertex_index_offset), type_uint_},
+      {"tessellation_vertex_index_min_max",
+       offsetof(SystemConstants, tessellation_vertex_index_min_max),
+       type_uint2_},
   };
   id_vector_temp_.clear();
   id_vector_temp_.reserve(xe::countof(system_constants));
@@ -1744,32 +1755,6 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
   }
   output_per_vertex_clip_distance_member_index_ = 0;
   output_per_vertex_cull_distance_member_index_ = 0;
-  if (user_clip_plane_count > 0) {
-    // Create separate uniform buffer for clip planes.
-    spv::Id type_float4_array_6 = builder_->makeArrayType(
-        type_float4_, builder_->makeUintConstant(6), sizeof(float) * 4);
-    builder_->addDecoration(type_float4_array_6, spv::DecorationArrayStride,
-                            sizeof(float) * 4);
-    std::vector<spv::Id> clip_plane_struct_members;
-    clip_plane_struct_members.push_back(type_float4_array_6);
-    spv::Id type_clip_plane_constants = builder_->makeStructType(
-        clip_plane_struct_members, "XeClipPlaneConstants");
-    builder_->addMemberDecoration(type_clip_plane_constants, 0,
-                                  spv::DecorationOffset, 0);
-    builder_->addDecoration(type_clip_plane_constants, spv::DecorationBlock);
-    uniform_clip_plane_constants_ = builder_->createVariable(
-        spv::NoPrecision, spv::StorageClassUniform, type_clip_plane_constants,
-        "xe_uniform_clip_planes");
-    builder_->addDecoration(uniform_clip_plane_constants_,
-                            spv::DecorationDescriptorSet,
-                            int(kDescriptorSetConstants));
-    builder_->addDecoration(uniform_clip_plane_constants_,
-                            spv::DecorationBinding,
-                            int(kConstantBufferClipPlanes));
-    if (features_.spirv_version >= spv::Spv_1_4) {
-      main_interface_.push_back(uniform_clip_plane_constants_);
-    }
-  }
   if (clip_distance_count > 0) {
     output_per_vertex_clip_distance_member_index_ =
         static_cast<unsigned int>(struct_per_vertex_members.size());
@@ -2789,17 +2774,17 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
 
     // Compute distance to each enabled user clip plane via dot product.
     for (uint32_t i = 0; i < user_clip_plane_count; ++i) {
-      // Load user clip plane from separate clip plane constants buffer.
+      // Load user clip plane from the system constants buffer.
       id_vector_temp_.clear();
       id_vector_temp_.push_back(
-          builder_->makeIntConstant(0));  // Struct member 0
+          builder_->makeIntConstant(kSystemConstantUserClipPlanes));
       id_vector_temp_.push_back(
           builder_->makeIntConstant(int(i)));  // Array index
-      spv::Id clip_plane = builder_->createLoad(
-          builder_->createAccessChain(spv::StorageClassUniform,
-                                      uniform_clip_plane_constants_,
-                                      id_vector_temp_),
-          spv::NoPrecision);
+      spv::Id clip_plane =
+          builder_->createLoad(builder_->createAccessChain(
+                                   spv::StorageClassUniform,
+                                   uniform_system_constants_, id_vector_temp_),
+                               spv::NoPrecision);
 
       // Compute dot product: distance = dot(clip_space_position, clip_plane).
       spv::Id distance = builder_->createBinOp(spv::OpDot, type_float_,

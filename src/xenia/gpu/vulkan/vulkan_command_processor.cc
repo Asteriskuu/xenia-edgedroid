@@ -288,9 +288,13 @@ bool VulkanCommandProcessor::SetupContext() {
   descriptor_set_layout_bindings_constants
       [SpirvShaderTranslator::kConstantBufferSystem]
           .stageFlags =
-      guest_shader_stages |
+      // Visible to the vertex/domain stages for user clip planes and to the
+      // control/eval/vertex stages for tessellation, plus the usual guest
+      // stages.
+      guest_shader_stages | guest_shader_vertex_stages_ |
       (device_properties.tessellationShader
-           ? VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+           ? (VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+              VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
            : 0) |
       (device_properties.geometryShader ? VK_SHADER_STAGE_GEOMETRY_BIT : 0);
   descriptor_set_layout_bindings_constants
@@ -305,21 +309,6 @@ bool VulkanCommandProcessor::SetupContext() {
   descriptor_set_layout_bindings_constants
       [SpirvShaderTranslator::kConstantBufferFetch]
           .stageFlags = guest_shader_stages;
-  // Clip plane constants - used by vertex shader (and TES for tessellation).
-  descriptor_set_layout_bindings_constants
-      [SpirvShaderTranslator::kConstantBufferClipPlanes]
-          .stageFlags = guest_shader_vertex_stages_;
-  // Tessellation constants - used by tessellation control shader, the
-  // tessellation vertex shader (for index/factor processing), and the
-  // tessellation evaluation shader (domain shader, which is the translated
-  // Xenos vertex shader).
-  descriptor_set_layout_bindings_constants
-      [SpirvShaderTranslator::kConstantBufferTessellation]
-          .stageFlags = device_properties.tessellationShader
-                            ? (VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
-                               VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
-                               VK_SHADER_STAGE_VERTEX_BIT)
-                            : 0;
   descriptor_set_layout_create_info.bindingCount =
       uint32_t(xe::countof(descriptor_set_layout_bindings_constants));
   descriptor_set_layout_create_info.pBindings =
@@ -1633,19 +1622,16 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
              index == XE_GPU_REG_VGT_DMA_SIZE ||
              index == XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL ||
              index == XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) {
-    // Source registers for the tessellation constant buffer. Invalidate it so
-    // the factor range and index parameters are refreshed per draw instead of
-    // staying stale from the first draw of the submission.
+    // Tessellation factor range and index parameters are in the system
+    // constants buffer.
     current_constant_buffers_up_to_date_ &=
-        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferTessellation);
+        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferSystem);
   } else if ((index >= XE_GPU_REG_PA_CL_UCP_0_X &&
               index <= XE_GPU_REG_PA_CL_UCP_5_W) ||
              index == XE_GPU_REG_PA_CL_CLIP_CNTL) {
-    // Source registers for the user clip plane constant buffer. Invalidate it
-    // so the planes are refreshed per draw instead of staying stale from the
-    // first draw of the submission.
+    // User clip planes are in the system constants buffer.
     current_constant_buffers_up_to_date_ &=
-        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferClipPlanes);
+        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferSystem);
   }
 }
 void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index,
@@ -6314,11 +6300,10 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
     system_constants_.ndc_offset[i] = viewport_info.ndc_offset[i];
   }
 
-  // User clip planes (for vertex shaders)
+  // User clip planes, for vertex and domain shaders.
   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
   if (!pa_cl_clip_cntl.clip_disable && pa_cl_clip_cntl.ucp_ena) {
-    float* user_clip_plane_write_ptr =
-        clip_plane_constants_.user_clip_planes[0];
+    float* user_clip_plane_write_ptr = system_constants_.user_clip_planes[0];
     uint32_t user_clip_planes_remaining = pa_cl_clip_cntl.ucp_ena;
     uint32_t user_clip_plane_index;
     while (xe::bit_scan_forward(user_clip_planes_remaining,
@@ -6340,6 +6325,40 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
       }
       user_clip_plane_write_ptr += 4;
     }
+  } else {
+    constexpr float kZeroPlanes[6][4] = {};
+    if (std::memcmp(system_constants_.user_clip_planes, kZeroPlanes,
+                    sizeof(system_constants_.user_clip_planes))) {
+      dirty = true;
+      std::memset(system_constants_.user_clip_planes, 0,
+                  sizeof(system_constants_.user_clip_planes));
+    }
+  }
+
+  // Tessellation constants. The factor range has 1.0 added per Xbox 360 docs.
+  // fractional_even partitioning needs a minimum of 2.0.
+  {
+    float tess_min = regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f;
+    float tess_max = regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
+    dirty |= system_constants_.tessellation_factor_range[0] != tess_min;
+    dirty |= system_constants_.tessellation_factor_range[1] != tess_max;
+    system_constants_.tessellation_factor_range[0] = tess_min;
+    system_constants_.tessellation_factor_range[1] = tess_max;
+    uint32_t tess_vie =
+        static_cast<uint32_t>(regs.Get<reg::VGT_DMA_SIZE>().swap_mode);
+    uint32_t tess_vio = regs[XE_GPU_REG_VGT_INDX_OFFSET];
+    uint32_t tess_vmin = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
+    uint32_t tess_vmax = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
+    dirty |= system_constants_.tessellation_vertex_index_endian != tess_vie;
+    dirty |= system_constants_.tessellation_vertex_index_offset != tess_vio;
+    dirty |=
+        system_constants_.tessellation_vertex_index_min_max[0] != tess_vmin;
+    dirty |=
+        system_constants_.tessellation_vertex_index_min_max[1] != tess_vmax;
+    system_constants_.tessellation_vertex_index_endian = tess_vie;
+    system_constants_.tessellation_vertex_index_offset = tess_vio;
+    system_constants_.tessellation_vertex_index_min_max[0] = tess_vmin;
+    system_constants_.tessellation_vertex_index_min_max[1] = tess_vmax;
   }
 
   // Point size.
@@ -6768,77 +6787,6 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
                   sizeof(SpirvShaderTranslator::SystemConstants));
       current_constant_buffers_up_to_date_ |=
           UINT32_C(1) << SpirvShaderTranslator::kConstantBufferSystem;
-    }
-    // Clip plane constants.
-    // Always initialize the buffer info, even if clip planes are disabled,
-    // because the descriptor set write always includes all constant buffers.
-    if (!(current_constant_buffers_up_to_date_ &
-          (UINT32_C(1) << SpirvShaderTranslator::kConstantBufferClipPlanes))) {
-      VkDescriptorBufferInfo& buffer_info = current_constant_buffer_infos_
-          [SpirvShaderTranslator::kConstantBufferClipPlanes];
-      uint8_t* mapping = uniform_buffer_pool_->Request(
-          frame_current_, sizeof(SpirvShaderTranslator::ClipPlaneConstants),
-          uniform_buffer_alignment, buffer_info.buffer, buffer_info.offset);
-      if (!mapping) {
-        return false;
-      }
-      buffer_info.range = sizeof(SpirvShaderTranslator::ClipPlaneConstants);
-      auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
-      bool clip_planes_enabled =
-          !pa_cl_clip_cntl.clip_disable && pa_cl_clip_cntl.ucp_ena;
-      if (clip_planes_enabled) {
-        std::memcpy(mapping, &clip_plane_constants_,
-                    sizeof(SpirvShaderTranslator::ClipPlaneConstants));
-      } else {
-        // Zero out the buffer when clip planes are disabled
-        std::memset(mapping, 0,
-                    sizeof(SpirvShaderTranslator::ClipPlaneConstants));
-      }
-      current_constant_buffers_up_to_date_ |=
-          UINT32_C(1) << SpirvShaderTranslator::kConstantBufferClipPlanes;
-    }
-    // Tessellation constants.
-    // Always initialize the buffer info, even if tessellation is not active,
-    // because the descriptor set write always includes all constant buffers.
-    if (!(current_constant_buffers_up_to_date_ &
-          (UINT32_C(1)
-           << SpirvShaderTranslator::kConstantBufferTessellation))) {
-      VkDescriptorBufferInfo& buffer_info = current_constant_buffer_infos_
-          [SpirvShaderTranslator::kConstantBufferTessellation];
-      uint8_t* mapping = uniform_buffer_pool_->Request(
-          frame_current_, sizeof(SpirvShaderTranslator::TessellationConstants),
-          uniform_buffer_alignment, buffer_info.buffer, buffer_info.offset);
-      if (!mapping) {
-        return false;
-      }
-      buffer_info.range = sizeof(SpirvShaderTranslator::TessellationConstants);
-      // Populate tessellation constants from registers.
-      SpirvShaderTranslator::TessellationConstants tessellation_constants;
-      // Tessellation factor range, plus 1.0 according to Xbox 360 docs.
-      // For fractional_even partitioning (continuous mode), minimum must be
-      // >= 2.0.
-      float tess_factor_min =
-          regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f;
-      float tess_factor_max =
-          regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
-      tessellation_constants.tessellation_factor_range[0] = tess_factor_min;
-      tessellation_constants.tessellation_factor_range[1] = tess_factor_max;
-      tessellation_constants.padding0[0] = 0.0f;
-      tessellation_constants.padding0[1] = 0.0f;
-      // Vertex index processing parameters for tessellation shaders.
-      auto vgt_dma_size = regs.Get<reg::VGT_DMA_SIZE>();
-      tessellation_constants.vertex_index_endian =
-          static_cast<uint32_t>(vgt_dma_size.swap_mode);
-      tessellation_constants.vertex_index_offset =
-          regs[XE_GPU_REG_VGT_INDX_OFFSET];
-      tessellation_constants.vertex_index_min_max[0] =
-          regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
-      tessellation_constants.vertex_index_min_max[1] =
-          regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
-      std::memcpy(mapping, &tessellation_constants,
-                  sizeof(SpirvShaderTranslator::TessellationConstants));
-      current_constant_buffers_up_to_date_ |=
-          UINT32_C(1) << SpirvShaderTranslator::kConstantBufferTessellation;
     }
     // Vertex shader float constants.
     if (!(current_constant_buffers_up_to_date_ &

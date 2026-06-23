@@ -1200,16 +1200,9 @@ bool MetalCommandProcessor::SetupContext() {
     }
   }
   msl_system_constants_version_ = 1;
-  msl_clip_plane_constants_version_ = 1;
-  msl_tessellation_constants_version_ = 1;
   msl_constants_versioned_uniform_buffer_ = nullptr;
   msl_system_constants_written_vertex_versions_.assign(draw_ring_count_, 0);
   msl_system_constants_written_pixel_versions_.assign(draw_ring_count_, 0);
-  msl_clip_plane_constants_written_vertex_versions_.assign(draw_ring_count_, 0);
-  msl_tessellation_constants_written_vertex_versions_.assign(draw_ring_count_,
-                                                             0);
-  msl_tessellation_constants_written_pixel_versions_.assign(draw_ring_count_,
-                                                            0);
   msl_current_float_constant_map_vertex_.fill(0);
   msl_current_float_constant_map_pixel_.fill(0);
   msl_float_constants_dirty_vertex_ = true;
@@ -2525,15 +2518,6 @@ bool MetalCommandProcessor::IssueDrawMsl(
               msl_system_constants_written_vertex_versions_.end(), uint64_t(0));
     std::fill(msl_system_constants_written_pixel_versions_.begin(),
               msl_system_constants_written_pixel_versions_.end(), uint64_t(0));
-    std::fill(msl_clip_plane_constants_written_vertex_versions_.begin(),
-              msl_clip_plane_constants_written_vertex_versions_.end(),
-              uint64_t(0));
-    std::fill(msl_tessellation_constants_written_vertex_versions_.begin(),
-              msl_tessellation_constants_written_vertex_versions_.end(),
-              uint64_t(0));
-    std::fill(msl_tessellation_constants_written_pixel_versions_.begin(),
-              msl_tessellation_constants_written_pixel_versions_.end(),
-              uint64_t(0));
   }
   auto ensure_uniform_versions_size = [&](std::vector<uint64_t>& versions) {
     if (versions.size() != draw_ring_count_) {
@@ -2542,12 +2526,6 @@ bool MetalCommandProcessor::IssueDrawMsl(
   };
   ensure_uniform_versions_size(msl_system_constants_written_vertex_versions_);
   ensure_uniform_versions_size(msl_system_constants_written_pixel_versions_);
-  ensure_uniform_versions_size(
-      msl_clip_plane_constants_written_vertex_versions_);
-  ensure_uniform_versions_size(
-      msl_tessellation_constants_written_vertex_versions_);
-  ensure_uniform_versions_size(
-      msl_tessellation_constants_written_pixel_versions_);
   const size_t ring_index_size = size_t(ring_index);
   auto copy_uniform_block_if_stale =
       [&](uint8_t* dst, const void* src, size_t size,
@@ -2678,29 +2656,6 @@ bool MetalCommandProcessor::IssueDrawMsl(
   std::memcpy(uniforms_pixel + kFetchConstantOffset,
               msl_cached_fetch_constants_.data(), kFetchConstantsSize);
 
-  // b5 (msl_buffer 6): Clip plane constants (separate buffer for SPIR-V path).
-  const size_t kClipPlaneConstantOffset = 4 * kCBVSize;
-  copy_uniform_block_if_stale(uniforms_vertex + kClipPlaneConstantOffset,
-                              &spirv_clip_plane_constants_,
-                              sizeof(SpirvShaderTranslator::ClipPlaneConstants),
-                              msl_clip_plane_constants_written_vertex_versions_,
-                              msl_clip_plane_constants_version_);
-
-  // b6 (msl_buffer 7): Tessellation constants.
-  const size_t kTessellationConstantOffset = 5 * kCBVSize;
-  copy_uniform_block_if_stale(
-      uniforms_vertex + kTessellationConstantOffset,
-      &spirv_tessellation_constants_,
-      sizeof(SpirvShaderTranslator::TessellationConstants),
-      msl_tessellation_constants_written_vertex_versions_,
-      msl_tessellation_constants_version_);
-  copy_uniform_block_if_stale(
-      uniforms_pixel + kTessellationConstantOffset,
-      &spirv_tessellation_constants_,
-      sizeof(SpirvShaderTranslator::TessellationConstants),
-      msl_tessellation_constants_written_pixel_versions_,
-      msl_tessellation_constants_version_);
-
   // Keep binding behavior conservative while using per-encoder dedupe caches.
   const bool msl_bind_dedupe = true;
 
@@ -2771,20 +2726,6 @@ bool MetalCommandProcessor::IssueDrawMsl(
     current_render_encoder_->setFragmentBuffer(uniforms_buffer_,
                                                ps_base_offset + 3 * kCBVSize,
                                                MslBufferIndex::kFetchConstants);
-
-    // Clip plane constants (msl_buffer 6) — vertex shader only.
-    // The SPIR-V translator uses a separate constant buffer for clip planes.
-    current_render_encoder_->setVertexBuffer(
-        uniforms_buffer_, vs_base_offset + 4 * kCBVSize,
-        MslBufferIndex::kClipPlaneConstants);
-
-    // Tessellation constants (msl_buffer 7).
-    current_render_encoder_->setVertexBuffer(
-        uniforms_buffer_, vs_base_offset + 5 * kCBVSize,
-        MslBufferIndex::kTessellationConstants);
-    current_render_encoder_->setFragmentBuffer(
-        uniforms_buffer_, ps_base_offset + 5 * kCBVSize,
-        MslBufferIndex::kTessellationConstants);
 
     msl_bound_uniforms_buffer_ = uniforms_buffer_;
     msl_bound_uniforms_vs_base_offset_ = vs_base_offset;
@@ -5480,10 +5421,6 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
     uint32_t normalized_color_mask) {
   const SpirvShaderTranslator::SystemConstants previous_system_constants =
       spirv_system_constants_;
-  const SpirvShaderTranslator::ClipPlaneConstants
-      previous_clip_plane_constants = spirv_clip_plane_constants_;
-  const SpirvShaderTranslator::TessellationConstants
-      previous_tessellation_constants = spirv_tessellation_constants_;
 
   const RegisterFile& regs = *register_file_;
   auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
@@ -5681,15 +5618,12 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
     consts.color_exp_bias[i] = color_exp_bias_scale;
   }
 
-  // Clip plane constants (separate buffer for the SPIR-V translator).
-  // The SPIR-V translator reads clip planes from a dedicated uniform buffer
-  // (kConstantBufferClipPlanes), not from system constants.
+  // User clip planes and tessellation constants in the system constants.
   auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
-  std::memset(&spirv_clip_plane_constants_, 0,
-              sizeof(spirv_clip_plane_constants_));
+  std::memset(spirv_system_constants_.user_clip_planes, 0,
+              sizeof(spirv_system_constants_.user_clip_planes));
   if (!pa_cl_clip_cntl.clip_disable && pa_cl_clip_cntl.ucp_ena) {
-    float* clip_plane_write_ptr =
-        spirv_clip_plane_constants_.user_clip_planes[0];
+    float* clip_plane_write_ptr = spirv_system_constants_.user_clip_planes[0];
     uint32_t clip_planes_remaining = pa_cl_clip_cntl.ucp_ena;
     uint32_t clip_plane_index;
     while (xe::bit_scan_forward(clip_planes_remaining, &clip_plane_index)) {
@@ -5700,47 +5634,27 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
       clip_plane_write_ptr += 4;
     }
   }
-
-  // Tessellation constants (separate buffer for the SPIR-V translator).
-  // Mirror Vulkan constant buffer population to keep shader inputs identical.
-  std::memset(&spirv_tessellation_constants_, 0,
-              sizeof(spirv_tessellation_constants_));
-  float tess_factor_min =
+  spirv_system_constants_.tessellation_factor_range[0] =
       regs.Get<float>(XE_GPU_REG_VGT_HOS_MIN_TESS_LEVEL) + 1.0f;
-  float tess_factor_max =
+  spirv_system_constants_.tessellation_factor_range[1] =
       regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
-  spirv_tessellation_constants_.tessellation_factor_range[0] = tess_factor_min;
-  spirv_tessellation_constants_.tessellation_factor_range[1] = tess_factor_max;
   auto vgt_dma_size = regs.Get<reg::VGT_DMA_SIZE>();
-  spirv_tessellation_constants_.vertex_index_endian =
+  spirv_system_constants_.tessellation_vertex_index_endian =
       static_cast<uint32_t>(vgt_dma_size.swap_mode);
-  spirv_tessellation_constants_.vertex_index_offset =
+  spirv_system_constants_.tessellation_vertex_index_offset =
       regs[XE_GPU_REG_VGT_INDX_OFFSET];
-  spirv_tessellation_constants_.vertex_index_min_max[0] =
+  spirv_system_constants_.tessellation_vertex_index_min_max[0] =
       regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
-  spirv_tessellation_constants_.vertex_index_min_max[1] =
+  spirv_system_constants_.tessellation_vertex_index_min_max[1] =
       regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
 
+  // The system constants version bump covers clip planes and tessellation,
+  // which live in the same struct.
   if (std::memcmp(&previous_system_constants, &spirv_system_constants_,
                   sizeof(spirv_system_constants_)) != 0) {
     ++msl_system_constants_version_;
     if (msl_system_constants_version_ == 0) {
       msl_system_constants_version_ = 1;
-    }
-  }
-  if (std::memcmp(&previous_clip_plane_constants, &spirv_clip_plane_constants_,
-                  sizeof(spirv_clip_plane_constants_)) != 0) {
-    ++msl_clip_plane_constants_version_;
-    if (msl_clip_plane_constants_version_ == 0) {
-      msl_clip_plane_constants_version_ = 1;
-    }
-  }
-  if (std::memcmp(&previous_tessellation_constants,
-                  &spirv_tessellation_constants_,
-                  sizeof(spirv_tessellation_constants_)) != 0) {
-    ++msl_tessellation_constants_version_;
-    if (msl_tessellation_constants_version_ == 0) {
-      msl_tessellation_constants_version_ = 1;
     }
   }
 }
