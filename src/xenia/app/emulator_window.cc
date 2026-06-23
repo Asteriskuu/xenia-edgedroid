@@ -146,10 +146,13 @@
 #include <wx/aui/framemanager.h>
 #include <wx/config.h>
 #include <wx/dcmemory.h>
+#include <wx/generic/aboutdlgg.h>
 #include <wx/graphics.h>
+#include <wx/hyperlink.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
 #include <wx/mstream.h>
+#include <wx/panel.h>
 #include <wx/settings.h>
 #include <wx/slider.h>
 #include <wx/statbmp.h>
@@ -411,6 +414,59 @@ wxString SubtypeName(uint8_t subtype) {
       return _("Gamepad");
   }
 }
+
+// About dialog with clickable links, which the stock wxAboutBox
+// (plain-text description only) cannot render.
+class AboutDialog : public wxGenericAboutDialog {
+ public:
+  AboutDialog(const wxAboutDialogInfo& info, wxWindow* parent) {
+    Create(info, parent);
+  }
+
+ protected:
+  void DoAddCustomControls() override {
+    auto* parent = GetCustomControlParent();
+    AddControl(new wxHyperlinkCtrl(parent, wxID_ANY,
+                                   "https://github.com/has207/xenia-edge",
+                                   "https://github.com/has207/xenia-edge"));
+    AddText(wxString::Format(_("Branch: %s\nCommit: %s\nBuild Date: %s"),
+                             XE_BUILD_BRANCH, XE_BUILD_COMMIT_SHORT,
+                             XE_BUILD_DATE));
+    AddText("\n");
+    AddLinkedLine(_("Xenia is distributed under the %s"),
+                  _("BSD 3-Clause License"),
+                  "https://github.com/has207/xenia-edge/blob/edge/LICENSE");
+    AddText("\n");
+    AddLinkedLine(_("UI font: %s (SIL Open Font License 1.1)"),
+                  _("Inter by Rasmus Andersson"), "https://rsms.me/inter/");
+    AddLinkedLine(_("Icons by %s"), _("Icons8"), "https://icons8.com");
+  }
+
+ private:
+  // Adds a line of text where the segment marked by %s is a link to url. The
+  // %s keeps the surrounding sentence one translatable phrase so translators
+  // can place the link wherever grammar requires.
+  void AddLinkedLine(const wxString& format, const wxString& link_label,
+                     const wxString& url) {
+    auto* parent = GetCustomControlParent();
+    auto* row = new wxPanel(parent, wxID_ANY);
+    row->SetBackgroundColour(parent->GetBackgroundColour());
+    auto* sizer = new wxBoxSizer(wxHORIZONTAL);
+    const int link_pos = format.Find("%s");
+    const wxString prefix = format.Left(link_pos);
+    const wxString suffix = format.Mid(link_pos + 2);
+    const auto flags = wxSizerFlags().Centre();
+    if (!prefix.empty()) {
+      sizer->Add(new wxStaticText(row, wxID_ANY, prefix), flags);
+    }
+    sizer->Add(new wxHyperlinkCtrl(row, wxID_ANY, link_label, url), flags);
+    if (!suffix.empty()) {
+      sizer->Add(new wxStaticText(row, wxID_ANY, suffix), flags);
+    }
+    row->SetSizerAndFit(sizer);
+    AddControl(row);
+  }
+};
 }  // namespace
 
 using xe::ui::FileDropEvent;
@@ -2941,19 +2997,16 @@ void EmulatorWindow::ShowAbout() {
   info.SetName("Xenia Edge");
   info.SetVersion(wxString::Format("%s@%s (%s)", XE_BUILD_BRANCH,
                                    XE_BUILD_COMMIT_SHORT, XE_BUILD_DATE));
-  info.SetDescription(wxString::Format(
-      _("Experimental fork of Xenia Canary.\n\n"
-        "https://github.com/has207/xenia-edge\n\n"
-        "Branch: %s\n"
-        "Commit: %s\n"
-        "Build Date: %s\n\n"
-        "UI font: Inter by Rasmus Andersson (https://rsms.me/inter/, "
-        "SIL Open Font License 1.1).\n"
-        "Icons by Icons8 (https://icons8.com)."),
-      XE_BUILD_BRANCH, XE_BUILD_COMMIT_SHORT, XE_BUILD_DATE));
+  info.SetDescription(_("Experimental fork of Xenia Canary."));
 
   auto* wx_window = static_cast<ui::WxWindow*>(window_.get());
-  wxAboutBox(info, wx_window ? wx_window->frame() : nullptr);
+  wxWindow* parent = wx_window ? wx_window->frame() : nullptr;
+#if wxUSE_MODAL_ABOUT_DIALOG
+  AboutDialog dlg(info, parent);
+  dlg.ShowModal();
+#else
+  (new AboutDialog(info, parent))->Show();
+#endif
 }
 
 void EmulatorWindow::UpdateTitle() {
