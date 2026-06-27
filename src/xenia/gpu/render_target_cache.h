@@ -595,6 +595,16 @@ class RenderTargetCache {
   // EDRAM memory are committed with a memory barrier.
   void PixelShaderInterlockFullEdramBarrierPlaced();
 
+  // Whether a 7e3 <-> 8_8_8_8 ownership transfer should decode the values
+  // rather than bit-reinterpret the raw bytes. Both are display colors, so an
+  // in-place reuse is an HDR<->LDR conversion. Reinterpreting the float bits as
+  // unorm scrambles channels into garbage seen through translucent geometry
+  // blended over the tile. Value-converted only for a same-base reuse. A
+  // cross-base transfer is a spuriously over-claimed neighbor (e.g. an
+  // overestimated height) that stays bit-exact so its HDR is not clamped.
+  static bool IsTransferValueConverted7e3And8888(RenderTargetKey source,
+                                                 RenderTargetKey dest);
+
  private:
   const RegisterFile& register_file_;
   uint32_t draw_resolution_scale_x_;

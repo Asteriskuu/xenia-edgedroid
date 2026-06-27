@@ -1440,6 +1440,27 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(
   return render_target;
 }
 
+bool RenderTargetCache::IsTransferValueConverted7e3And8888(
+    RenderTargetKey source, RenderTargetKey dest) {
+  if (source.is_depth || dest.is_depth ||
+      source.base_tiles != dest.base_tiles) {
+    return false;
+  }
+  auto is_7e3 = [](xenos::ColorRenderTargetFormat format) {
+    return format == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
+           format == xenos::ColorRenderTargetFormat::
+                         k_2_10_10_10_FLOAT_AS_16_16_16_16;
+  };
+  auto is_8888 = [](xenos::ColorRenderTargetFormat format) {
+    return format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
+           format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
+  };
+  xenos::ColorRenderTargetFormat source_format = source.GetColorFormat();
+  xenos::ColorRenderTargetFormat dest_format = dest.GetColorFormat();
+  return (is_7e3(source_format) && is_8888(dest_format)) ||
+         (is_8888(source_format) && is_7e3(dest_format));
+}
+
 bool RenderTargetCache::WouldOwnershipChangeRequireTransfers(
     RenderTargetKey dest, uint32_t start_tiles_base_relative,
     uint32_t length_tiles) const {

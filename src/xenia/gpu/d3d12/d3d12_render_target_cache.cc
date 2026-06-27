@@ -2041,6 +2041,31 @@ void D3D12RenderTargetCache::CommitEdramBufferUAVWrites(
   PixelShaderInterlockFullEdramBarrierPlaced();
 }
 
+// 7e3 (HDR float) source -> 8_8_8_8 dest: decode the 7e3 floats and saturate to
+// [0, 1] (r2 scratch) instead of bit-reinterpreting. See
+// IsTransferValueConverted7e3And8888 for why and when.
+static void TransferConvert7e3To8888(dxbc::Assembler& a) {
+  for (uint32_t i = 0; i < 3; ++i) {
+    DxbcShaderTranslator::Float7e3To32(a, dxbc::Dest::R(2, 1 << i), 1, 0,
+                                       i * 10, 0, 0, 0, 1);
+  }
+  a.OpUBFE(dxbc::Dest::R(2, 0b1000), dxbc::Src::LU(2), dxbc::Src::LU(30),
+           dxbc::Src::R(1, dxbc::Src::kXXXX));
+  a.OpUToF(dxbc::Dest::R(2, 0b1000), dxbc::Src::R(2, dxbc::Src::kWWWW));
+  a.OpMul(dxbc::Dest::R(2, 0b1000), dxbc::Src::R(2, dxbc::Src::kWWWW),
+          dxbc::Src::LF(1.0f / 3.0f));
+  a.OpMov(dxbc::Dest::O(0), dxbc::Src::R(2), true);
+}
+
+// Reverse of TransferConvert7e3To8888: unpack the 8_8_8_8 bytes to [0, 1] and
+// store directly into the 7e3 host R16G16B16A16_FLOAT (r2 scratch).
+static void TransferConvert8888To7e3(dxbc::Assembler& a) {
+  a.OpUBFE(dxbc::Dest::R(2), dxbc::Src::LU(8), dxbc::Src::LU(0, 8, 16, 24),
+           dxbc::Src::R(1, dxbc::Src::kXXXX));
+  a.OpUToF(dxbc::Dest::R(2), dxbc::Src::R(2));
+  a.OpMul(dxbc::Dest::O(0), dxbc::Src::R(2), dxbc::Src::LF(1.0f / 255.0f));
+}
+
 ID3D12PipelineState* const*
 D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
   const TransferModeInfo& mode = kTransferModes[size_t(key.mode)];
@@ -3799,8 +3824,20 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
         // 32bpp color output. Any register can be used as temporary if needed -
         // this is the end of the shader.
         if (color_packed_in_r1x) {
+          // Value-converted 7e3 source (same-base reuse only). See
+          // IsTransferValueConverted7e3And8888 and TransferConvert7e3To8888.
+          const bool source_is_7e3 =
+              key.value_convert && source_is_color &&
+              (source_color_format ==
+                   xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
+               source_color_format == xenos::ColorRenderTargetFormat::
+                                          k_2_10_10_10_FLOAT_AS_16_16_16_16);
           switch (dest_color_format) {
             case xenos::ColorRenderTargetFormat::k_8_8_8_8: {
+              if (source_is_7e3) {
+                TransferConvert7e3To8888(a);
+                break;
+              }
               a.OpUBFE(dxbc::Dest::R(1), dxbc::Src::LU(8),
                        dxbc::Src::LU(0, 8, 16, 24),
                        dxbc::Src::R(1, dxbc::Src::kXXXX));
@@ -3811,6 +3848,10 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
             case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
               // 8_8_8_8_GAMMA is represented by linear stored in
               // R16G16B16A16_UNORM.
+              if (source_is_7e3) {
+                TransferConvert7e3To8888(a);
+                break;
+              }
               a.OpUBFE(dxbc::Dest::R(1), dxbc::Src::LU(8),
                        dxbc::Src::LU(0, 8, 16, 24),
                        dxbc::Src::R(1, dxbc::Src::kXXXX));
@@ -3841,6 +3882,12 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
             case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
             case xenos::ColorRenderTargetFormat::
                 k_2_10_10_10_FLOAT_AS_16_16_16_16: {
+              if (key.value_convert && source_is_color &&
+                  source_color_format ==
+                      xenos::ColorRenderTargetFormat::k_8_8_8_8) {
+                TransferConvert8888To7e3(a);
+                break;
+              }
               // Color using r1.yz as temporary.
               for (uint32_t i = 0; i < 3; ++i) {
                 DxbcShaderTranslator::Float7e3To32(a, dxbc::Dest::O(0, 1 << i),
@@ -4931,6 +4978,8 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
               source_rt_key.msaa_samples;
           new_transfer_shader_key.source_resource_format =
               source_rt_key.resource_format;
+          new_transfer_shader_key.value_convert =
+              IsTransferValueConverted7e3And8888(source_rt_key, dest_rt_key);
           bool host_depth_source_is_copy =
               host_depth_source_d3d12_rt == &dest_d3d12_rt;
           new_transfer_shader_key.host_depth_source_is_copy =
