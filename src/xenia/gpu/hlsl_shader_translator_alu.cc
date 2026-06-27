@@ -525,7 +525,7 @@ void HlslShaderTranslator::ProcessScalarAluInstruction(
       break;
 
     case AluScalarOpcode::kExp:
-      result = "exp2(" + op0_a + ")";
+      result = "XeReduceMantissa(exp2(" + op0_a + "))";
       break;
 
     case AluScalarOpcode::kLogc:
@@ -534,43 +534,42 @@ void HlslShaderTranslator::ProcessScalarAluInstruction(
       break;
 
     case AluScalarOpcode::kLog:
-      result = "log2(" + op0_a + ")";
+      result = "XeReduceMantissa(log2(" + op0_a + "))";
       break;
 
-    case AluScalarOpcode::kRcpc:
+    case AluScalarOpcode::kRcpc: {
       // Reciprocal with infinity clamped to FLT_MAX.
-      result = "((abs(1.0 / " + op0_a +
-               ") == 1.0/0.0) ? "
-               "(sign(1.0 / " +
-               op0_a + ") * 3.402823466e+38) : (1.0 / " + op0_a + "))";
-      break;
+      std::string rcp = "XeReduceMantissa(1.0 / " + op0_a + ")";
+      result = "((abs(" + rcp + ") == 1.0/0.0) ? (sign(" + rcp +
+               ") * 3.402823466e+38) : " + rcp + ")";
+    } break;
 
-    case AluScalarOpcode::kRcpf:
+    case AluScalarOpcode::kRcpf: {
       // Reciprocal with infinity flushed to zero, keeping the sign.
-      result = "((abs(1.0 / " + op0_a + ") == 1.0/0.0) ? (sign(1.0 / " + op0_a +
-               ") * 0.0) : (1.0 / " + op0_a + "))";
-      break;
+      std::string rcp = "XeReduceMantissa(1.0 / " + op0_a + ")";
+      result = "((abs(" + rcp + ") == 1.0/0.0) ? (sign(" + rcp +
+               ") * 0.0) : " + rcp + ")";
+    } break;
 
     case AluScalarOpcode::kRcp:
-      result = "(1.0 / " + op0_a + ")";
+      result = "XeReduceMantissa(1.0 / " + op0_a + ")";
       break;
 
-    case AluScalarOpcode::kRsqc:
+    case AluScalarOpcode::kRsqc: {
       // Reciprocal square root with infinity clamped.
-      result = "((abs(rsqrt(" + op0_a +
-               ")) == 1.0/0.0) ? "
-               "(sign(rsqrt(" +
-               op0_a + ")) * 3.402823466e+38) : rsqrt(" + op0_a + "))";
-      break;
+      std::string rsq = "XeReduceMantissa(rsqrt(" + op0_a + "))";
+      result = "((abs(" + rsq + ") == 1.0/0.0) ? (sign(" + rsq +
+               ") * 3.402823466e+38) : " + rsq + ")";
+    } break;
 
-    case AluScalarOpcode::kRsqf:
+    case AluScalarOpcode::kRsqf: {
       // Reciprocal square root with infinity flushed.
-      result = "((abs(rsqrt(" + op0_a + ")) == 1.0/0.0) ? 0.0 : rsqrt(" +
-               op0_a + "))";
-      break;
+      std::string rsq = "XeReduceMantissa(rsqrt(" + op0_a + "))";
+      result = "((abs(" + rsq + ") == 1.0/0.0) ? 0.0 : " + rsq + ")";
+    } break;
 
     case AluScalarOpcode::kRsq:
-      result = "rsqrt(" + op0_a + ")";
+      result = "XeReduceMantissa(rsqrt(" + op0_a + "))";
       break;
 
     case AluScalarOpcode::kMaxAs:
@@ -674,7 +673,7 @@ void HlslShaderTranslator::ProcessScalarAluInstruction(
       break;
 
     case AluScalarOpcode::kSqrt:
-      result = "sqrt(" + op0_a + ")";
+      result = "XeReduceMantissa(sqrt(" + op0_a + "))";
       break;
 
     case AluScalarOpcode::kSin:

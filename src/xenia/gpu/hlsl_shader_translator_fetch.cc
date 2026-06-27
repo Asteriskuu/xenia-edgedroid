@@ -20,7 +20,6 @@
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
 #include "xenia/gpu/dxbc_shader.h"
-#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/ucode.h"
 #include "xenia/gpu/xenos.h"
 #if XE_PLATFORM_WIN32
@@ -148,11 +147,6 @@ void HlslShaderTranslator::ProcessVertexFetchInstruction(
     std::string index_operand = OperandToHlsl(instr.operands[0], 1);
     if (instr.attributes.is_index_rounded) {
       EmitLine("int xe_vf_index = int(floor(" + index_operand + " + 0.5));");
-    } else if (cvars::ac6_ground_fix) {
-      // UGLY HACK matching DxbcShaderTranslator. Remove ASAP. A proper fix
-      // needs an accurate RCP implementation.
-      EmitLine("int xe_vf_index = int(floor(" + index_operand +
-               " + 0.00025));");
     } else {
       EmitLine("int xe_vf_index = int(floor(" + index_operand + "));");
     }

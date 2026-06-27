@@ -670,6 +670,23 @@ void HlslShaderTranslator::EmitHelperFunctions() {
   EmitLine("}");
   EmitLine("");
 
+  // Round v to a 21-bit mantissa, matching Vulkan ReduceFloatPrecision.
+  EmitLine("float XeReduceMantissa(float v) {");
+  Indent();
+  EmitLine("uint bits = asuint(v);");
+  EmitLine("uint truncated = bits & 0xFFFFFFFCu;");
+  EmitLine("uint discarded = bits & 0x3u;");
+  EmitLine("uint rounded = truncated + 4u;");
+  EmitLine("uint orig_exp = (bits >> 23u) & 0xFFu;");
+  EmitLine("uint rounded_exp = (rounded >> 23u) & 0xFFu;");
+  EmitLine("bool overflow = (orig_exp != 0xFFu) && (rounded_exp == 0xFFu);");
+  EmitLine("uint safe_rounded = overflow ? truncated : rounded;");
+  EmitLine("uint result = (discarded >= 2u) ? safe_rounded : truncated;");
+  EmitLine("return asfloat(result);");
+  Outdent();
+  EmitLine("}");
+  EmitLine("");
+
   // SM3-compliant multiply: 0 * anything = 0 (handles infinity/NaN edge cases).
   EmitLine("float XeMulSM3(float a, float b) {");
   Indent();

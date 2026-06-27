@@ -68,8 +68,6 @@ DECLARE_bool(readback_resolve_half_pixel_offset);
 
 DECLARE_bool(gpu_3d_to_2d_texture);
 
-DECLARE_bool(ac6_ground_fix);
-
 DECLARE_bool(use_fuzzy_alpha_epsilon);
 
 #define XE_GPU_FINE_GRAINED_DRAW_SCOPES 1
