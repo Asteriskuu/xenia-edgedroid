@@ -3824,7 +3824,7 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
         // 32bpp color output. Any register can be used as temporary if needed -
         // this is the end of the shader.
         if (color_packed_in_r1x) {
-          // Value-converted 7e3 source (same-base reuse only). See
+          // Value-converted 7e3 source. See
           // IsTransferValueConverted7e3And8888 and TransferConvert7e3To8888.
           const bool source_is_7e3 =
               key.value_convert && source_is_color &&

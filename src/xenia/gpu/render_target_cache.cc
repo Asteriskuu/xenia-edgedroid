@@ -184,6 +184,19 @@ DEFINE_bool(
     "-1...1, remap -32...32 to -1...1 to use the full possible range of "
     "values, at the expense of multiplicative blending correctness.",
     "GPU");
+DEFINE_bool(
+    value_convert_7e3_8888_reuse, false,
+    "Decode the values rather than bit-reinterpret the raw bytes when an EDRAM "
+    "tile is reused in place between the 7e3 (2_10_10_10_FLOAT) HDR float "
+    "format and 8_8_8_8 (LDR unorm), treating the reuse as an HDR<->LDR "
+    "conversion.\n"
+    "Off by default: most games reuse such tiles as raw data (including across "
+    "MSAA sample counts), where a bit-exact copy is correct and decoding "
+    "scrambles the image (for example, Dark Souls II).\n"
+    "Enable per-game for titles that reuse the tile as a display color buffer "
+    "and otherwise show colored garbage on translucent geometry (for example, "
+    "Deadly Premonition).",
+    "GPU");
 // Enabled by default as the GPU is overall usually the bottleneck when the
 // pixel shader interlock render backend implementation is used, anything that
 // may improve GPU performance is favorable.
@@ -1442,8 +1455,13 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(
 
 bool RenderTargetCache::IsTransferValueConverted7e3And8888(
     RenderTargetKey source, RenderTargetKey dest) {
-  if (source.is_depth || dest.is_depth ||
-      source.base_tiles != dest.base_tiles) {
+  // Off by default, opt in per game. Only a true in-place reinterpret: same
+  // base, pitch and MSAA, only format differs. A pitch or sample-count change
+  // is a layout alias, not a value conversion.
+  if (!cvars::value_convert_7e3_8888_reuse || source.is_depth ||
+      dest.is_depth || source.base_tiles != dest.base_tiles ||
+      source.pitch_tiles_at_32bpp != dest.pitch_tiles_at_32bpp ||
+      source.msaa_samples != dest.msaa_samples) {
     return false;
   }
   auto is_7e3 = [](xenos::ColorRenderTargetFormat format) {

@@ -431,7 +431,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
       // swapping of 40-sample columns as opposed to the host render target -
       // this is done only for the color source).
       uint32_t host_depth_source_is_copy : 1;
-      // Decode (not bit-reinterpret) a same-base 7e3 <-> 8_8_8_8 reuse. See
+      // Decode (not bit-reinterpret) a 7e3 <-> 8_8_8_8 reuse. See
       // IsTransferValueConverted7e3And8888.
       uint32_t value_convert : 1;
 

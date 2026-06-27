@@ -596,12 +596,13 @@ class RenderTargetCache {
   void PixelShaderInterlockFullEdramBarrierPlaced();
 
   // Whether a 7e3 <-> 8_8_8_8 ownership transfer should decode the values
-  // rather than bit-reinterpret the raw bytes. Both are display colors, so an
-  // in-place reuse is an HDR<->LDR conversion. Reinterpreting the float bits as
-  // unorm scrambles channels into garbage seen through translucent geometry
-  // blended over the tile. Value-converted only for a same-base reuse. A
-  // cross-base transfer is a spuriously over-claimed neighbor (e.g. an
-  // overestimated height) that stays bit-exact so its HDR is not clamped.
+  // rather than bit-reinterpret the raw bytes. Gated by the
+  // value_convert_7e3_8888_reuse cvar, off by default, because most games
+  // reuse such tiles as raw data where a bit-exact copy is correct. When
+  // enabled, value-converted only when base, pitch and MSAA all match, so only
+  // the format differs. A pitch or sample-count change is a layout-changing
+  // alias (e.g. a 4x MSAA buffer reused as 1x) where only a raw bit copy
+  // round-trips, so those stay bit-exact.
   static bool IsTransferValueConverted7e3And8888(RenderTargetKey source,
                                                  RenderTargetKey dest);
 

@@ -596,7 +596,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       xenos::MsaaSamples host_depth_source_msaa_samples
           : xenos::kMsaaSamplesBits;
       uint32_t source_resource_format : xenos::kRenderTargetFormatBits;
-      // Decode (not bit-reinterpret) a same-base 7e3 <-> 8_8_8_8 reuse. See
+      // Decode (not bit-reinterpret) a 7e3 <-> 8_8_8_8 reuse. See
       // IsTransferValueConverted7e3And8888.
       uint32_t value_convert : 1;
 
