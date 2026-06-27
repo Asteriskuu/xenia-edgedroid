@@ -595,16 +595,14 @@ class RenderTargetCache {
   // EDRAM memory are committed with a memory barrier.
   void PixelShaderInterlockFullEdramBarrierPlaced();
 
-  // Whether a 7e3 <-> 8_8_8_8 ownership transfer should decode the values
-  // rather than bit-reinterpret the raw bytes. Gated by the
-  // value_convert_7e3_8888_reuse cvar, off by default, because most games
-  // reuse such tiles as raw data where a bit-exact copy is correct. When
-  // enabled, value-converted only when base, pitch and MSAA all match, so only
-  // the format differs. A pitch or sample-count change is a layout-changing
-  // alias (e.g. a 4x MSAA buffer reused as 1x) where only a raw bit copy
-  // round-trips, so those stay bit-exact.
-  static bool IsTransferValueConverted7e3And8888(RenderTargetKey source,
-                                                 RenderTargetKey dest);
+  // Whether a 7e3 -> 8_8_8_8 in-place reuse should decode (HDR float to LDR
+  // unorm) instead of bit-reinterpreting. Bit-reinterpret is hardware-accurate,
+  // so decode applies only where the reinterpreted bytes are actually seen: a
+  // matched same-base/pitch/MSAA reuse, 7e3 -> plain 8_8_8_8, whose draw blends
+  // over the dest. Everything else (overwrite, reverse, gamma, cvar off) stays
+  // bit-exact.
+  bool IsTransferValueConverted7e3And8888(RenderTargetKey source,
+                                          RenderTargetKey dest) const;
 
  private:
   const RegisterFile& register_file_;

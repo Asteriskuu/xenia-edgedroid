@@ -185,18 +185,18 @@ DEFINE_bool(
     "values, at the expense of multiplicative blending correctness.",
     "GPU");
 DEFINE_bool(
-    value_convert_7e3_8888_reuse, false,
-    "Decode the values rather than bit-reinterpret the raw bytes when an EDRAM "
-    "tile is reused in place between the 7e3 (2_10_10_10_FLOAT) HDR float "
-    "format and 8_8_8_8 (LDR unorm), treating the reuse as an HDR<->LDR "
-    "conversion.\n"
-    "Off by default: most games reuse such tiles as raw data (including across "
-    "MSAA sample counts), where a bit-exact copy is correct and decoding "
-    "scrambles the image (for example, Dark Souls II).\n"
-    "Enable per-game for titles that reuse the tile as a display color buffer "
-    "and otherwise show colored garbage on translucent geometry (for example, "
-    "Deadly Premonition).",
+    value_convert_7e3_8888_reuse, true,
+    "Decode (HDR float to LDR unorm) instead of bit-reinterpreting when a 7e3 "
+    "(2_10_10_10_FLOAT) EDRAM tile is reused in place as 8_8_8_8 and the "
+    "reusing "
+    "draw blends over it, so the background is not colored garbage (e.g. "
+    "Deadly "
+    "Premonition foliage).\n"
+    "On by default. Set to false to force bit-exact reinterpretation if a "
+    "title "
+    "regresses.",
     "GPU");
+UPDATE_from_bool(value_convert_7e3_8888_reuse, 2026, 6, 28, 12, false);
 // Enabled by default as the GPU is overall usually the bottleneck when the
 // pixel shader interlock render backend implementation is used, anything that
 // may improve GPU performance is favorable.
@@ -1454,10 +1454,8 @@ RenderTargetCache::RenderTarget* RenderTargetCache::GetOrCreateRenderTarget(
 }
 
 bool RenderTargetCache::IsTransferValueConverted7e3And8888(
-    RenderTargetKey source, RenderTargetKey dest) {
-  // Off by default, opt in per game. Only a true in-place reinterpret: same
-  // base, pitch and MSAA, only format differs. A pitch or sample-count change
-  // is a layout alias, not a value conversion.
+    RenderTargetKey source, RenderTargetKey dest) const {
+  // Matched in-place reuse only.
   if (!cvars::value_convert_7e3_8888_reuse || source.is_depth ||
       dest.is_depth || source.base_tiles != dest.base_tiles ||
       source.pitch_tiles_at_32bpp != dest.pitch_tiles_at_32bpp ||
@@ -1469,14 +1467,27 @@ bool RenderTargetCache::IsTransferValueConverted7e3And8888(
            format == xenos::ColorRenderTargetFormat::
                          k_2_10_10_10_FLOAT_AS_16_16_16_16;
   };
-  auto is_8888 = [](xenos::ColorRenderTargetFormat format) {
-    return format == xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
-           format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
-  };
-  xenos::ColorRenderTargetFormat source_format = source.GetColorFormat();
-  xenos::ColorRenderTargetFormat dest_format = dest.GetColorFormat();
-  return (is_7e3(source_format) && is_8888(dest_format)) ||
-         (is_8888(source_format) && is_7e3(dest_format));
+  // 7e3 -> plain 8_8_8_8 only. The reverse and gamma dests stay bit-exact.
+  if (!is_7e3(source.GetColorFormat()) ||
+      dest.GetColorFormat() != xenos::ColorRenderTargetFormat::k_8_8_8_8) {
+    return false;
+  }
+  // Decode only if the draw blends over the dest, so the bytes are actually
+  // read.
+  const RegisterFile& regs = register_file();
+  bool dest_blends = false;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    if (regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i])
+            .color_base != dest.base_tiles) {
+      continue;
+    }
+    auto blend = regs.Get<reg::RB_BLENDCONTROL>(
+        reg::RB_BLENDCONTROL::rt_register_indices[i]);
+    dest_blends = blend.color_destblend != xenos::BlendFactor::kZero ||
+                  blend.alpha_destblend != xenos::BlendFactor::kZero;
+    break;
+  }
+  return dest_blends;
 }
 
 bool RenderTargetCache::WouldOwnershipChangeRequireTransfers(
