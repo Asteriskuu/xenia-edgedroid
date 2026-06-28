@@ -342,6 +342,11 @@ class PosixConditionBase {
                         : start_time + timeout;
 
     while (true) {
+#if !XE_PLATFORM_ANDROID
+      // Cancellation point, clear of the alloc below.
+      pthread_testcancel();
+#endif
+
       // Check all handles to see if any/all are signaled.
       // Use try_lock to avoid deadlocks from lock ordering issues.
       size_t first_signaled = std::numeric_limits<size_t>::max();
@@ -1507,7 +1512,8 @@ thread_local PosixThread* current_thread_ = nullptr;
 
 void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 #if !XE_PLATFORM_ANDROID
-  if (pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, nullptr) != 0) {
+  // Deferred so cancellation unwinds only at safe points, never mid-malloc.
+  if (pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, nullptr) != 0) {
     assert_always();
   }
 #endif
