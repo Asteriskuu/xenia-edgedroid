@@ -337,6 +337,14 @@ class Presenter {
   // Requests (re)painting with the UI if there's UI to draw.
   void RequestUIPaintFromUIThread();
 
+  // Whether a new guest output frame arrived since the previous UI-thread
+  // paint, so the guest output is currently driving the paint cadence. UI
+  // drawers can check this to avoid requesting extra repaints that present
+  // faster than the guest produces frames. Valid only while UI drawers execute.
+  bool GuestOutputDroveCurrentUIPaint() const {
+    return guest_output_drove_current_ui_paint_;
+  }
+
  protected:
   enum class PaintResult {
     kPresented,
@@ -965,6 +973,15 @@ class Presenter {
   // Accessible only by refreshing, whether the last refresh contained an image
   // rather than being blank.
   bool guest_output_active_last_refresh_ = false;
+
+  // Incremented by the guest output thread for each refreshed frame sent for
+  // presentation, so the UI thread can tell whether the guest output is driving
+  // the paint cadence.
+  std::atomic<uint64_t> guest_output_refresh_count_{0};
+  // UI-thread-only snapshot of guest_output_refresh_count_ at the previous
+  // paint, and whether it advanced since (the guest drove the current paint).
+  uint64_t guest_output_refresh_count_prev_ui_paint_ = 0;
+  bool guest_output_drove_current_ui_paint_ = false;
 
   // Ordered by the Z order, and then by the time of addition.
   // Note: All the iteration logic involving this Z ordering must be the same as

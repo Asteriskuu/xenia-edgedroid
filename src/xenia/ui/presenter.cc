@@ -276,6 +276,16 @@ void Presenter::PaintFromUIThread(bool force_paint) {
       // is consistent with painting from the UI thread.
       SetPaintModeFromUIThread(PaintMode::kUIThreadOnRequest);
 
+      // Record whether a new guest output frame arrived since the previous
+      // paint. UI drawers and the UI tick rate limit use it to avoid presenting
+      // faster than the guest produces frames.
+      uint64_t guest_output_refresh_count =
+          guest_output_refresh_count_.load(std::memory_order_relaxed);
+      guest_output_drove_current_ui_paint_ =
+          guest_output_refresh_count !=
+          guest_output_refresh_count_prev_ui_paint_;
+      guest_output_refresh_count_prev_ui_paint_ = guest_output_refresh_count;
+
       // Limit the frame rate of the UI, usually to the monitor refresh rate,
       // in a way so that the UI won't be stealing all the remaining GPU
       // resources if it's repainted continuously, and the window system itself
@@ -418,6 +428,10 @@ bool Presenter::RefreshGuestOutput(
     guest_output_mailbox_writable_ =
         (3 - last_acquired - guest_output_mailbox_writable_) % 3;
   }
+
+  // Count this frame so the UI thread can tell the guest output is driving the
+  // paint cadence and UI drawers don't request extra repaints on top of it.
+  guest_output_refresh_count_.fetch_add(1, std::memory_order_relaxed);
 
   // Trigger the presentation on the host.
   PaintResult paint_result = PaintResult::kNotPresented;
@@ -1392,16 +1406,20 @@ void Presenter::WaitForUITickFromUIThread() {
     dxgi_ui_tick_signal_condition_.wait(dxgi_ui_tick_lock);
   }
 #elif XE_PLATFORM_LINUX
-  // Without this, ImGui draws run uncapped (~3000 fps) when a dialog is open.
   if (!AreUITicksNeededFromUIThread()) {
     return;
   }
-  auto now = std::chrono::steady_clock::now();
-  auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-      now - linux_ui_tick_last_paint_time_);
-  constexpr auto frame_time = std::chrono::microseconds(16667);
-  if (elapsed < frame_time) {
-    std::this_thread::sleep_for(frame_time - elapsed);
+  // Pace only the UI's own repaints, which would otherwise run uncapped (~3000
+  // fps) with a dialog open over an idle guest. While the guest output is
+  // driving paints, don't limit, so the present rate tracks the guest.
+  if (!guest_output_drove_current_ui_paint_) {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+        now - linux_ui_tick_last_paint_time_);
+    constexpr auto frame_time = std::chrono::microseconds(16667);
+    if (elapsed < frame_time) {
+      std::this_thread::sleep_for(frame_time - elapsed);
+    }
   }
   linux_ui_tick_last_paint_time_ = std::chrono::steady_clock::now();
 #endif  // XE_PLATFORM

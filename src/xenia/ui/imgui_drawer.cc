@@ -771,7 +771,10 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
       }
     }
   }
-  if (needs_continuous_repaint) {
+  // The guest already drives one repaint per frame while it produces them, so
+  // only self-drive when it isn't, to avoid presenting faster than the guest.
+  if (needs_continuous_repaint &&
+      !presenter_->GuestOutputDroveCurrentUIPaint()) {
     presenter_->RequestUIPaintFromUIThread();
   }
 }
