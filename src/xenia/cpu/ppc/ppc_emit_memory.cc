@@ -957,6 +957,45 @@ int InstrEmit_lfdx(PPCHIRBuilder& f, const InstrData& i) {
   return 0;
 }
 
+// lfs/stfs are data-movement conversions: unlike the host FPU float<->double
+// convert (which quiets signaling NaNs), PowerPC leaves the NaN signaling bit
+// untouched. The host convert already carries the rest of the payload across,
+// so we only restore the significand MSB (double bit 51, single bit 22) it
+// force-set on NaN inputs.
+
+// double -> single, returning the 32-bit single bit pattern.
+Value* PackSingleKeepNaN(HIRBuilder& f, Value* value) {
+  Value* dbits = f.Cast(value, INT64_TYPE);
+  Value* sbits = f.Cast(f.Convert(value, FLOAT32_TYPE), INT32_TYPE);
+  // NaN if abs(double) > +inf bits.
+  Value* is_nan =
+      f.CompareUGT(f.And(dbits, f.LoadConstantUint64(0x7FFFFFFFFFFFFFFFull)),
+                   f.LoadConstantUint64(0x7FF0000000000000ull));
+  // single quiet bit (22) <- double quiet bit (51)
+  Value* qbit =
+      f.Truncate(f.And(f.Shr(dbits, 51 - 22), f.LoadConstantUint64(1ull << 22)),
+                 INT32_TYPE);
+  Value* nan_bits = f.Or(f.And(sbits, f.LoadConstantUint32(~(1u << 22))), qbit);
+  return f.Select(is_nan, nan_bits, sbits);
+}
+
+// single (raw 32-bit pattern) -> double value.
+Value* UnpackSingleKeepNaN(HIRBuilder& f, Value* sbits) {
+  Value* dbits =
+      f.Cast(f.Convert(f.Cast(sbits, FLOAT32_TYPE), FLOAT64_TYPE), INT64_TYPE);
+  // NaN if abs(single) > +inf bits.
+  Value* is_nan = f.CompareUGT(f.And(sbits, f.LoadConstantUint32(0x7FFFFFFFu)),
+                               f.LoadConstantUint32(0x7F800000u));
+  // double quiet bit (51) <- single quiet bit (22)
+  Value* qbit =
+      f.Shl(f.ZeroExtend(f.And(f.Shr(sbits, 22), f.LoadConstantUint32(1u)),
+                         INT64_TYPE),
+            51);
+  Value* nan_bits =
+      f.Or(f.And(dbits, f.LoadConstantUint64(~(1ull << 51))), qbit);
+  return f.Cast(f.Select(is_nan, nan_bits, dbits), FLOAT64_TYPE);
+}
+
 int InstrEmit_lfs(PPCHIRBuilder& f, const InstrData& i) {
   // if RA = 0 then
   //   b <- 0
@@ -965,8 +1004,7 @@ int InstrEmit_lfs(PPCHIRBuilder& f, const InstrData& i) {
   // EA <- b + EXTS(D)
   // FRT <- DOUBLE(MEM(EA, 4))
   Value* ea = CalculateEA_0_i(f, i.D.RA, XEEXTS16(i.D.DS));
-  Value* rt = f.Convert(
-      f.Cast(f.ByteSwap(f.Load(ea, INT32_TYPE)), FLOAT32_TYPE), FLOAT64_TYPE);
+  Value* rt = UnpackSingleKeepNaN(f, f.ByteSwap(f.Load(ea, INT32_TYPE)));
   f.StoreFPR(i.D.RT, rt);
   return 0;
 }
@@ -976,8 +1014,7 @@ int InstrEmit_lfsu(PPCHIRBuilder& f, const InstrData& i) {
   // FRT <- DOUBLE(MEM(EA, 4))
   // RA <- EA
   Value* ea = CalculateEA_i(f, i.D.RA, XEEXTS16(i.D.DS));
-  Value* rt = f.Convert(
-      f.Cast(f.ByteSwap(f.Load(ea, INT32_TYPE)), FLOAT32_TYPE), FLOAT64_TYPE);
+  Value* rt = UnpackSingleKeepNaN(f, f.ByteSwap(f.Load(ea, INT32_TYPE)));
   f.StoreFPR(i.D.RT, rt);
   StoreEA(f, i.D.RA, ea);
   return 0;
@@ -988,8 +1025,7 @@ int InstrEmit_lfsux(PPCHIRBuilder& f, const InstrData& i) {
   // FRT <- DOUBLE(MEM(EA, 4))
   // RA <- EA
   Value* ea = CalculateEA(f, i.X.RA, i.X.RB);
-  Value* rt = f.Convert(
-      f.Cast(f.ByteSwap(f.Load(ea, INT32_TYPE)), FLOAT32_TYPE), FLOAT64_TYPE);
+  Value* rt = UnpackSingleKeepNaN(f, f.ByteSwap(f.Load(ea, INT32_TYPE)));
   f.StoreFPR(i.X.RT, rt);
   StoreEA(f, i.X.RA, ea);
   return 0;
@@ -1003,8 +1039,7 @@ int InstrEmit_lfsx(PPCHIRBuilder& f, const InstrData& i) {
   // EA <- b + (RB)
   // FRT <- DOUBLE(MEM(EA, 4))
   Value* ea = CalculateEA_0(f, i.X.RA, i.X.RB);
-  Value* rt = f.Convert(
-      f.Cast(f.ByteSwap(f.Load(ea, INT32_TYPE)), FLOAT32_TYPE), FLOAT64_TYPE);
+  Value* rt = UnpackSingleKeepNaN(f, f.ByteSwap(f.Load(ea, INT32_TYPE)));
   f.StoreFPR(i.X.RT, rt);
   return 0;
 }
@@ -1076,8 +1111,7 @@ int InstrEmit_stfs(PPCHIRBuilder& f, const InstrData& i) {
   // EA <- b + EXTS(D)
   // MEM(EA, 4) <- SINGLE(FRS)
   Value* ea = CalculateEA_0_i(f, i.D.RA, XEEXTS16(i.D.DS));
-  f.Store(ea, f.ByteSwap(f.Cast(f.Convert(f.LoadFPR(i.D.RT), FLOAT32_TYPE),
-                                INT32_TYPE)));
+  f.Store(ea, f.ByteSwap(PackSingleKeepNaN(f, f.LoadFPR(i.D.RT))));
   return 0;
 }
 
@@ -1086,8 +1120,7 @@ int InstrEmit_stfsu(PPCHIRBuilder& f, const InstrData& i) {
   // MEM(EA, 4) <- SINGLE(FRS)
   // RA <- EA
   Value* ea = CalculateEA_i(f, i.D.RA, XEEXTS16(i.D.DS));
-  f.Store(ea, f.ByteSwap(f.Cast(f.Convert(f.LoadFPR(i.D.RT), FLOAT32_TYPE),
-                                INT32_TYPE)));
+  f.Store(ea, f.ByteSwap(PackSingleKeepNaN(f, f.LoadFPR(i.D.RT))));
   StoreEA(f, i.D.RA, ea);
   return 0;
 }
@@ -1097,8 +1130,7 @@ int InstrEmit_stfsux(PPCHIRBuilder& f, const InstrData& i) {
   // MEM(EA, 4) <- SINGLE(FRS)
   // RA <- EA
   Value* ea = CalculateEA(f, i.X.RA, i.X.RB);
-  f.Store(ea, f.ByteSwap(f.Cast(f.Convert(f.LoadFPR(i.X.RT), FLOAT32_TYPE),
-                                INT32_TYPE)));
+  f.Store(ea, f.ByteSwap(PackSingleKeepNaN(f, f.LoadFPR(i.X.RT))));
   StoreEA(f, i.X.RA, ea);
   return 0;
 }
@@ -1111,8 +1143,7 @@ int InstrEmit_stfsx(PPCHIRBuilder& f, const InstrData& i) {
   // EA <- b + (RB)
   // MEM(EA, 4) <- SINGLE(FRS)
   Value* ea = CalculateEA_0(f, i.X.RA, i.X.RB);
-  f.Store(ea, f.ByteSwap(f.Cast(f.Convert(f.LoadFPR(i.X.RT), FLOAT32_TYPE),
-                                INT32_TYPE)));
+  f.Store(ea, f.ByteSwap(PackSingleKeepNaN(f, f.LoadFPR(i.X.RT))));
   return 0;
 }
 
