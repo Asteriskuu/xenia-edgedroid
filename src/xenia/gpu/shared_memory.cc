@@ -46,6 +46,9 @@ bool SharedMemory::InitializeCommon() {
   memset(system_page_flags_valid_and_gpu_written_, 0,
          8 * num_system_page_flags_entries);
 
+  watch_blind_pages_.assign(num_system_page_flags_, 0);
+  has_watch_blind_pages_ = false;
+
   memory_invalidation_callback_handle_ =
       memory_.RegisterPhysicalMemoryInvalidationCallback(
           MemoryInvalidationCallbackThunk, this);
@@ -109,6 +112,9 @@ void SharedMemory::ShutdownCommon() {
 
   system_page_flags_valid_and_gpu_written_ = nullptr;
   num_system_page_flags_ = 0;
+
+  watch_blind_pages_ = {};
+  has_watch_blind_pages_ = false;
 }
 
 void SharedMemory::InvalidateAllPages() {
@@ -147,37 +153,45 @@ void SharedMemory::ClearCache() {
 void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
   auto global_lock = global_critical_region_.Acquire();
 
-  // Nothing changed since the last copy, so the valid flags already match.
-  if (!gpu_written_data_dirty_) {
-    return;
-  }
+  if (gpu_written_data_dirty_) {
+    // Only copy the chunks that changed. Read and reset the dirty bitmap.
+    uint32_t dirty_mask = dirty_blocks_;
+    dirty_blocks_ = 0;
+    gpu_written_data_dirty_ = false;
 
-  // Only copy the chunks that changed. Read and reset the dirty bitmap.
-  uint32_t dirty_mask = dirty_blocks_;
-  dirty_blocks_ = 0;
+    uint32_t dirty_count = xe::bit_count(dirty_mask);
 
-  uint32_t dirty_count = xe::bit_count(dirty_mask);
+    // Past ~50% dirty the per-chunk bookkeeping costs more than a straight
+    // copy.
+    if (dirty_count == 0 || dirty_count > 16) {
+      std::memcpy(system_page_flags_valid_,
+                  system_page_flags_valid_and_gpu_written_,
+                  num_system_page_flags_ * sizeof(uint64_t));
+    } else {
+      while (dirty_mask) {
+        uint32_t block_index;
+        xe::bit_scan_forward(dirty_mask, &block_index);
+        dirty_mask &= ~(1u << block_index);
 
-  // Past ~50% dirty the per-chunk bookkeeping costs more than a straight copy.
-  if (dirty_count == 0 || dirty_count > 16) {
-    std::memcpy(system_page_flags_valid_,
-                system_page_flags_valid_and_gpu_written_,
-                num_system_page_flags_ * sizeof(uint64_t));
-  } else {
-    while (dirty_mask) {
-      uint32_t block_index;
-      xe::bit_scan_forward(dirty_mask, &block_index);
-      dirty_mask &= ~(1u << block_index);
-
-      // Each chunk is 64 entries of 8 bytes.
-      uint32_t entry_offset = block_index * 64;
-      std::memcpy(&system_page_flags_valid_[entry_offset],
-                  &system_page_flags_valid_and_gpu_written_[entry_offset],
-                  64 * sizeof(uint64_t));
+        // Each chunk is 64 entries of 8 bytes.
+        uint32_t entry_offset = block_index * 64;
+        std::memcpy(&system_page_flags_valid_[entry_offset],
+                    &system_page_flags_valid_and_gpu_written_[entry_offset],
+                    64 * sizeof(uint64_t));
+      }
     }
   }
 
-  gpu_written_data_dirty_ = false;
+  // Pages the write watch can't cover never get invalidated by a fault, so
+  // re-invalidate them every frame to force a fresh re-upload. Skip any that
+  // became GPU-written (their GPU copy is authoritative).
+  if (has_watch_blind_pages_) {
+    for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
+      uint64_t blind_cpu =
+          watch_blind_pages_[i] & ~system_page_flags_valid_and_gpu_written_[i];
+      system_page_flags_valid_[i] &= ~blind_cpu;
+    }
+  }
 }
 
 SharedMemory::GlobalWatchHandle SharedMemory::RegisterGlobalWatch(
@@ -384,6 +398,24 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
         dirty_blocks_ |= 1u << (i >> 6);
       } else {
         system_page_flags_valid_and_gpu_written_[i] &= ~valid_bits;
+      }
+    }
+
+    // Flag CPU pages the access-callback watch can't catch, so the frame-end
+    // clear keeps re-reading them. Simple heuristic: any page not writable
+    // (no-access or read-only) in the physical windows, since the watch can
+    // only arm on a window-writable page.
+    if (!written_by_gpu) {
+      for (uint32_t page = valid_page_first; page <= valid_page_last; ++page) {
+        uint64_t page_bit = uint64_t(1) << (page & 63);
+        uint32_t phys = page << page_size_log2_;
+        if (memory_.GetPhysicalPageWindowAccess(phys) !=
+            xe::memory::PageAccess::kReadWrite) {
+          watch_blind_pages_[page >> 6] |= page_bit;
+          has_watch_blind_pages_ = true;
+        } else {
+          watch_blind_pages_[page >> 6] &= ~page_bit;
+        }
       }
     }
   }

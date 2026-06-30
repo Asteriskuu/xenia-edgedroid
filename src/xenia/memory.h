@@ -292,6 +292,10 @@ class PhysicalHeap : public BaseHeap {
   void EnableAccessCallbacks(uint32_t physical_address, uint32_t length,
                              bool enable_invalidation_notifications,
                              bool enable_data_providers);
+  // Raw guest protection bits for the physical page in this heap (0 if it
+  // doesn't map here), and that decoded to a PageAccess.
+  uint32_t GetPageProtect(uint32_t physical_address);
+  xe::memory::PageAccess GetPageAccess(uint32_t physical_address);
   template <bool enable_invalidation_notifications>
   XE_NOINLINE void EnableAccessCallbacksInner(
       const uint32_t system_page_first, const uint32_t system_page_last,
@@ -517,6 +521,12 @@ class Memory {
   void EnablePhysicalMemoryAccessCallbacks(
       uint32_t physical_address, uint32_t length,
       bool enable_invalidation_notifications, bool enable_data_providers);
+
+  // Most-permissive access for the physical page across the physical windows:
+  // kNoAccess (mapped in none of them), kReadOnly (readable but not writable in
+  // any), or kReadWrite (writable in at least one, so a write watch can catch
+  // it).
+  xe::memory::PageAccess GetPhysicalPageWindowAccess(uint32_t physical_address);
 
   // Forces triggering of watch callbacks for a virtual address range if pages
   // are watched there and unwatching them. Returns whether any page was
