@@ -60,7 +60,15 @@ static bool IsPossibleMMIOInstruction(A64Emitter& e, const hir::Instr* i) {
 // ============================================================================
 struct DELAY_EXECUTION
     : Sequence<DELAY_EXECUTION, I<OPCODE_DELAY_EXECUTION, VoidOp>> {
-  static void Emit(A64Emitter& e, const EmitArgType& i) { e.yield(); }
+  static void Emit(A64Emitter& e, const EmitArgType& i) {
+    // Coalesce consecutive yields (pure SMT hints) to shrink hot guest spin loops.
+    if (e.getSize() >= sizeof(uint32_t) &&
+        *reinterpret_cast<const uint32_t*>(e.getCurr() - sizeof(uint32_t)) ==
+            0xD503203Fu) {
+      return;
+    }
+    e.yield();
+  }
 };
 EMITTER_OPCODE_TABLE(OPCODE_DELAY_EXECUTION, DELAY_EXECUTION);
 
