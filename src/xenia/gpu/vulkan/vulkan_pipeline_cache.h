@@ -30,6 +30,7 @@
 #include "xenia/base/platform.h"
 #include "xenia/base/threading.h"
 #include "xenia/base/xxhash.h"
+#include "xenia/gpu/guest_spirv_shader_cache.h"
 #include "xenia/gpu/primitive_processor.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/registers.h"
@@ -48,7 +49,7 @@ class VulkanCommandProcessor;
 
 // TODO(Triang3l): Create a common base for both the Vulkan and the Direct3D
 // implementations.
-class VulkanPipelineCache {
+class VulkanPipelineCache : public GuestSpirvShaderCache::Host {
  public:
   class PipelineLayoutProvider {
    public:
@@ -149,12 +150,9 @@ class VulkanPipelineCache {
       Pipeline** pipeline_out);
 
  private:
-  enum class PipelineGeometryShader : uint32_t {
-    kNone,
-    kPointList,
-    kRectangleList,
-    kQuadList,
-  };
+  // PipelineGeometryShader and GeometryShaderKey come from
+  // GuestSpirvShaderCache.
+  using GeometryShaderKey = GuestSpirvShaderCache::GeometryShaderKey;
 
   enum class PipelinePrimitiveTopology : uint32_t {
     kPointList,
@@ -314,33 +312,6 @@ class VulkanPipelineCache {
     }
   };
 
-  union GeometryShaderKey {
-    uint32_t key;
-    struct {
-      PipelineGeometryShader type : 2;
-      uint32_t interpolator_count : 5;
-      uint32_t has_user_clip_planes : 1;
-      uint32_t user_clip_plane_cull : 1;
-      uint32_t has_vertex_kill_and : 1;
-      uint32_t has_point_size : 1;
-      uint32_t has_point_coordinates : 1;
-    };
-
-    GeometryShaderKey() : key(0) { static_assert_size(*this, sizeof(key)); }
-
-    struct Hasher {
-      size_t operator()(const GeometryShaderKey& key) const {
-        return std::hash<uint32_t>{}(key.key);
-      }
-    };
-    bool operator==(const GeometryShaderKey& other_key) const {
-      return key == other_key.key;
-    }
-    bool operator!=(const GeometryShaderKey& other_key) const {
-      return !(*this == other_key);
-    }
-  };
-
   // Can be called from multiple threads.
   bool TranslateAnalyzedShader(SpirvShaderTranslator& translator,
                                VulkanShader::VulkanTranslation& translation);
@@ -365,12 +336,17 @@ class VulkanPipelineCache {
   // Whether the pipeline for the given description is supported by the device.
   bool ArePipelineRequirementsMet(const PipelineDescription& description) const;
 
-  static bool GetGeometryShaderKey(
-      PipelineGeometryShader geometry_shader_type,
-      SpirvShaderTranslator::Modification vertex_shader_modification,
-      SpirvShaderTranslator::Modification pixel_shader_modification,
-      GeometryShaderKey& key_out);
   VkShaderModule GetGeometryShader(GeometryShaderKey key);
+
+  // GuestSpirvShaderCache::Host.
+  std::unique_ptr<SpirvShaderTranslator> CreateTranslator() const override;
+  bool precise_interpolation_supported() const override;
+  bool depth_float24_round() const override {
+    return render_target_cache_.depth_float24_round();
+  }
+  bool depth_float24_convert_in_pixel_shader() const override {
+    return render_target_cache_.depth_float24_convert_in_pixel_shader();
+  }
 
   // Get the appropriate tessellation control shader (hull shader) module.
   VkShaderModule GetTessellationControlShader(
@@ -411,8 +387,8 @@ class VulkanPipelineCache {
 
   // Temporary storage for AnalyzeUcode calls on the processor thread.
   StringBuffer ucode_disasm_buffer_;
-  // Reusable shader translator on the command processor thread.
-  std::unique_ptr<SpirvShaderTranslator> shader_translator_;
+  // Shared guest SPIR-V translator, modification derivation and geometry keys.
+  GuestSpirvShaderCache guest_shader_cache_;
 
   struct LayoutUID {
     size_t uid;

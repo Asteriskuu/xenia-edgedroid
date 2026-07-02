@@ -23,6 +23,7 @@
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/shader.h"
+#include "xenia/gpu/spirv_fsi_system_constants.h"
 #include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/vulkan/vulkan_pipeline_cache.h"
 #include "xenia/gpu/vulkan/vulkan_render_target_cache.h"
@@ -6374,13 +6375,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
 
   const RegisterFile& regs = *register_file_;
   auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
-  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
   auto rb_alpha_ref = regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF);
   auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
   auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
-  auto rb_stencilrefmask = regs.Get<reg::RB_STENCILREFMASK>();
-  auto rb_stencilrefmask_bf =
-      regs.Get<reg::RB_STENCILREFMASK>(XE_GPU_REG_RB_STENCILREFMASK_BF);
   auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
   auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
   auto vgt_indx_offset = regs.Get<int32_t>(XE_GPU_REG_VGT_INDX_OFFSET);
@@ -6397,36 +6394,12 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   // targets with the same base address are used in the lighting pass of
   // 4D5307E6, for example, with the needed one picked with dynamic control
   // flow.
+  // The color info registers are also read by the non-FSI gamma flag and color
+  // exponent bias below.
   reg::RB_COLOR_INFO color_infos[xenos::kMaxColorRenderTargets];
-  float rt_clamp[4][4];
-  // Two UINT32_MAX if no components actually existing in the RT are written.
-  uint32_t rt_keep_masks[4][2];
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-    auto color_info = regs.Get<reg::RB_COLOR_INFO>(
+    color_infos[i] = regs.Get<reg::RB_COLOR_INFO>(
         reg::RB_COLOR_INFO::rt_register_indices[i]);
-    color_infos[i] = color_info;
-    if (edram_fragment_shader_interlock) {
-      RenderTargetCache::GetPSIColorFormatInfo(
-          color_info.color_format, (normalized_color_mask >> (i * 4)) & 0b1111,
-          rt_clamp[i][0], rt_clamp[i][1], rt_clamp[i][2], rt_clamp[i][3],
-          rt_keep_masks[i][0], rt_keep_masks[i][1]);
-    }
-  }
-
-  // Disable depth and stencil if it aliases a color render target (for
-  // instance, during the XBLA logo in 58410954, though depth writing is already
-  // disabled there).
-  bool depth_stencil_enabled = normalized_depth_control.stencil_enable ||
-                               normalized_depth_control.z_enable;
-  if (edram_fragment_shader_interlock && depth_stencil_enabled) {
-    for (uint32_t i = 0; i < 4; ++i) {
-      if (rb_depth_info.depth_base == color_infos[i].color_base &&
-          (rt_keep_masks[i][0] != UINT32_MAX ||
-           rt_keep_masks[i][1] != UINT32_MAX)) {
-        depth_stencil_enabled = false;
-        break;
-      }
-    }
   }
 
   bool dirty = false;
@@ -6495,29 +6468,22 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
       }
     }
   }
-  if (edram_fragment_shader_interlock && depth_stencil_enabled) {
-    flags |= SpirvShaderTranslator::kSysFlag_FSIDepthStencil;
-    if (normalized_depth_control.z_enable) {
-      flags |= uint32_t(normalized_depth_control.zfunc)
-               << SpirvShaderTranslator::kSysFlag_FSIDepthPassIfLess_Shift;
-      if (normalized_depth_control.z_write_enable) {
-        flags |= SpirvShaderTranslator::kSysFlag_FSIDepthWrite;
-      }
-    } else {
-      // In case stencil is used without depth testing - always pass, and
-      // don't modify the stored depth.
-      flags |= SpirvShaderTranslator::kSysFlag_FSIDepthPassIfLess |
-               SpirvShaderTranslator::kSysFlag_FSIDepthPassIfEqual |
-               SpirvShaderTranslator::kSysFlag_FSIDepthPassIfGreater;
+  if (edram_fragment_shader_interlock) {
+    // Fragment shader interlock (EDRAM ROP) flag bits and EDRAM constants. The
+    // ZPD occlusion counter slot is selected here from Vulkan-specific query
+    // state and passed into the shared helper.
+    uint32_t zpd_fsi_counter_index = UINT32_MAX;
+    if (zpd_active_query_index_ != UINT32_MAX && zpd_active_query_is_fsi_ &&
+        zpd_host_query_pool_->fsi_counter_initialized()) {
+      zpd_fsi_counter_index = zpd_active_query_index_;
     }
-    if (normalized_depth_control.stencil_enable) {
-      flags |= SpirvShaderTranslator::kSysFlag_FSIStencilTest;
-    }
-    // Hint - if not applicable to the shader, will not have effect.
-    if (alpha_test_function == xenos::CompareFunction::kAlways &&
-        !rb_colorcontrol.alpha_to_mask_enable) {
-      flags |= SpirvShaderTranslator::kSysFlag_FSIDepthStencilEarlyWrite;
-    }
+    dirty |= zpd_fsi_counter_index_force_update_;
+    zpd_fsi_counter_index_force_update_ = false;
+    WriteFragmentShaderInterlockSystemConstants(
+        system_constants_, flags, dirty, regs, primitive_polygonal,
+        normalized_depth_control, normalized_color_mask,
+        draw_resolution_scale_x, draw_resolution_scale_y,
+        zpd_fsi_counter_index);
   }
   dirty |= system_constants_.flags != flags;
   system_constants_.flags = flags;
@@ -6742,37 +6708,7 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   dirty |= system_constants_.alpha_to_mask != alpha_to_mask;
   system_constants_.alpha_to_mask = alpha_to_mask;
 
-  // FSI ZPD counter.
-  uint32_t zpd_fsi_counter_index = UINT32_MAX;
-  if (edram_fragment_shader_interlock &&
-      zpd_active_query_index_ != UINT32_MAX && zpd_active_query_is_fsi_ &&
-      zpd_host_query_pool_->fsi_counter_initialized()) {
-    zpd_fsi_counter_index = zpd_active_query_index_;
-  }
-  dirty |= zpd_fsi_counter_index_force_update_ ||
-           system_constants_.zpd_fsi_counter_index != zpd_fsi_counter_index;
-  system_constants_.zpd_fsi_counter_index = zpd_fsi_counter_index;
-  zpd_fsi_counter_index_force_update_ = false;
-
-  uint32_t edram_tile_dwords_scaled =
-      xenos::kEdramTileWidthSamples * xenos::kEdramTileHeightSamples *
-      (draw_resolution_scale_x * draw_resolution_scale_y);
-
-  // EDRAM pitch for FSI render target writing.
-  if (edram_fragment_shader_interlock) {
-    // Align, then multiply by 32bpp tile size in dwords.
-    uint32_t edram_32bpp_tile_pitch_dwords_scaled =
-        ((rb_surface_info.surface_pitch *
-          (rb_surface_info.msaa_samples >= xenos::MsaaSamples::k4X ? 2 : 1)) +
-         (xenos::kEdramTileWidthSamples - 1)) /
-        xenos::kEdramTileWidthSamples * edram_tile_dwords_scaled;
-    dirty |= system_constants_.edram_32bpp_tile_pitch_dwords_scaled !=
-             edram_32bpp_tile_pitch_dwords_scaled;
-    system_constants_.edram_32bpp_tile_pitch_dwords_scaled =
-        edram_32bpp_tile_pitch_dwords_scaled;
-  }
-
-  // Color exponent bias and FSI render target writing.
+  // Color exponent bias.
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     reg::RB_COLOR_INFO color_info = color_infos[i];
     // Exponent bias is in bits 20:25 of RB_COLOR_INFO.
@@ -6793,38 +6729,6 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
         UINT32_C(0x3F800000) + (color_exp_bias << 23);
     dirty |= system_constants_.color_exp_bias[i] != color_exp_bias_scale;
     system_constants_.color_exp_bias[i] = color_exp_bias_scale;
-    if (edram_fragment_shader_interlock) {
-      dirty |=
-          system_constants_.edram_rt_keep_mask[i][0] != rt_keep_masks[i][0];
-      system_constants_.edram_rt_keep_mask[i][0] = rt_keep_masks[i][0];
-      dirty |=
-          system_constants_.edram_rt_keep_mask[i][1] != rt_keep_masks[i][1];
-      system_constants_.edram_rt_keep_mask[i][1] = rt_keep_masks[i][1];
-      if (rt_keep_masks[i][0] != UINT32_MAX ||
-          rt_keep_masks[i][1] != UINT32_MAX) {
-        uint32_t rt_base_dwords_scaled =
-            color_info.color_base * edram_tile_dwords_scaled;
-        dirty |= system_constants_.edram_rt_base_dwords_scaled[i] !=
-                 rt_base_dwords_scaled;
-        system_constants_.edram_rt_base_dwords_scaled[i] =
-            rt_base_dwords_scaled;
-        uint32_t format_flags =
-            RenderTargetCache::AddPSIColorFormatFlags(color_info.color_format);
-        dirty |= system_constants_.edram_rt_format_flags[i] != format_flags;
-        system_constants_.edram_rt_format_flags[i] = format_flags;
-        uint32_t blend_factors_ops =
-            regs[reg::RB_BLENDCONTROL::rt_register_indices[i]] & 0x1FFF1FFF;
-        dirty |= system_constants_.edram_rt_blend_factors_ops[i] !=
-                 blend_factors_ops;
-        system_constants_.edram_rt_blend_factors_ops[i] = blend_factors_ops;
-        // Can't do float comparisons here because NaNs would result in always
-        // setting the dirty flag.
-        dirty |= std::memcmp(system_constants_.edram_rt_clamp[i], rt_clamp[i],
-                             4 * sizeof(float)) != 0;
-        std::memcpy(system_constants_.edram_rt_clamp[i], rt_clamp[i],
-                    4 * sizeof(float));
-      }
-    }
   }
 
   if (!edram_fragment_shader_interlock && host_depth_polygon_offset) {
@@ -6849,116 +6753,6 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
              polygon_offset.back_offset;
     system_constants_.edram_poly_offset_back_offset =
         polygon_offset.back_offset;
-  }
-
-  if (edram_fragment_shader_interlock) {
-    uint32_t depth_base_dwords_scaled =
-        rb_depth_info.depth_base * edram_tile_dwords_scaled;
-    dirty |= system_constants_.edram_depth_base_dwords_scaled !=
-             depth_base_dwords_scaled;
-    system_constants_.edram_depth_base_dwords_scaled = depth_base_dwords_scaled;
-
-    // For non-polygons, front polygon offset is used, and it's enabled if
-    // POLY_OFFSET_PARA_ENABLED is set, for polygons, separate front and back
-    // are used.
-    float poly_offset_front_scale = 0.0f, poly_offset_front_offset = 0.0f;
-    float poly_offset_back_scale = 0.0f, poly_offset_back_offset = 0.0f;
-    if (primitive_polygonal) {
-      if (pa_su_sc_mode_cntl.poly_offset_front_enable) {
-        poly_offset_front_scale =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
-        poly_offset_front_offset =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
-      }
-      if (pa_su_sc_mode_cntl.poly_offset_back_enable) {
-        poly_offset_back_scale =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE);
-        poly_offset_back_offset =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET);
-      }
-    } else {
-      if (pa_su_sc_mode_cntl.poly_offset_para_enable) {
-        poly_offset_front_scale =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE);
-        poly_offset_front_offset =
-            regs.Get<float>(XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET);
-        poly_offset_back_scale = poly_offset_front_scale;
-        poly_offset_back_offset = poly_offset_front_offset;
-      }
-    }
-    // With non-square resolution scaling, make sure the worst-case impact is
-    // reverted (slope only along the scaled axis), thus max. More bias is
-    // better than less bias, because less bias means Z fighting with the
-    // background is more likely.
-    float poly_offset_scale_factor =
-        xenos::kPolygonOffsetScaleSubpixelUnit *
-        std::max(draw_resolution_scale_x, draw_resolution_scale_y);
-    poly_offset_front_scale *= poly_offset_scale_factor;
-    poly_offset_back_scale *= poly_offset_scale_factor;
-    dirty |= system_constants_.edram_poly_offset_front_scale !=
-             poly_offset_front_scale;
-    system_constants_.edram_poly_offset_front_scale = poly_offset_front_scale;
-    dirty |= system_constants_.edram_poly_offset_front_offset !=
-             poly_offset_front_offset;
-    system_constants_.edram_poly_offset_front_offset = poly_offset_front_offset;
-    dirty |= system_constants_.edram_poly_offset_back_scale !=
-             poly_offset_back_scale;
-    system_constants_.edram_poly_offset_back_scale = poly_offset_back_scale;
-    dirty |= system_constants_.edram_poly_offset_back_offset !=
-             poly_offset_back_offset;
-    system_constants_.edram_poly_offset_back_offset = poly_offset_back_offset;
-
-    if (depth_stencil_enabled && normalized_depth_control.stencil_enable) {
-      uint32_t stencil_front_reference_masks =
-          rb_stencilrefmask.value & 0xFFFFFF;
-      dirty |= system_constants_.edram_stencil_front_reference_masks !=
-               stencil_front_reference_masks;
-      system_constants_.edram_stencil_front_reference_masks =
-          stencil_front_reference_masks;
-      uint32_t stencil_func_ops =
-          (normalized_depth_control.value >> 8) & ((1 << 12) - 1);
-      dirty |=
-          system_constants_.edram_stencil_front_func_ops != stencil_func_ops;
-      system_constants_.edram_stencil_front_func_ops = stencil_func_ops;
-
-      if (primitive_polygonal && normalized_depth_control.backface_enable) {
-        uint32_t stencil_back_reference_masks =
-            rb_stencilrefmask_bf.value & 0xFFFFFF;
-        dirty |= system_constants_.edram_stencil_back_reference_masks !=
-                 stencil_back_reference_masks;
-        system_constants_.edram_stencil_back_reference_masks =
-            stencil_back_reference_masks;
-        uint32_t stencil_func_ops_bf =
-            (normalized_depth_control.value >> 20) & ((1 << 12) - 1);
-        dirty |= system_constants_.edram_stencil_back_func_ops !=
-                 stencil_func_ops_bf;
-        system_constants_.edram_stencil_back_func_ops = stencil_func_ops_bf;
-      } else {
-        dirty |= std::memcmp(system_constants_.edram_stencil_back,
-                             system_constants_.edram_stencil_front,
-                             2 * sizeof(uint32_t)) != 0;
-        std::memcpy(system_constants_.edram_stencil_back,
-                    system_constants_.edram_stencil_front,
-                    2 * sizeof(uint32_t));
-      }
-    }
-
-    dirty |= system_constants_.edram_blend_constant[0] !=
-             regs.Get<float>(XE_GPU_REG_RB_BLEND_RED);
-    system_constants_.edram_blend_constant[0] =
-        regs.Get<float>(XE_GPU_REG_RB_BLEND_RED);
-    dirty |= system_constants_.edram_blend_constant[1] !=
-             regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN);
-    system_constants_.edram_blend_constant[1] =
-        regs.Get<float>(XE_GPU_REG_RB_BLEND_GREEN);
-    dirty |= system_constants_.edram_blend_constant[2] !=
-             regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE);
-    system_constants_.edram_blend_constant[2] =
-        regs.Get<float>(XE_GPU_REG_RB_BLEND_BLUE);
-    dirty |= system_constants_.edram_blend_constant[3] !=
-             regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA);
-    system_constants_.edram_blend_constant[3] =
-        regs.Get<float>(XE_GPU_REG_RB_BLEND_ALPHA);
   }
 
   if (dirty) {
