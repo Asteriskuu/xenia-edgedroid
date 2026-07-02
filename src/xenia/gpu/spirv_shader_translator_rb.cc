@@ -4398,8 +4398,11 @@ void SpirvShaderTranslator::FSI_AlphaToMask() {
     FSI_AlphaToMaskSample(false, 1, 1.0f, threshold_offset, 1.0f / 8.0f, alpha,
                           coverage_2x);
   } else {
-    // FBO: Account for native 2x vs 2x-as-4x sample mapping.
-    if (native_2x_msaa_no_attachments_) {
+    // FBO: Account for native 2x vs 2x-as-4x sample mapping. This epilogue only
+    // runs when there is a color attachment (sample mask output), so the native
+    // 2x decision must use the with-attachments capability, matching the host
+    // pipeline's native-vs-emulated 2x choice.
+    if (native_2x_msaa_with_attachments_) {
       // Native 2x: D3D10.1+ standard - top is 1, bottom is 0.
       FSI_AlphaToMaskSample(true, 1, 0.5f, threshold_offset, 1.0f / 8.0f, alpha,
                             coverage_2x);
