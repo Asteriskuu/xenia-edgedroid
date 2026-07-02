@@ -396,6 +396,12 @@ jobs:
           # Fetch data repos (game-patches)
           python xenia-build.py fetchdata
 
+      - name: Install Meson for spirv_to_dxil
+        # The D3D12 backend builds Mesa's spirv_to_dxil from the third_party/mesa
+        # submodule via Meson. Ninja is already present (used by the main build),
+        # and xenia-build.py imports the vcvars environment so Meson finds cl.
+        run: python -m pip install --upgrade meson mako pyyaml
+
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
       - name: Build

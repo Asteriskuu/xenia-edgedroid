@@ -18,8 +18,8 @@
 #include <vector>
 
 #include "xenia/base/assert.h"
-#include "xenia/gpu/d3d12/d3d12_shader.h"
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
+#include "xenia/gpu/dxbc_shader.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/texture_cache.h"
 #include "xenia/gpu/texture_util.h"
@@ -105,24 +105,24 @@ class D3D12TextureCache final : public TextureCache {
   // (otherwise they are incompatible - like if this function returned false).
   bool AreActiveTextureSRVKeysUpToDate(
       const TextureSRVKey* keys,
-      const D3D12Shader::TextureBinding* host_shader_bindings,
+      const DxbcShader::TextureBinding* host_shader_bindings,
       size_t host_shader_binding_count) const;
   // Exports the current binding data to texture SRV keys so they can be stored
   // for checking whether subsequent draw calls can keep using the same
   // bindings. Write host_shader_binding_count keys.
   void WriteActiveTextureSRVKeys(
       TextureSRVKey* keys,
-      const D3D12Shader::TextureBinding* host_shader_bindings,
+      const DxbcShader::TextureBinding* host_shader_bindings,
       size_t host_shader_binding_count) const;
   void WriteActiveTextureBindfulSRV(
-      const D3D12Shader::TextureBinding& host_shader_binding,
+      const DxbcShader::TextureBinding& host_shader_binding,
       D3D12_CPU_DESCRIPTOR_HANDLE handle);
   uint32_t GetActiveTextureBindlessSRVIndex(
-      const D3D12Shader::TextureBinding& host_shader_binding);
+      const DxbcShader::TextureBinding& host_shader_binding);
   void PrefetchSamplerParameters(
-      const D3D12Shader::SamplerBinding& binding) const;
+      const DxbcShader::SamplerBinding& binding) const;
   SamplerParameters GetSamplerParameters(
-      const D3D12Shader::SamplerBinding& binding) const;
+      const DxbcShader::SamplerBinding& binding) const;
   void WriteSampler(SamplerParameters parameters,
                     D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
 

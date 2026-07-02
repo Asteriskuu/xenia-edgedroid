@@ -1179,6 +1179,10 @@ void SpirvShaderTranslator::PostTranslation() {
       shader_binding.mip_filter = translator_binding.mip_filter;
       shader_binding.aniso_filter = translator_binding.aniso_filter;
     }
+    // Publish the bindings to draw-thread readers (GetGuestMesaSpirvShader)
+    // after they are fully written, so a PS translated on a creation thread is
+    // only consulted once its bindings are complete.
+    spirv_shader->bindings_ready_.store(true, std::memory_order_release);
   }
 }
 
