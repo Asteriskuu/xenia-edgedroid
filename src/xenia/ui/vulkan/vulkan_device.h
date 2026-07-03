@@ -172,6 +172,11 @@ class VulkanDevice {
 
     bool nonSeamlessCubeMap = false;
 
+    // VK_EXT_custom_border_color (#288)
+
+    bool customBorderColors = false;
+    bool customBorderColorWithoutFormat = false;
+
     // VK_KHR_fragment_shader_barycentric (#322)
 
     bool fragmentShaderBarycentric = false;
