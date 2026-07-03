@@ -9,6 +9,7 @@
 
 #include "xenia/gpu/vulkan/vulkan_pipeline_cache.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <set>
@@ -52,6 +53,9 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/tessellation_indexed_vs.h"
 // Placeholder pixel shader for pipeline hot-swap.
 #include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_ps.h"
+// Ucode interpreter VS placeholder + its debug color pixel shader.
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/placeholder_color_ps.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/ucode_interpreter_vs.h"
 }  // namespace shaders
 
 DEFINE_int32(
@@ -240,6 +244,21 @@ bool VulkanPipelineCache::Initialize() {
         "pipeline hot-swap will not be available");
   }
 
+  // Create the ucode interpreter VS placeholder (and its debug color PS). If it
+  // fails, the interpreter is simply not used - the normal placeholder path
+  // still applies.
+  ucode_interpreter_vs_ = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::ucode_interpreter_vs,
+      sizeof(shaders::ucode_interpreter_vs));
+  if (ucode_interpreter_vs_ == VK_NULL_HANDLE) {
+    XELOGW(
+        "VulkanPipelineCache: Failed to create the ucode interpreter vertex "
+        "shader - the VS interpreter placeholder will not be available");
+  }
+  placeholder_color_pixel_shader_ = ui::vulkan::util::CreateShaderModule(
+      vulkan_device, shaders::placeholder_color_ps,
+      sizeof(shaders::placeholder_color_ps));
+
   // Create Vulkan pipeline cache for faster pipeline creation.
   VkPipelineCacheCreateInfo pipeline_cache_create_info = {};
   pipeline_cache_create_info.sType =
@@ -349,6 +368,10 @@ void VulkanPipelineCache::Shutdown() {
                                          float24_round_fragment_shader_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          placeholder_pixel_shader_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         ucode_interpreter_vs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         placeholder_color_pixel_shader_);
   // Destroy tessellation shaders.
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          tessellation_indexed_vs_);
@@ -437,17 +460,25 @@ VulkanPipelineCache::GetCurrentPixelShaderModification(
 
 bool VulkanPipelineCache::EnsureShadersTranslated(
     VulkanShader::VulkanTranslation* vertex_shader,
-    VulkanShader::VulkanTranslation* pixel_shader) {
+    VulkanShader::VulkanTranslation* pixel_shader,
+    SpirvShaderTranslator* translator) {
   // Edge flags are not supported yet (because polygon primitives are not).
   assert_true(register_file_.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode !=
                   xenos::VertexShaderExportMode::kPosition2VectorsEdge &&
               register_file_.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode !=
                   xenos::VertexShaderExportMode::kPosition2VectorsEdgeKill);
   assert_false(register_file_.Get<reg::SQ_PROGRAM_CNTL>().gen_index_vtx);
+  // The shared translator is single-threaded, so background (creation-thread)
+  // callers pass their own worker translator. Runtime translation always claims
+  // the translation so it happens once even if draw and creation threads race
+  // the same modification. The ucode interpreter defers translation entirely by
+  // not calling this on the draw thread - the creation thread does it here.
+  SpirvShaderTranslator& used_translator =
+      translator ? *translator : guest_shader_cache_.translator();
   if (!vertex_shader->is_translated()) {
     vertex_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
-    if (!TranslateAnalyzedShader(guest_shader_cache_.translator(),
-                                 *vertex_shader)) {
+    if (!TranslateAnalyzedShader(used_translator, *vertex_shader,
+                                 /*use_try_claim=*/true)) {
       XELOGE("Failed to translate the vertex shader!");
       return false;
     }
@@ -459,8 +490,8 @@ bool VulkanPipelineCache::EnsureShadersTranslated(
   if (pixel_shader != nullptr) {
     if (!pixel_shader->is_translated()) {
       pixel_shader->shader().AnalyzeUcode(ucode_disasm_buffer_);
-      if (!TranslateAnalyzedShader(guest_shader_cache_.translator(),
-                                   *pixel_shader)) {
+      if (!TranslateAnalyzedShader(used_translator, *pixel_shader,
+                                   /*use_try_claim=*/true)) {
         XELOGE("Failed to translate the pixel shader!");
         return false;
       }
@@ -473,6 +504,41 @@ bool VulkanPipelineCache::EnsureShadersTranslated(
   return true;
 }
 
+bool VulkanPipelineCache::CanCreatePipelineAsync(bool has_pixel_shader) const {
+  return cvars::async_shader_compilation && !creation_threads_.empty() &&
+         has_pixel_shader && placeholder_pixel_shader_ != VK_NULL_HANDLE;
+}
+
+const VulkanPipelineCache::PipelineLayoutProvider*
+VulkanPipelineCache::GetGuestGraphicsPipelineLayout(
+    const VulkanShader::VulkanTranslation* vertex_shader,
+    const VulkanShader::VulkanTranslation* pixel_shader) {
+  // Binding counts come from translation. A shader whose bindings aren't ready
+  // yet (being translated on a creation thread) reports 0 - reading its binding
+  // vectors here would race the creation thread populating them. That yields
+  // the minimal layout; the creation thread recomputes the real one once ready.
+  auto texture_count =
+      [](const VulkanShader::VulkanTranslation* translation) -> size_t {
+    const VulkanShader& shader =
+        static_cast<const VulkanShader&>(translation->shader());
+    return shader.bindings_ready()
+               ? shader.GetTextureBindingsAfterTranslation().size()
+               : 0;
+  };
+  auto sampler_count =
+      [](const VulkanShader::VulkanTranslation* translation) -> size_t {
+    const VulkanShader& shader =
+        static_cast<const VulkanShader&>(translation->shader());
+    return shader.bindings_ready()
+               ? shader.GetSamplerBindingsAfterTranslation().size()
+               : 0;
+  };
+  return command_processor_.GetPipelineLayout(
+      pixel_shader ? texture_count(pixel_shader) : 0,
+      pixel_shader ? sampler_count(pixel_shader) : 0,
+      texture_count(vertex_shader), sampler_count(vertex_shader));
+}
+
 bool VulkanPipelineCache::ConfigurePipeline(
     VulkanShader::VulkanTranslation* vertex_shader,
     VulkanShader::VulkanTranslation* pixel_shader,
@@ -480,7 +546,7 @@ bool VulkanPipelineCache::ConfigurePipeline(
     reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask,
     VulkanRenderTargetCache::RenderPassKey render_pass_key,
-    VulkanPipelineCache::Pipeline** pipeline_out) {
+    bool use_interpreter, VulkanPipelineCache::Pipeline** pipeline_out) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -503,25 +569,12 @@ bool VulkanPipelineCache::ConfigurePipeline(
     return true;
   }
 
-  // Create the pipeline if not the latest and not already existing.
+  // Create the pipeline if not the latest and not already existing. For an
+  // interpreter placeholder the shaders aren't translated yet, so their binding
+  // counts read as 0 and this yields the minimal (no-texture) layout - the
+  // creation thread upgrades it to the real layout after translation.
   const PipelineLayoutProvider* pipeline_layout =
-      command_processor_.GetPipelineLayout(
-          pixel_shader
-              ? static_cast<const VulkanShader&>(pixel_shader->shader())
-                    .GetTextureBindingsAfterTranslation()
-                    .size()
-              : 0,
-          pixel_shader
-              ? static_cast<const VulkanShader&>(pixel_shader->shader())
-                    .GetSamplerBindingsAfterTranslation()
-                    .size()
-              : 0,
-          static_cast<const VulkanShader&>(vertex_shader->shader())
-              .GetTextureBindingsAfterTranslation()
-              .size(),
-          static_cast<const VulkanShader&>(vertex_shader->shader())
-              .GetSamplerBindingsAfterTranslation()
-              .size());
+      GetGuestGraphicsPipelineLayout(vertex_shader, pixel_shader);
   if (!pipeline_layout) {
     return false;
   }
@@ -605,67 +658,109 @@ bool VulkanPipelineCache::ConfigurePipeline(
   // a pixel shader, create a placeholder pipeline immediately (fast compile)
   // and queue the real pipeline creation in the background. This reduces
   // stutter from pipeline compilation.
-  bool use_async = cvars::async_shader_compilation &&
-                   !creation_threads_.empty() && pixel_shader &&
-                   placeholder_pixel_shader_ != VK_NULL_HANDLE;
+  bool use_async = CanCreatePipelineAsync(pixel_shader != nullptr);
+
+  // The interpreter can only stand in via the async placeholder path.
+  use_interpreter =
+      use_interpreter && use_async && ucode_interpreter_vs_ != VK_NULL_HANDLE;
 
   if (use_async) {
-    // Create placeholder pipeline immediately (uses simple PS, fast compile).
-    // Set is_placeholder BEFORE creating the pipeline to avoid race condition
-    // with the creation thread checking this flag.
-    pipeline_pair.second.is_placeholder.store(true, std::memory_order_release);
-
-    PipelineCreationArguments placeholder_args;
-    placeholder_args.pipeline = &pipeline_pair;
-    placeholder_args.vertex_shader = vertex_shader;
-    placeholder_args.pixel_shader = nullptr;  // Will use placeholder PS
-    placeholder_args.geometry_shader = geometry_shader;
-    placeholder_args.tessellation_vertex_shader = tessellation_vertex_shader;
-    placeholder_args.tessellation_control_shader = tessellation_control_shader;
-    placeholder_args.render_pass = render_pass;
-    placeholder_args.render_pass_key = render_pass_key;
-
-    if (EnsurePipelineCreatedWithPlaceholder(placeholder_args)) {
-      // Queue real pipeline creation in background.
-      // Calculate priority based on whether shader writes to visible RTs.
-      uint8_t priority = 0;
-      if (pixel_shader) {
-        uint32_t bound_rts =
-            pipeline_util::GetBoundRTMaskFromNormalizedColorMask(
-                normalized_color_mask);
-        priority = pipeline_util::CalculatePipelinePriority(
-            bound_rts, pixel_shader->shader().writes_color_targets(),
-            pixel_shader->shader().writes_depth());
-      }
-
-      {
-        std::lock_guard<std::mutex> lock(creation_request_lock_);
-        PipelineCreationArguments creation_arguments;
-        creation_arguments.pipeline = &pipeline_pair;
-        creation_arguments.vertex_shader = vertex_shader;
-        creation_arguments.pixel_shader = pixel_shader;
-        creation_arguments.geometry_shader = geometry_shader;
-        creation_arguments.tessellation_vertex_shader =
-            tessellation_vertex_shader;
-        creation_arguments.tessellation_control_shader =
-            tessellation_control_shader;
-        creation_arguments.render_pass = render_pass;
-        creation_arguments.render_pass_key = render_pass_key;
-        creation_arguments.priority = priority;
-        creation_queue_.push(creation_arguments);
-      }
-      creation_request_cond_.notify_one();
-    } else {
-      // Placeholder creation failed, fall back to sync creation.
-      // Reset the flag we set earlier.
-      pipeline_pair.second.is_placeholder.store(false,
+    // The draw thread never translates for async pipelines (so it never stalls
+    // on background translation). Create an immediate placeholder when we can -
+    // the interpreter VS, or the real VS if it's already translated - and queue
+    // the real pipeline (translate + create) on a background thread. A
+    // non-interpretable draw whose shaders aren't translated yet gets NO
+    // placeholder; the caller skips it until the real pipeline is ready. The
+    // pipeline layout starts minimal (0 texture counts from untranslated
+    // shaders) and is upgraded to the real one on the creation thread.
+    pipeline_pair.second.uses_interpreter.store(use_interpreter,
                                                 std::memory_order_release);
-      use_async = false;
+    bool make_placeholder = use_interpreter || vertex_shader->is_translated();
+    if (make_placeholder) {
+      // Set is_placeholder BEFORE creating the pipeline to avoid a race with
+      // the creation thread checking this flag.
+      pipeline_pair.second.is_placeholder.store(true,
+                                                std::memory_order_release);
+      PipelineCreationArguments placeholder_args;
+      placeholder_args.pipeline = &pipeline_pair;
+      placeholder_args.vertex_shader = vertex_shader;
+      placeholder_args.pixel_shader = nullptr;  // Will use placeholder PS
+      placeholder_args.geometry_shader = geometry_shader;
+      placeholder_args.tessellation_vertex_shader = tessellation_vertex_shader;
+      placeholder_args.tessellation_control_shader =
+          tessellation_control_shader;
+      placeholder_args.render_pass = render_pass;
+      placeholder_args.render_pass_key = render_pass_key;
+      bool placeholder_created =
+          use_interpreter
+              ? EnsurePipelineCreatedWithInterpreterPlaceholder(
+                    placeholder_args)
+              : EnsurePipelineCreatedWithPlaceholder(placeholder_args);
+      if (placeholder_created) {
+        if (use_interpreter) {
+          XELOGI(
+              "VS interpreter placeholder created (interpreter VS + no-op PS): "
+              "VS {:016X}, PS {:016X}",
+              vertex_shader->shader().ucode_data_hash(),
+              pixel_shader ? pixel_shader->shader().ucode_data_hash() : 0);
+        }
+      } else {
+        XELOGW(
+            "VS {} placeholder FAILED to create - dropping draws until the "
+            "real "
+            "pipeline is ready: VS {:016X}, PS {:016X}",
+            use_interpreter ? "interpreter" : "real-VS",
+            vertex_shader->shader().ucode_data_hash(),
+            pixel_shader ? pixel_shader->shader().ucode_data_hash() : 0);
+        // No placeholder - fall through to queue-only (drop until ready).
+        pipeline_pair.second.is_placeholder.store(false,
+                                                  std::memory_order_release);
+        pipeline_pair.second.uses_interpreter.store(false,
+                                                    std::memory_order_release);
+      }
     }
-  }
 
-  if (!use_async) {
-    // Sync mode or no creation threads: create synchronously.
+    // Queue the real pipeline creation in the background.
+    uint8_t priority = 0;
+    if (pixel_shader) {
+      uint32_t bound_rts = pipeline_util::GetBoundRTMaskFromNormalizedColorMask(
+          normalized_color_mask);
+      priority = pipeline_util::CalculatePipelinePriority(
+          bound_rts, pixel_shader->shader().writes_color_targets(),
+          pixel_shader->shader().writes_depth());
+    }
+    {
+      std::lock_guard<std::mutex> lock(creation_request_lock_);
+      PipelineCreationArguments creation_arguments;
+      creation_arguments.pipeline = &pipeline_pair;
+      creation_arguments.vertex_shader = vertex_shader;
+      creation_arguments.pixel_shader = pixel_shader;
+      creation_arguments.geometry_shader = geometry_shader;
+      creation_arguments.tessellation_vertex_shader =
+          tessellation_vertex_shader;
+      creation_arguments.tessellation_control_shader =
+          tessellation_control_shader;
+      creation_arguments.render_pass = render_pass;
+      creation_arguments.render_pass_key = render_pass_key;
+      creation_arguments.priority = priority;
+      creation_queue_.push(creation_arguments);
+    }
+    creation_request_cond_.notify_one();
+  } else {
+    // Sync mode (no creation threads / async off / no pixel shader): translate
+    // on this thread and create the pipeline immediately.
+    if (!vertex_shader->is_translated()) {
+      if (!EnsureShadersTranslated(vertex_shader, pixel_shader)) {
+        return false;
+      }
+      const PipelineLayoutProvider* real_layout =
+          GetGuestGraphicsPipelineLayout(vertex_shader, pixel_shader);
+      if (!real_layout) {
+        return false;
+      }
+      pipeline_pair.second.pipeline_layout.store(real_layout,
+                                                 std::memory_order_release);
+    }
     PipelineCreationArguments creation_arguments;
     creation_arguments.pipeline = &pipeline_pair;
     creation_arguments.vertex_shader = vertex_shader;
@@ -757,6 +852,13 @@ void VulkanPipelineCache::AwaitPipelineCompletion() {
 }
 
 void VulkanPipelineCache::CreationThread() {
+  // Per-thread worker translator - the shared SpirvShaderTranslator is not
+  // thread-safe, so the deferred ucode->SPIR-V build (VS interpreter
+  // placeholder) runs here, off the main thread, one translator per creation
+  // thread.
+  std::unique_ptr<SpirvShaderTranslator> worker_translator =
+      guest_shader_cache_.CreateWorkerTranslator();
+
   for (;;) {
     PipelineCreationArguments creation_arguments;
     {
@@ -773,9 +875,22 @@ void VulkanPipelineCache::CreationThread() {
     }
 
     if (!EnsureShadersTranslated(creation_arguments.vertex_shader,
-                                 creation_arguments.pixel_shader)) {
+                                 creation_arguments.pixel_shader,
+                                 worker_translator.get())) {
       XELOGE("Failed to translate shaders for pipeline creation");
     } else {
+      // Async pipelines are created with a minimal (no-texture) layout on the
+      // draw thread since their shaders weren't translated there (interpreter
+      // placeholder, or drop-until-ready with no placeholder). Now that they're
+      // translated, compute the real layout before creating the real pipeline.
+      // Idempotent when the layout was already real (real-VS placeholder path).
+      const PipelineLayoutProvider* real_layout =
+          GetGuestGraphicsPipelineLayout(creation_arguments.vertex_shader,
+                                         creation_arguments.pixel_shader);
+      if (real_layout) {
+        creation_arguments.pipeline->second.pipeline_layout.store(
+            real_layout, std::memory_order_release);
+      }
       if (!EnsurePipelineCreated(creation_arguments)) {
         XELOGE("Failed to create Vulkan pipeline");
       }
@@ -817,16 +932,46 @@ void VulkanPipelineCache::CreationThread() {
 
 bool VulkanPipelineCache::TranslateAnalyzedShader(
     SpirvShaderTranslator& translator,
-    VulkanShader::VulkanTranslation& translation) {
+    VulkanShader::VulkanTranslation& translation, bool use_try_claim) {
   VulkanShader& shader = static_cast<VulkanShader&>(translation.shader());
 
   // Perform translation (optimization is already disabled in translator
   // constructor). If this fails the shader will be marked as invalid and
-  // ignored later.
-  if (!translator.TranslateAnalyzedShader(translation)) {
-    XELOGE("Shader {:016X} translation failed; marking as ignored",
-           shader.ucode_data_hash());
-    return false;
+  // ignored later. The translation object is not thread-safe, so when draw and
+  // creation threads can both reach the same modification, claim it so it's
+  // translated exactly once and the loser waits for the winner.
+  if (!translation.is_translated()) {
+    bool should_translate = true;
+    if (use_try_claim) {
+      should_translate = translation.TryClaimTranslation();
+      if (!should_translate) {
+        while (!translation.is_translated()) {
+          xe::threading::MaybeYield();
+        }
+      }
+    }
+    if (should_translate) {
+      bool profile = cvars::shader_profiling;
+      std::chrono::steady_clock::time_point spirv_gen_start;
+      if (profile) {
+        spirv_gen_start = std::chrono::steady_clock::now();
+      }
+      if (!translator.TranslateAnalyzedShader(translation)) {
+        XELOGE("Shader {:016X} translation failed; marking as ignored",
+               shader.ucode_data_hash());
+        return false;
+      }
+      if (profile) {
+        XELOGI(
+            "shader_profiling: {} {:016X} ucode->SPIR-V {:.3f} ms {} B SPIR-V",
+            shader.type() == xenos::ShaderType::kVertex ? "vertex" : "pixel",
+            shader.ucode_data_hash(),
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - spirv_gen_start)
+                .count(),
+            translation.translated_binary().size());
+      }
+    }
   }
 
   if (translation.GetOrCreateShaderModule() == VK_NULL_HANDLE) {
@@ -840,6 +985,11 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(
 
   // Set up the texture binding layout.
   if (shader.EnterBindingLayoutUserUIDSetup()) {
+    // texture_binding_layout_map_ / texture_binding_layouts_ are shared and may
+    // be mutated concurrently now that pixel shaders (which can have textures)
+    // are translated on multiple creation threads for deferred interpreter
+    // draws.
+    std::lock_guard<std::mutex> layout_lock(layouts_mutex_);
     // Obtain the unique IDs of the binding layout if there are any texture
     // bindings, for invalidation in the command processor.
     size_t texture_binding_layout_uid = kLayoutUIDEmpty;
@@ -1449,9 +1599,21 @@ VkShaderModule VulkanPipelineCache::GetTessellationVertexShader(
              : tessellation_indexed_vs_;
 }
 
+bool VulkanPipelineCache::EnsurePipelineCreatedWithInterpreterPlaceholder(
+    const PipelineCreationArguments& creation_arguments) {
+  VkShaderModule placeholder_ps =
+      (cvars::async_shader_vs_interpreter_debug_color &&
+       placeholder_color_pixel_shader_ != VK_NULL_HANDLE)
+          ? placeholder_color_pixel_shader_
+          : placeholder_pixel_shader_;
+  return EnsurePipelineCreated(creation_arguments, placeholder_ps,
+                               ucode_interpreter_vs_);
+}
+
 bool VulkanPipelineCache::EnsurePipelineCreated(
     const PipelineCreationArguments& creation_arguments,
-    VkShaderModule fragment_shader_override) {
+    VkShaderModule fragment_shader_override,
+    VkShaderModule vertex_shader_override) {
   // Check if we already have a pipeline.
   // If it's a placeholder and we're not creating another placeholder,
   // we need to replace it with the real pipeline.
@@ -1506,10 +1668,14 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   std::array<VkPipelineShaderStageCreateInfo, 5> shader_stages;
   uint32_t shader_stage_count = 0;
 
-  // Vertex shader or tessellation evaluation shader.
-  assert_true(creation_arguments.vertex_shader->is_translated());
-  if (!creation_arguments.vertex_shader->is_valid()) {
-    return false;
+  // Vertex shader or tessellation evaluation shader. The interpreter
+  // placeholder substitutes its own fixed VS module, so the guest VS is
+  // intentionally not translated yet in that case.
+  if (vertex_shader_override == VK_NULL_HANDLE) {
+    assert_true(creation_arguments.vertex_shader->is_translated());
+    if (!creation_arguments.vertex_shader->is_valid()) {
+      return false;
+    }
   }
 
   if (is_tessellated) {
@@ -1550,8 +1716,15 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
     shader_stage_tes.pNext = nullptr;
     shader_stage_tes.flags = 0;
     shader_stage_tes.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-    shader_stage_tes.module = creation_arguments.vertex_shader->shader_module();
-    assert_true(shader_stage_tes.module != VK_NULL_HANDLE);
+    // GetOrCreateShaderModule, not shader_module(): the module is created
+    // lazily after is_translated() is set, and another thread may have
+    // translated the VS without creating the module yet, so shader_module()
+    // could still be null.
+    shader_stage_tes.module =
+        creation_arguments.vertex_shader->GetOrCreateShaderModule();
+    if (shader_stage_tes.module == VK_NULL_HANDLE) {
+      return false;
+    }
     shader_stage_tes.pName = "main";
     shader_stage_tes.pSpecializationInfo = nullptr;
   } else {
@@ -1563,9 +1736,14 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
     shader_stage_vertex.pNext = nullptr;
     shader_stage_vertex.flags = 0;
     shader_stage_vertex.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    // GetOrCreateShaderModule, not shader_module() - see the TES note above.
     shader_stage_vertex.module =
-        creation_arguments.vertex_shader->shader_module();
-    assert_true(shader_stage_vertex.module != VK_NULL_HANDLE);
+        vertex_shader_override != VK_NULL_HANDLE
+            ? vertex_shader_override
+            : creation_arguments.vertex_shader->GetOrCreateShaderModule();
+    if (shader_stage_vertex.module == VK_NULL_HANDLE) {
+      return false;
+    }
     shader_stage_vertex.pName = "main";
     shader_stage_vertex.pSpecializationInfo = nullptr;
   }
@@ -1603,8 +1781,10 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
       return false;
     }
     shader_stage_fragment.module =
-        creation_arguments.pixel_shader->shader_module();
-    assert_true(shader_stage_fragment.module != VK_NULL_HANDLE);
+        creation_arguments.pixel_shader->GetOrCreateShaderModule();
+    if (shader_stage_fragment.module == VK_NULL_HANDLE) {
+      return false;
+    }
   } else {
     if (edram_fragment_shader_interlock) {
       shader_stage_fragment.module = depth_only_fragment_shader_;
@@ -2000,7 +2180,9 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   pipeline_create_info.pColorBlendState = &color_blend_state;
   pipeline_create_info.pDynamicState = &dynamic_state;
   pipeline_create_info.layout =
-      creation_arguments.pipeline->second.pipeline_layout->GetPipelineLayout();
+      creation_arguments.pipeline->second.pipeline_layout
+          .load(std::memory_order_acquire)
+          ->GetPipelineLayout();
   pipeline_create_info.renderPass =
       use_dynamic_rendering ? VK_NULL_HANDLE : creation_arguments.render_pass;
   pipeline_create_info.subpass = 0;
@@ -2009,9 +2191,28 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
 
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+  bool profile = cvars::shader_profiling;
+  std::chrono::steady_clock::time_point pso_create_start;
+  if (profile) {
+    pso_create_start = std::chrono::steady_clock::now();
+  }
   VkPipeline pipeline;
   VkResult result = dfn.vkCreateGraphicsPipelines(
       device, vk_pipeline_cache_, 1, &pipeline_create_info, nullptr, &pipeline);
+  if (result == VK_SUCCESS && profile) {
+    // Driver SPIR-V->ISA compile + link time.
+    XELOGI(
+        "shader_profiling: pipeline create ({}) VS {:016X} PS {:016X} {:.3f} "
+        "ms",
+        creating_placeholder ? "placeholder" : "real",
+        creation_arguments.vertex_shader->shader().ucode_data_hash(),
+        creation_arguments.pixel_shader
+            ? creation_arguments.pixel_shader->shader().ucode_data_hash()
+            : 0,
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - pso_create_start)
+            .count());
+  }
   if (result != VK_SUCCESS) {
     if (creation_arguments.pixel_shader) {
       XELOGE(
@@ -2028,6 +2229,15 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
           is_tessellated, static_cast<int>(result));
     }
     return false;
+  }
+
+  // Record the placeholder handle before publishing it, so a draw that observes
+  // this pipeline handle also observes it as the placeholder (see Pipeline::
+  // placeholder_pipeline). Stored before the exchange so the release on the
+  // exchange carries it.
+  if (creating_placeholder) {
+    creation_arguments.pipeline->second.placeholder_pipeline.store(
+        pipeline, std::memory_order_release);
   }
 
   // Store the new pipeline, handling placeholder hot-swap.
@@ -2051,6 +2261,11 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   if (!creating_placeholder) {
     creation_arguments.pipeline->second.is_placeholder.store(
         false, std::memory_order_release);
+    XELOGI("Pipeline created for VS {:016X}, PS {:016X}",
+           creation_arguments.vertex_shader->shader().ucode_data_hash(),
+           creation_arguments.pixel_shader
+               ? creation_arguments.pixel_shader->shader().ucode_data_hash()
+               : 0);
   }
 
   return true;

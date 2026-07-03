@@ -503,7 +503,8 @@ class D3D12CommandProcessor final : public CommandProcessor {
       const draw_util::ViewportInfo& viewport_info,
       reg::RB_DEPTHCONTROL normalized_depth_control,
       uint32_t normalized_color_mask,
-      const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset);
+      const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset,
+      bool interpreter_placeholder);
   // Resolves a sampler to its index in the bindless sampler heap for the Mesa
   // path, allocating and writing the descriptor on first use. Returns
   // UINT32_MAX if the heap is full, so the caller switches to a fresh heap and
@@ -858,6 +859,11 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // Shadow of the last uploaded Mesa system constants, for the dirty compare.
   // The derived system constants have no per register write invalidation.
   std::vector<uint8_t> mesa_system_constants_shadow_;
+  // Whether the vertex float constant buffer currently holds the full 256
+  // float4 register file (for a ucode interpreter placeholder draw) rather than
+  // the packed subset, so it is invalidated when switching between the two
+  // layouts.
+  bool mesa_float_constants_vertex_full_ = false;
 
   // Whether the latest shared memory and EDRAM buffer binding contains the
   // shared memory UAV rather than the SRV.

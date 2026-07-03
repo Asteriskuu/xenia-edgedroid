@@ -508,7 +508,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
       uint32_t normalized_color_mask,
       const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset);
   bool UpdateBindings(const VulkanShader* vertex_shader,
-                      const VulkanShader* pixel_shader);
+                      const VulkanShader* pixel_shader,
+                      bool interpreter_placeholder = false,
+                      bool placeholder_pixel_shader = false);
   // Allocates a descriptor set and fills one or two VkWriteDescriptorSet
   // structure instances (for images and samplers).
   // The descriptor set layout must be the one for the given is_vertex,
@@ -631,6 +633,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
   VkDescriptorSetLayout descriptor_set_layout_shared_memory_and_edram_ =
       VK_NULL_HANDLE;
 
+  // Guards the layout maps below - GetPipelineLayout is called both from the
+  // draw thread and from pipeline creation threads (for deferred translation).
+  std::mutex pipeline_layouts_mutex_;
   // Descriptor set layouts are referenced by pipeline_layouts_.
   std::unordered_map<TextureDescriptorSetLayoutKey, VkDescriptorSetLayout,
                      TextureDescriptorSetLayoutKey::Hasher>
@@ -922,6 +927,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // Float constant usage masks of the last draw call.
   uint64_t current_float_constant_map_vertex_[4];
   uint64_t current_float_constant_map_pixel_[4];
+  // True if the vertex float constant buffer holds the full unpacked 256 float
+  // constants for the ucode interpreter rather than a shader's packed subset.
+  // Used to invalidate the binding when switching interpreter <-> normal.
+  bool float_constants_vertex_are_full_ = false;
 
   // System shader constants, including user clip planes and tessellation
   // constants.

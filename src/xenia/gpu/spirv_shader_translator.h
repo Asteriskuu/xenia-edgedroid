@@ -329,6 +329,13 @@ class SpirvShaderTranslator : public ShaderTranslator {
     uint32_t tessellation_vertex_index_endian;
     uint32_t tessellation_vertex_index_offset;
     uint32_t tessellation_vertex_index_min_max[2];
+
+    // Ucode interpreter VS placeholder. Guest VS ucode location in shared
+    // memory as a dword address, and its control-flow instruction count. Zero
+    // unless the interpreter is bound for this draw. Appended after the
+    // tessellation tail so the static_assert offsets above are unaffected.
+    uint32_t interpreter_ucode_base_dwords;
+    uint32_t interpreter_cf_instr_count;
   };
 
   // xenos_draw.glsli reads these tessellation fields from the system constants
@@ -1033,6 +1040,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kSystemConstantTessellationVertexIndexEndian,
     kSystemConstantTessellationVertexIndexOffset,
     kSystemConstantTessellationVertexIndexMinMax,
+    kSystemConstantInterpreterUcodeBaseDwords,
+    kSystemConstantInterpreterCfInstrCount,
   };
   spv::Id uniform_system_constants_;
   spv::Id uniform_float_constants_;

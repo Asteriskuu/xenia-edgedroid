@@ -2817,6 +2817,11 @@ VulkanCommandProcessor::GetPipelineLayout(size_t texture_count_pixel,
   pipeline_layout_key.sampler_count_pixel = uint16_t(sampler_count_pixel);
   pipeline_layout_key.texture_count_vertex = uint16_t(texture_count_vertex);
   pipeline_layout_key.sampler_count_vertex = uint16_t(sampler_count_vertex);
+  // Called from the draw thread and from pipeline creation threads (deferred
+  // translation), and reads/writes the shared layout maps +
+  // GetTextureDescriptor SetLayout (only called from here), so serialize the
+  // whole lookup+create.
+  std::lock_guard<std::mutex> layouts_lock(pipeline_layouts_mutex_);
   {
     auto it = pipeline_layouts_.find(pipeline_layout_key);
     if (it != pipeline_layouts_.end()) {
@@ -3129,6 +3134,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   SpirvShaderTranslator::Modification pixel_shader_modification;
   VulkanShader::VulkanTranslation* vertex_shader_translation;
   VulkanShader::VulkanTranslation* pixel_shader_translation;
+  bool use_interpreter = false;
+  bool drop_until_ready = false;
   uint32_t normalized_color_mask;
   reg::RB_DEPTHCONTROL normalized_depth_control;
   draw_util::HostDepthPolygonOffset host_depth_polygon_offset;
@@ -3207,10 +3214,51 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                            pixel_shader->GetOrCreateTranslation(
                                pixel_shader_modification.value))
                      : nullptr;
-    if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
-                                                  pixel_shader_translation)) {
-      return false;
+    // Decide whether the ucode interpreter can stand in for the real VS while
+    // it translates+compiles in the background: a plain (non-tessellated,
+    // non-expanded) vertex shader with static control flow and no texture fetch
+    // or memory export, on a device matching the interpreter's assumptions
+    // (single shared-memory binding, full 32-bit indices). When eligible, VS
+    // translation is deferred to the background creation thread.
+    use_interpreter =
+        cvars::async_shader_vs_interpreter &&
+        !vertex_shader_translation->is_translated() &&
+        active_vertex_shader_ucode_address_ != 0 &&
+        device_properties.fullDrawIndexUint32 &&
+        SpirvShaderTranslator::GetSharedMemoryStorageBufferCountLog2(
+            device_properties.maxStorageBufferRange) == 0 &&
+        primitive_processing_result.host_vertex_shader_type ==
+            Shader::HostVertexShaderType::kVertex &&
+        primitive_processing_result.host_primitive_type !=
+            xenos::PrimitiveType::kPointList &&
+        primitive_processing_result.host_primitive_type !=
+            xenos::PrimitiveType::kRectangleList &&
+        primitive_processing_result.host_primitive_type !=
+            xenos::PrimitiveType::kQuadList &&
+        vertex_shader->texture_bindings().empty() &&
+        !vertex_shader->uses_subroutine_calls() &&
+        vertex_shader->memexport_eM_written() == 0 &&
+        vertex_shader->constant_register_map().loop_bitmap == 0;
+    bool async_available =
+        pipeline_cache_->CanCreatePipelineAsync(pixel_shader != nullptr);
+    // A draw with no placeholder to render it now: the interpreter can't stand
+    // in AND the real VS isn't translated yet (so no real-VS + no-op-PS
+    // placeholder either). These are the draws async_shader_skip_draws governs.
+    // Interpreter-eligible draws and draws whose VS is already translated
+    // always have a placeholder and never translate on the draw thread.
+    bool no_placeholder = async_available && !use_interpreter &&
+                          !vertex_shader_translation->is_translated();
+    // The draw thread translates only for a no-placeholder draw that isn't
+    // being skipped (so it can render via a real-VS placeholder).
+    bool translate_here =
+        !async_available || (no_placeholder && !cvars::async_shader_skip_draws);
+    if (translate_here) {
+      if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
+                                                    pixel_shader_translation)) {
+        return false;
+      }
     }
+    drop_until_ready = no_placeholder && cvars::async_shader_skip_draws;
 
     // Obtain the samplers. Note that the bindings don't depend on the shader
     // modification, so if on the second iteration of this loop it becomes
@@ -3229,6 +3277,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       const VulkanShader* shader = j ? pixel_shader : vertex_shader;
       if (!shader) {
+        continue;
+      }
+      // Don't read a shader's sampler bindings while a creation thread is still
+      // populating them (async draws don't translate here). A placeholder draw
+      // that ends up using this shader binds no samplers for it anyway.
+      if (!shader->bindings_ready()) {
+        if (!i) {
+          shader_samplers.clear();
+        }
         continue;
       }
       const std::vector<VulkanShader::SamplerBinding>& shader_sampler_bindings =
@@ -3298,28 +3355,48 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           vertex_shader_translation, pixel_shader_translation,
           primitive_processing_result, normalized_depth_control,
           normalized_color_mask,
-          render_target_cache_->last_update_render_pass_key(), &pipeline)) {
+          render_target_cache_->last_update_render_pass_key(), use_interpreter,
+          &pipeline)) {
     XELOGE("IssueDraw: ConfigurePipeline failed for VS={:016X} PS={:016X}",
            vertex_shader->ucode_data_hash(),
            pixel_shader ? pixel_shader->ucode_data_hash() : 0);
     return false;
   }
 
-  VkPipeline current_pipeline =
-      pipeline->pipeline.load(std::memory_order_acquire);
-  if (current_pipeline == VK_NULL_HANDLE) {
-    // Pipeline is not ready yet - wait for it to be created.
-    pipeline_cache_->EndSubmission();
-    current_pipeline = pipeline->pipeline.load(std::memory_order_acquire);
-    if (current_pipeline == VK_NULL_HANDLE) {
-      // Still not ready - something is wrong.
-      return false;
-    }
+  if (drop_until_ready) {
+    // Non-interpretable draw whose shaders weren't translated yet - it has been
+    // queued for background creation; skip drawing it until the real pipeline
+    // is ready (a later frame renders it). Never translate/compile on the draw
+    // thread for these.
+    XELOGI(
+        "Draw skipped (no interpreter placeholder, real pipeline not ready): "
+        "VS {:016X}, PS {:016X}",
+        vertex_shader->ucode_data_hash(),
+        pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+    return true;
   }
   // If async mode is active, this may be a placeholder pipeline. The real
   // pipeline will be swapped in by the creation thread when ready.
-  // We re-load the handle to pick up any swap that may have happened.
-  current_pipeline = pipeline->pipeline.load(std::memory_order_acquire);
+  VkPipeline current_pipeline =
+      pipeline->pipeline.load(std::memory_order_acquire);
+  if (current_pipeline == VK_NULL_HANDLE) {
+    // Real pipeline not created yet and no placeholder - skip this draw rather
+    // than stalling the draw thread waiting for the background.
+    XELOGI("Draw skipped (pipeline not ready yet): VS {:016X}, PS {:016X}",
+           vertex_shader->ucode_data_hash(),
+           pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+    return true;
+  }
+  // The interpreter reads the guest ucode from shared memory by its program
+  // address. A cached interpreter placeholder reused for an inline
+  // (IM_LOAD_IMMEDIATE, address 0) shader can't be fed, so skip until the real
+  // pipeline is ready rather than interpret from address 0.
+  if (active_vertex_shader_ucode_address_ == 0 &&
+      current_pipeline ==
+          pipeline->placeholder_pipeline.load(std::memory_order_acquire) &&
+      pipeline->uses_interpreter.load(std::memory_order_acquire)) {
+    return true;
+  }
 
   // Push debug marker with Xbox 360 draw context for RenderDoc annotation.
   // Done early so texture loads appear nested under the draw that uses them.
@@ -3335,9 +3412,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Update the textures before most other work in the submission because
   // samplers depend on this (and in case of sampler overflow in a submission,
   // submissions must be split) - may perform dispatches and copying.
+  // Only read after-translation state for shaders whose bindings are ready (not
+  // being populated by a creation thread for an async draw).
   uint32_t used_texture_mask =
-      vertex_shader->GetUsedTextureMaskAfterTranslation() |
-      (pixel_shader != nullptr
+      (vertex_shader->bindings_ready()
+           ? vertex_shader->GetUsedTextureMaskAfterTranslation()
+           : 0) |
+      (pixel_shader != nullptr && pixel_shader->bindings_ready()
            ? pixel_shader->GetUsedTextureMaskAfterTranslation()
            : 0);
   texture_cache_->RequestTextures(used_texture_mask);
@@ -3354,8 +3435,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     current_guest_graphics_pipeline_ = current_pipeline;
     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
   }
-  auto pipeline_layout =
-      static_cast<const PipelineLayout*>(pipeline->pipeline_layout);
+  auto pipeline_layout = static_cast<const PipelineLayout*>(
+      pipeline->pipeline_layout.load(std::memory_order_acquire));
   if (current_guest_graphics_pipeline_layout_ != pipeline_layout) {
     if (current_guest_graphics_pipeline_layout_) {
       // Keep descriptor set layouts for which the new pipeline layout is
@@ -3451,9 +3532,46 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       normalized_color_mask,
       apply_host_depth_polygon_offset ? &host_depth_polygon_offset : nullptr);
 
+  // Whether we bound the placeholder pipeline (vs the real one). Derived from
+  // the handle actually bound, so it's consistent with current_pipeline even if
+  // the creation thread swaps in the real pipeline mid-draw (the is_placeholder
+  // flag is cleared a few instructions later, so reading it separately can
+  // disagree).
+  bool bound_is_placeholder =
+      current_pipeline ==
+      pipeline->placeholder_pipeline.load(std::memory_order_acquire);
+  // The interpreter placeholder (interpreter VS + no-op PS) also needs its
+  // ucode location + full float constants fed to it.
+  bool interpreter_placeholder =
+      bound_is_placeholder &&
+      pipeline->uses_interpreter.load(std::memory_order_acquire);
+  // Any placeholder draw binds the no-op placeholder pixel shader (which never
+  // samples), so its pixel textures/samplers must not be bound - the
+  // placeholder pipeline's layout has none.
+  bool placeholder_pixel_shader = bound_is_placeholder;
+  {
+    uint32_t ucode_base_dwords = 0, cf_instr_count = 0;
+    if (interpreter_placeholder) {
+      uint32_t ucode_address = active_vertex_shader_ucode_address_;
+      ucode_base_dwords = ucode_address >> 2;
+      cf_instr_count = vertex_shader->cf_pair_index_bound() * 2;
+      shared_memory_->RequestRange(
+          ucode_address,
+          uint32_t(vertex_shader->ucode_dword_count()) * sizeof(uint32_t));
+    }
+    if (system_constants_.interpreter_ucode_base_dwords != ucode_base_dwords ||
+        system_constants_.interpreter_cf_instr_count != cf_instr_count) {
+      system_constants_.interpreter_ucode_base_dwords = ucode_base_dwords;
+      system_constants_.interpreter_cf_instr_count = cf_instr_count;
+      current_constant_buffers_up_to_date_ &=
+          ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferSystem);
+    }
+  }
+
   // Update uniform buffers and descriptor sets after binding the pipeline with
   // the new layout.
-  if (!UpdateBindings(vertex_shader, pixel_shader)) {
+  if (!UpdateBindings(vertex_shader, pixel_shader, interpreter_placeholder,
+                      placeholder_pixel_shader)) {
     return false;
   }
 
@@ -6762,7 +6880,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
 }
 
 bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
-                                            const VulkanShader* pixel_shader) {
+                                            const VulkanShader* pixel_shader,
+                                            bool interpreter_placeholder,
+                                            bool placeholder_pixel_shader) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -6799,6 +6919,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
             ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFloatVertex);
       }
     }
+  }
+  // The interpreter needs all 256 float constants unpacked; switching between
+  // that and a shader's packed subset must re-upload.
+  if (interpreter_placeholder != float_constants_vertex_are_full_) {
+    current_constant_buffers_up_to_date_ &=
+        ~(UINT32_C(1) << SpirvShaderTranslator::kConstantBufferFloatVertex);
+    float_constants_vertex_are_full_ = interpreter_placeholder;
   }
   uint32_t float_constant_count_pixel = 0;
   if (pixel_shader != nullptr) {
@@ -6858,9 +6985,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
       // for both the vertex shader and the pixel shader), so if the first draw
       // in the frame doesn't have float constants at all, still allocate a
       // dummy buffer.
+      // The interpreter indexes all 256 float constants by raw index, so upload
+      // the full contiguous register file rather than the packed subset.
       size_t float_constants_size =
-          sizeof(float) * 4 *
-          std::max(float_constant_count_vertex, UINT32_C(1));
+          interpreter_placeholder
+              ? sizeof(float) * 4 * 256
+              : sizeof(float) * 4 *
+                    std::max(float_constant_count_vertex, UINT32_C(1));
       uint8_t* mapping = uniform_buffer_pool_->Request(
           frame_current_, float_constants_size, uniform_buffer_alignment,
           buffer_info.buffer, buffer_info.offset);
@@ -6868,18 +6999,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
         return false;
       }
       buffer_info.range = VkDeviceSize(float_constants_size);
-      for (uint32_t i = 0; i < 4; ++i) {
-        uint64_t float_constant_map_entry =
-            current_float_constant_map_vertex_[i];
-        uint32_t float_constant_index;
-        while (xe::bit_scan_forward(float_constant_map_entry,
-                                    &float_constant_index)) {
-          float_constant_map_entry &= ~(1ull << float_constant_index);
-          std::memcpy(mapping,
-                      &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) +
-                            (float_constant_index << 2)],
-                      sizeof(float) * 4);
-          mapping += sizeof(float) * 4;
+      if (interpreter_placeholder) {
+        std::memcpy(mapping, &regs[XE_GPU_REG_SHADER_CONSTANT_000_X],
+                    sizeof(float) * 4 * 256);
+      } else {
+        for (uint32_t i = 0; i < 4; ++i) {
+          uint64_t float_constant_map_entry =
+              current_float_constant_map_vertex_[i];
+          uint32_t float_constant_index;
+          while (xe::bit_scan_forward(float_constant_map_entry,
+                                      &float_constant_index)) {
+            float_constant_map_entry &= ~(1ull << float_constant_index);
+            std::memcpy(mapping,
+                        &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) +
+                              (float_constant_index << 2)],
+                        sizeof(float) * 4);
+            mapping += sizeof(float) * 4;
+          }
         }
       }
       current_constant_buffers_up_to_date_ |=
@@ -6954,17 +7090,23 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     }
   }
 
-  // Textures and samplers.
+  // Textures and samplers. Only read a shader's binding lists when its bindings
+  // are ready - an async draw doesn't translate here, so a creation thread may
+  // still be populating them (reading size()/contents would race). Binding the
+  // reference is fine; only size()/iteration touch the racing buffer.
+  bool vertex_bindings_ready = vertex_shader->bindings_ready();
   const std::vector<VulkanShader::SamplerBinding>& samplers_vertex =
       vertex_shader->GetSamplerBindingsAfterTranslation();
   const std::vector<VulkanShader::TextureBinding>& textures_vertex =
       vertex_shader->GetTextureBindingsAfterTranslation();
-  uint32_t sampler_count_vertex = uint32_t(samplers_vertex.size());
-  uint32_t texture_count_vertex = uint32_t(textures_vertex.size());
+  uint32_t sampler_count_vertex =
+      vertex_bindings_ready ? uint32_t(samplers_vertex.size()) : 0;
+  uint32_t texture_count_vertex =
+      vertex_bindings_ready ? uint32_t(textures_vertex.size()) : 0;
   const std::vector<VulkanShader::SamplerBinding>* samplers_pixel;
   const std::vector<VulkanShader::TextureBinding>* textures_pixel;
   uint32_t sampler_count_pixel, texture_count_pixel;
-  if (pixel_shader) {
+  if (pixel_shader && pixel_shader->bindings_ready()) {
     samplers_pixel = &pixel_shader->GetSamplerBindingsAfterTranslation();
     textures_pixel = &pixel_shader->GetTextureBindingsAfterTranslation();
     sampler_count_pixel = uint32_t(samplers_pixel->size());
@@ -6975,6 +7117,18 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
     sampler_count_pixel = 0;
     texture_count_pixel = 0;
   }
+  // Placeholder pipelines were built with a layout matching only what their
+  // placeholder shaders access, so don't bind texture sets they lack (which
+  // could otherwise happen if the real shaders finished translating mid-draw).
+  // The no-op placeholder PS never samples; the interpreter VS never samples.
+  if (placeholder_pixel_shader) {
+    sampler_count_pixel = 0;
+    texture_count_pixel = 0;
+  }
+  if (interpreter_placeholder) {
+    sampler_count_vertex = 0;
+    texture_count_vertex = 0;
+  }
   // Reuse the texture and sampler descriptor sets across draws while their
   // contents stay valid. A set becomes stale when the shader (and thus its
   // binding list) changes, when a used texture's host image view changes, or
@@ -6983,9 +7137,13 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
   // a kept set's handle is always still alive.
   uint32_t textures_changed = texture_cache_->texture_bindings_changed();
   uint32_t used_texture_mask_vertex =
-      vertex_shader->GetUsedTextureMaskAfterTranslation();
+      vertex_bindings_ready
+          ? vertex_shader->GetUsedTextureMaskAfterTranslation()
+          : 0;
   uint32_t used_texture_mask_pixel =
-      pixel_shader ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0;
+      (pixel_shader && pixel_shader->bindings_ready())
+          ? pixel_shader->GetUsedTextureMaskAfterTranslation()
+          : 0;
   if ((current_graphics_descriptor_set_values_up_to_date_ &
        (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex)) &&
       (current_textures_vertex_shader_ != vertex_shader ||

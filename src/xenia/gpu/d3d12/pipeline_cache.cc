@@ -80,9 +80,11 @@ namespace shaders {
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/discrete_triangle_3cp_hs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/float24_round_ps.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/float24_truncate_ps.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/placeholder_color_ps.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/placeholder_ps.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/tessellation_adaptive_vs.h"
 #include "xenia/gpu/shaders/bytecode/d3d12_dxil/tessellation_indexed_vs.h"
+#include "xenia/gpu/shaders/bytecode/d3d12_dxil/ucode_interpreter_vs.h"
 }  // namespace shaders
 
 // SPIR-V versions of the host tessellation vertex and hull shaders, fed (with
@@ -725,21 +727,27 @@ Shader::Translation* PipelineCache::TranslateGuestMesaSpirv(
     }
     if (should_translate) {
       uint64_t ucode_hash = translation.shader().ucode_data_hash();
-      auto spirv_gen_start = std::chrono::steady_clock::now();
+      bool profile = cvars::shader_profiling;
+      std::chrono::steady_clock::time_point spirv_gen_start;
+      if (profile) {
+        spirv_gen_start = std::chrono::steady_clock::now();
+      }
       if (!translator.TranslateAnalyzedShader(translation)) {
         XELOGW(
             "spirv_to_dxil: SPIR-V translation failed for guest shader {:016X}",
             ucode_hash);
         return nullptr;
       }
-      XELOGI("shader_profiling: Mesa {} {:016X} ucode->SPIR-V {:.3f} ms",
-             translation.shader().type() == xenos::ShaderType::kVertex
-                 ? "vertex"
-                 : "pixel",
-             ucode_hash,
-             std::chrono::duration<double, std::milli>(
-                 std::chrono::steady_clock::now() - spirv_gen_start)
-                 .count());
+      if (profile) {
+        XELOGI("shader_profiling: Mesa {} {:016X} ucode->SPIR-V {:.3f} ms",
+               translation.shader().type() == xenos::ShaderType::kVertex
+                   ? "vertex"
+                   : "pixel",
+               ucode_hash,
+               std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - spirv_gen_start)
+                   .count());
+      }
       // With --dump_shaders, write the SPIR-V next to the DXIL so the two can
       // be compared (the DXIL is dumped in ConvertGuestMesaSpirvToDxil).
       if (!cvars::dump_shaders.empty()) {
@@ -779,13 +787,19 @@ const std::vector<uint8_t>* PipelineCache::ConvertGuestMesaSpirvToDxil(
   SpirvToDxilCompiler::Stage stage = shader_type == xenos::ShaderType::kVertex
                                          ? SpirvToDxilCompiler::Stage::kVertex
                                          : SpirvToDxilCompiler::Stage::kPixel;
-  auto dxil_conv_start = std::chrono::steady_clock::now();
+  bool profile = cvars::shader_profiling;
+  std::chrono::steady_clock::time_point dxil_conv_start;
+  if (profile) {
+    dxil_conv_start = std::chrono::steady_clock::now();
+  }
   std::vector<uint8_t> dxil = SpirvToDxilCompiler::Translate(
       reinterpret_cast<const uint32_t*>(spirv.data()),
       spirv.size() / sizeof(uint32_t), stage, /*lower_to_bindless=*/true);
-  double dxil_conv_ms = std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - dxil_conv_start)
-                            .count();
+  double dxil_conv_ms =
+      profile ? std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - dxil_conv_start)
+                    .count()
+              : 0.0;
   if (dxil.empty()) {
     std::lock_guard<std::mutex> lock(mesa_dxil_cache_mutex_);
     mesa_dxil_cache_[ucode_hash].emplace(spirv_modification,
@@ -817,9 +831,12 @@ const std::vector<uint8_t>* PipelineCache::ConvertGuestMesaSpirvToDxil(
       "SPIR-V -> {} B DXIL",
       shader_type == xenos::ShaderType::kVertex ? "vertex" : "pixel",
       ucode_hash, spirv_modification, spirv_size, dxil_size);
-  XELOGI("shader_profiling: Mesa {} {:016X} SPIR-V->DXIL (Mesa+sign) {:.3f} ms",
-         shader_type == xenos::ShaderType::kVertex ? "vertex" : "pixel",
-         ucode_hash, dxil_conv_ms);
+  if (profile) {
+    XELOGI(
+        "shader_profiling: Mesa {} {:016X} SPIR-V->DXIL (Mesa+sign) {:.3f} ms",
+        shader_type == xenos::ShaderType::kVertex ? "vertex" : "pixel",
+        ucode_hash, dxil_conv_ms);
+  }
 
   // With --dump_shaders, write the signed (bindless) Mesa DXIL.
   if (!cvars::dump_shaders.empty()) {
@@ -1139,7 +1156,8 @@ bool PipelineCache::ConfigurePipeline(
     uint32_t normalized_color_mask, bool apply_polygon_offset_in_shader,
     uint32_t bound_depth_and_color_render_target_bits,
     const uint32_t* bound_depth_and_color_render_target_formats,
-    void** pipeline_handle_out, ID3D12RootSignature** root_signature_out) {
+    bool use_interpreter, void** pipeline_handle_out,
+    ID3D12RootSignature** root_signature_out) {
 #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -1174,6 +1192,22 @@ bool PipelineCache::ConfigurePipeline(
   Shader::HostVertexShaderType host_vs_type =
       SpirvShaderTranslator::Modification(vertex_shader->modification())
           .vertex.host_vertex_shader_type;
+  // The ucode interpreter placeholder additionally defers the vertex shader:
+  // instead of translating it here it rasterizes with the interpreter VS while
+  // the creation thread builds both real shaders. Plain vertex shaders only
+  // (the interpreter does not tessellate).
+  bool make_interpreter = use_interpreter && use_placeholder &&
+                          host_vs_type == Shader::HostVertexShaderType::kVertex;
+  // A draw the interpreter can't stand in for whose VS isn't translated yet has
+  // no placeholder. With async_shader_skip_draws, defer both shaders to the
+  // creation thread and skip the draw until the real pipeline is ready, instead
+  // of translating the VS inline on the draw thread.
+  bool defer_without_placeholder = use_placeholder && !make_interpreter &&
+                                   !vertex_shader->is_translated() &&
+                                   cvars::async_shader_skip_draws;
+  // Both cases build both shaders on the creation thread (the interpreter
+  // behind a placeholder, the skip case behind nothing).
+  bool defer_both = make_interpreter || defer_without_placeholder;
   if (host_vs_type != Shader::HostVertexShaderType::kVertex &&
       !Shader::IsHostVertexShaderTypeDomain(host_vs_type)) {
     XELOGE(
@@ -1221,14 +1255,6 @@ bool PipelineCache::ConfigurePipeline(
   bool is_tess_eval =
       Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type);
   vertex_spirv_modification = vertex_shader->modification();
-  // SPIR-V translation happens here, on the main thread (the translator is
-  // not thread safe), mirroring how Vulkan translates SPIR-V before queuing
-  // pipeline work. It also populates the SpirvShader texture bindings
-  // UpdateBindingsMesa reads. Only the pixel DXIL conversion + PSO creation
-  // are deferred to the creation threads.
-  Shader::Translation* vertex_spirv =
-      EnsureGuestMesaSpirv(static_cast<SpirvShader&>(vertex_shader->shader()),
-                           vertex_spirv_modification);
   Shader::Translation* pixel_ps_translation = nullptr;
   if (pixel_shader != nullptr) {
     pixel_spirv_modification = pixel_shader->modification();
@@ -1254,77 +1280,102 @@ bool PipelineCache::ConfigurePipeline(
       storage_writer_.QueueShaderWrite(&pixel_shader->shader());
     }
   }
-  // The vertex shader DXIL is needed now: the placeholder pipeline rasterizes
-  // the real geometry with the real vertex (or tessellation) shaders. The
-  // pixel shader is checked in its sync/async branch below.
-  if (!vertex_spirv) {
-    XELOGE(
-        "spirv_to_dxil: guest vertex shader {:016X} SPIR-V translation "
-        "failed; skipping draw",
-        vertex_shader->shader().ucode_data_hash());
-    return false;
-  }
-  if (is_tess_eval) {
-    // Tessellation: link the host vertex and hull shaders with the guest
-    // domain shader so their inter-stage signatures match (required by
-    // D3D12).
-    xenos::TessellationMode tessellation_mode = xenos::TessellationMode(
-        description.primitive_topology_type_or_tessellation_mode);
-    const MesaTessellationDxil* tess_dxil = ConvertGuestMesaTessellationToDxil(
-        vertex_shader->shader().ucode_data_hash(), vertex_spirv_modification,
-        vertex_spirv->translated_binary(), tessellation_mode,
-        host_vertex_shader_type);
-    if (!tess_dxil) {
-      XELOGE(
-          "spirv_to_dxil: tessellation translation failed for domain "
-          "{:016X}; "
-          "skipping draw",
-          vertex_shader->shader().ucode_data_hash());
-      return false;
-    }
-    runtime_description.mesa_tess_host_vs_dxil = &tess_dxil->host_vertex;
-    runtime_description.mesa_tess_host_hs_dxil = &tess_dxil->host_hull;
-    runtime_description.mesa_vertex_dxil = &tess_dxil->domain;
-  } else {
-    const std::vector<uint8_t>* vertex_dxil = ConvertGuestMesaSpirvToDxil(
-        vertex_shader->shader().ucode_data_hash(), vertex_spirv_modification,
-        vertex_spirv->translated_binary(), xenos::ShaderType::kVertex);
-    if (!vertex_dxil) {
-      XELOGE(
-          "spirv_to_dxil: guest vertex shader {:016X} translation failed; "
-          "skipping draw",
-          vertex_shader->shader().ucode_data_hash());
-      return false;
-    }
-    runtime_description.mesa_vertex_dxil = vertex_dxil;
-  }
   runtime_description.root_signature =
       command_processor_.GetMesaRootSignature();
   description.use_mesa_dxil = 1;
-  if (pixel_shader == nullptr) {
-    // Depth-only: CreateD3D12Pipeline supplies the Mesa FSI depth-only DXIL
-    // (ROV path) or no pixel shader (host render target path). No pixel DXIL
-    // translated here.
-  } else if (use_async) {
-    // Defer the pixel SPIR-V translation, DXIL conversion and PSO creation to
-    // a creation thread.
+
+  if (defer_both) {
+    // Defer BOTH shaders to the creation thread. Create the (untranslated)
+    // translation objects; the creation thread builds their DXIL via the
+    // BuildMesaPipelineDxil warm-up branch (keyed on mesa_vertex_translation).
+    // The interpreter rasterizes via a placeholder meanwhile; the skip case has
+    // no placeholder and the draw is dropped until the real pipeline is ready.
+    runtime_description.mesa_vertex_translation =
+        EnsureGuestMesaSpirvTranslation(
+            static_cast<SpirvShader&>(vertex_shader->shader()),
+            vertex_spirv_modification);
     runtime_description.mesa_pixel_translation = pixel_ps_translation;
-  } else {
-    // Sync mode (no creation threads): translate the pixel SPIR-V here.
-    Shader::Translation* pixel_spirv = TranslateGuestMesaSpirv(
-        guest_shader_cache_.translator(), *pixel_ps_translation,
-        /*use_try_claim=*/false);
-    if (pixel_spirv) {
-      runtime_description.mesa_pixel_dxil = ConvertGuestMesaSpirvToDxil(
-          pixel_shader->shader().ucode_data_hash(), pixel_spirv_modification,
-          pixel_spirv->translated_binary(), xenos::ShaderType::kPixel);
-    }
-    if (!runtime_description.mesa_pixel_dxil) {
-      XELOGE(
-          "spirv_to_dxil: guest pixel shader {:016X} translation failed; "
-          "skipping draw",
-          pixel_shader->shader().ucode_data_hash());
+    if (!runtime_description.mesa_vertex_translation) {
       return false;
+    }
+  } else {
+    // SPIR-V translation happens here, on the main thread (the translator is
+    // not thread safe), mirroring how Vulkan translates SPIR-V before queuing
+    // pipeline work. It also populates the SpirvShader texture bindings
+    // UpdateBindingsMesa reads. Only the pixel DXIL conversion + PSO creation
+    // are deferred to the creation threads.
+    Shader::Translation* vertex_spirv =
+        EnsureGuestMesaSpirv(static_cast<SpirvShader&>(vertex_shader->shader()),
+                             vertex_spirv_modification);
+    // The vertex shader DXIL is needed now: the placeholder pipeline rasterizes
+    // the real geometry with the real vertex (or tessellation) shaders. The
+    // pixel shader is checked in its sync/async branch below.
+    if (!vertex_spirv) {
+      XELOGE(
+          "spirv_to_dxil: guest vertex shader {:016X} SPIR-V translation "
+          "failed; skipping draw",
+          vertex_shader->shader().ucode_data_hash());
+      return false;
+    }
+    if (is_tess_eval) {
+      // Tessellation: link the host vertex and hull shaders with the guest
+      // domain shader so their inter-stage signatures match (required by
+      // D3D12).
+      xenos::TessellationMode tessellation_mode = xenos::TessellationMode(
+          description.primitive_topology_type_or_tessellation_mode);
+      const MesaTessellationDxil* tess_dxil =
+          ConvertGuestMesaTessellationToDxil(
+              vertex_shader->shader().ucode_data_hash(),
+              vertex_spirv_modification, vertex_spirv->translated_binary(),
+              tessellation_mode, host_vertex_shader_type);
+      if (!tess_dxil) {
+        XELOGE(
+            "spirv_to_dxil: tessellation translation failed for domain "
+            "{:016X}; skipping draw",
+            vertex_shader->shader().ucode_data_hash());
+        return false;
+      }
+      runtime_description.mesa_tess_host_vs_dxil = &tess_dxil->host_vertex;
+      runtime_description.mesa_tess_host_hs_dxil = &tess_dxil->host_hull;
+      runtime_description.mesa_vertex_dxil = &tess_dxil->domain;
+    } else {
+      const std::vector<uint8_t>* vertex_dxil = ConvertGuestMesaSpirvToDxil(
+          vertex_shader->shader().ucode_data_hash(), vertex_spirv_modification,
+          vertex_spirv->translated_binary(), xenos::ShaderType::kVertex);
+      if (!vertex_dxil) {
+        XELOGE(
+            "spirv_to_dxil: guest vertex shader {:016X} translation failed; "
+            "skipping draw",
+            vertex_shader->shader().ucode_data_hash());
+        return false;
+      }
+      runtime_description.mesa_vertex_dxil = vertex_dxil;
+    }
+    if (pixel_shader == nullptr) {
+      // Depth-only: CreateD3D12Pipeline supplies the Mesa FSI depth-only DXIL
+      // (ROV path) or no pixel shader (host render target path). No pixel DXIL
+      // translated here.
+    } else if (use_async) {
+      // Defer the pixel SPIR-V translation, DXIL conversion and PSO creation to
+      // a creation thread.
+      runtime_description.mesa_pixel_translation = pixel_ps_translation;
+    } else {
+      // Sync mode (no creation threads): translate the pixel SPIR-V here.
+      Shader::Translation* pixel_spirv = TranslateGuestMesaSpirv(
+          guest_shader_cache_.translator(), *pixel_ps_translation,
+          /*use_try_claim=*/false);
+      if (pixel_spirv) {
+        runtime_description.mesa_pixel_dxil = ConvertGuestMesaSpirvToDxil(
+            pixel_shader->shader().ucode_data_hash(), pixel_spirv_modification,
+            pixel_spirv->translated_binary(), xenos::ShaderType::kPixel);
+      }
+      if (!runtime_description.mesa_pixel_dxil) {
+        XELOGE(
+            "spirv_to_dxil: guest pixel shader {:016X} translation failed; "
+            "skipping draw",
+            pixel_shader->shader().ucode_data_hash());
+        return false;
+      }
     }
   }
   // Built-in geometry shader (point/rect/quad expansion). Produced now on the
@@ -1372,21 +1423,12 @@ bool PipelineCache::ConfigurePipeline(
   pipelines_.emplace(hash, new_pipeline);
   COUNT_profile_set("gpu/pipeline_cache/pipelines", pipelines_.size());
 
-  // Once per unique pipeline - confirms a draw is actually rendered with the
-  // Mesa DXIL bytecode and root signature.
-  if (description.use_mesa_dxil) {
-    XELOGI(
-        "spirv_to_dxil: created Mesa render pipeline VS {:016X} PS {:016X} "
-        "(total Mesa pipelines: {})",
-        description.vertex_shader_hash, description.pixel_shader_hash,
-        ++mesa_pipeline_count_);
-  }
-
   if (use_async) {
-    // Queue for background thread. The VS is already translated in placeholder
-    // mode, so only the PS is left pending there.
+    // Queue for background thread. A real-VS placeholder has its VS translated
+    // already so only the PS is left pending; the interpreter and skip cases
+    // defer both via mesa_*_translation (BuildMesaPipelineDxil warm-up branch).
     new_pipeline->pending_vertex_shader =
-        use_placeholder ? nullptr : vertex_shader;
+        (use_placeholder && !defer_both) ? nullptr : vertex_shader;
     new_pipeline->pending_pixel_shader = pixel_shader;
     // Calculate priority based on whether shader writes to visible RTs.
     if (pixel_shader) {
@@ -1396,15 +1438,33 @@ bool PipelineCache::ConfigurePipeline(
           bound_rts, pixel_shader->shader().writes_color_targets(),
           pixel_shader->shader().writes_depth());
     }
-    if (use_placeholder) {
-      // Create a placeholder pipeline now (real VS + no-op placeholder PS) so
-      // the draw can proceed immediately. The creation thread swaps in the real
-      // pipeline when it finishes translating the PS.
-      ID3D12PipelineState* placeholder_state =
-          CreateD3D12Pipeline(runtime_description, /*as_placeholder=*/true);
+    // The skip case (defer_without_placeholder) intentionally creates no
+    // placeholder - state stays null and the draw is dropped until ready.
+    if (use_placeholder && !defer_without_placeholder) {
+      // Create a placeholder pipeline now so the draw can proceed immediately -
+      // real VS + no-op PS, or (interpreter) the ucode interpreter VS + no-op/
+      // debug PS with both real shaders deferred. The creation thread swaps in
+      // the real pipeline when translation finishes.
+      ID3D12PipelineState* placeholder_state = CreateD3D12Pipeline(
+          runtime_description, make_interpreter
+                                   ? PipelinePlaceholderMode::kInterpreter
+                                   : PipelinePlaceholderMode::kRealVertex);
       new_pipeline->state.store(placeholder_state, std::memory_order_release);
       new_pipeline->is_placeholder.store(placeholder_state != nullptr,
                                          std::memory_order_release);
+      if (make_interpreter && placeholder_state != nullptr) {
+        // The draw pins this concrete PSO and feeds interpreter constants; the
+        // real VS reads a different (packed) float layout, so it must not run
+        // against interpreter constants after a hot swap.
+        new_pipeline->placeholder_state.store(placeholder_state,
+                                              std::memory_order_release);
+        new_pipeline->uses_interpreter.store(true, std::memory_order_release);
+        XELOGI(
+            "VS interpreter placeholder created (interpreter VS + no-op PS): "
+            "VS {:016X}, PS {:016X}",
+            vertex_shader->shader().ucode_data_hash(),
+            pixel_shader ? pixel_shader->shader().ucode_data_hash() : 0);
+      }
     }
     {
       std::lock_guard<xe_mutex> lock(creation_request_lock_);
@@ -1943,8 +2003,12 @@ void PipelineCache::EnsurePipelineShadersTranslated(
 
 ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
     const PipelineRuntimeDescription& runtime_description,
-    bool as_placeholder) {
+    PipelinePlaceholderMode placeholder_mode) {
   const PipelineDescription& description = runtime_description.description;
+  bool as_interpreter =
+      placeholder_mode == PipelinePlaceholderMode::kInterpreter;
+  // Both placeholder variants substitute the no-op (or debug) pixel shader.
+  bool as_placeholder = placeholder_mode != PipelinePlaceholderMode::kNone;
 
   if (runtime_description.pixel_shader != nullptr) {
     XELOGGPU("Creating graphics pipeline with VS {:016X}, PS {:016X}",
@@ -2026,7 +2090,12 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
       // Fallback vertex shaders are not needed on Direct3D 12.
       return nullptr;
     }
-    if (runtime_description.mesa_vertex_dxil) {
+    if (as_interpreter) {
+      // Interpreter placeholder: the guest VS is deferred, so rasterize with
+      // the ucode interpreter VS (reads the guest ucode from shared memory).
+      state_desc.VS.pShaderBytecode = shaders::ucode_interpreter_vs;
+      state_desc.VS.BytecodeLength = sizeof(shaders::ucode_interpreter_vs);
+    } else if (runtime_description.mesa_vertex_dxil) {
       state_desc.VS.pShaderBytecode =
           runtime_description.mesa_vertex_dxil->data();
       state_desc.VS.BytecodeLength =
@@ -2060,8 +2129,16 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   if (as_placeholder) {
     // Hot-swap placeholder: the real pixel shader is not translated yet, so use
     // the no-op placeholder (no color output, leaves render targets untouched).
-    state_desc.PS.pShaderBytecode = shaders::placeholder_ps;
-    state_desc.PS.BytecodeLength = sizeof(shaders::placeholder_ps);
+    // Interpreter placeholders may instead use the flat-grey debug shader so
+    // the interim geometry is visible (host render target path only).
+    if (as_interpreter && cvars::async_shader_vs_interpreter_debug_color &&
+        !edram_rov_used) {
+      state_desc.PS.pShaderBytecode = shaders::placeholder_color_ps;
+      state_desc.PS.BytecodeLength = sizeof(shaders::placeholder_color_ps);
+    } else {
+      state_desc.PS.pShaderBytecode = shaders::placeholder_ps;
+      state_desc.PS.BytecodeLength = sizeof(shaders::placeholder_ps);
+    }
   } else if (runtime_description.pixel_shader != nullptr) {
     if (runtime_description.mesa_pixel_dxil) {
       // Mesa pipeline: use the Mesa DXIL.
@@ -2312,10 +2389,14 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
   // Create the D3D12 pipeline state object.
   ID3D12Device* device = command_processor_.GetD3D12Provider().GetDevice();
   ID3D12PipelineState* state;
-  auto pso_create_start = std::chrono::steady_clock::now();
+  bool profile = cvars::shader_profiling;
+  std::chrono::steady_clock::time_point pso_create_start;
+  if (profile) {
+    pso_create_start = std::chrono::steady_clock::now();
+  }
   HRESULT hr =
       device->CreateGraphicsPipelineState(&state_desc, IID_PPV_ARGS(&state));
-  if (SUCCEEDED(hr)) {
+  if (SUCCEEDED(hr) && profile) {
     // Driver DXIL->ISA compile time.
     XELOGI(
         "shader_profiling: pipeline create ({}{}) VS {:016X} PS {:016X} "

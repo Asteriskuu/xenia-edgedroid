@@ -166,7 +166,8 @@ class PipelineCache : public GuestSpirvShaderCache::Host {
       uint32_t normalized_color_mask, bool apply_polygon_offset_in_shader,
       uint32_t bound_depth_and_color_render_target_bits,
       const uint32_t* bound_depth_and_color_render_targets_formats,
-      void** pipeline_handle_out, ID3D12RootSignature** root_signature_out);
+      bool use_interpreter, void** pipeline_handle_out,
+      ID3D12RootSignature** root_signature_out);
 
   // Returns a pipeline with deferred creation by its handle. May return nullptr
   // if failed to create the pipeline or still being created asynchronously.
@@ -180,6 +181,21 @@ class PipelineCache : public GuestSpirvShaderCache::Host {
   bool IsPlaceholderPipeline(void* handle) const {
     return reinterpret_cast<const Pipeline*>(handle)->is_placeholder.load(
         std::memory_order_acquire);
+  }
+  // Loads the current pipeline state once and reports whether it is the ucode
+  // interpreter placeholder. When it is, the draw must bind this concrete PSO
+  // (not the swappable handle) and feed interpreter constants, because the real
+  // VS reads a different (packed) float constant layout.
+  ID3D12PipelineState* GetD3D12PipelineForDraw(
+      void* handle, bool* is_interpreter_placeholder_out) const {
+    const Pipeline* pipeline = reinterpret_cast<const Pipeline*>(handle);
+    ID3D12PipelineState* state =
+        pipeline->state.load(std::memory_order_acquire);
+    *is_interpreter_placeholder_out =
+        state != nullptr &&
+        state == pipeline->placeholder_state.load(std::memory_order_acquire) &&
+        pipeline->uses_interpreter.load(std::memory_order_acquire);
+    return state;
   }
   ID3D12PipelineState* AwaitD3D12PipelineByHandle(void* handle);
   // Waits until the real (non-placeholder) pipeline for the handle is ready,
@@ -428,13 +444,19 @@ class PipelineCache : public GuestSpirvShaderCache::Host {
   // guest spirv_to_dxil path. Returns nullptr on failure. Thread safe.
   const std::vector<uint8_t>* GetGuestMesaGeometryDxil(GeometryShaderKey key);
 
-  // When as_placeholder is true, builds a hot-swap placeholder PSO: the real
-  // vertex shader with the no-op placeholder pixel shader, so the pixel shader
-  // does not need to be translated yet. Only valid with a fixed (bindless)
-  // root signature.
+  // Hot-swap placeholder PSO variants, built with the fixed (bindless) Mesa
+  // root signature so the pixel (and, for the interpreter, vertex) shader need
+  // not be translated yet.
+  enum class PipelinePlaceholderMode {
+    kNone,         // Real vertex shader + real pixel shader.
+    kRealVertex,   // Real vertex shader + no-op pixel shader.
+    kInterpreter,  // Ucode interpreter vertex shader + no-op/debug pixel
+                   // shader.
+  };
   ID3D12PipelineState* CreateD3D12Pipeline(
       const PipelineRuntimeDescription& runtime_description,
-      bool as_placeholder = false);
+      PipelinePlaceholderMode placeholder_mode =
+          PipelinePlaceholderMode::kNone);
 
   D3D12CommandProcessor& command_processor_;
   const RegisterFile& register_file_;
@@ -469,9 +491,6 @@ class PipelineCache : public GuestSpirvShaderCache::Host {
   // mesa_tess_dxil_cache_: SPIR-V to DXIL conversion runs on both the main
   // thread (vertex/geometry/ tessellation) and the creation threads (pixel).
   std::mutex mesa_dxil_cache_mutex_;
-  // Running count of distinct pipelines rendered via the spirv_to_dxil path,
-  // for the diagnostic log line. Draw-thread only.
-  uint32_t mesa_pipeline_count_ = 0;
   // Mesa DXIL for the FSI depth-only pixel shader, generated once at init for
   // pixel-shader-less ROV draws. Empty if not ROV or generation failed (falls
   // back to the no-op placeholder_ps).
@@ -488,6 +507,16 @@ class PipelineCache : public GuestSpirvShaderCache::Host {
     // True while state holds a hot-swap placeholder pipeline, before the
     // creation thread swaps in the real one.
     std::atomic<bool> is_placeholder{false};
+    // True when the placeholder rasterizes with the ucode interpreter VS (so
+    // the draw must feed it full float constants + the ucode location, and pin
+    // the concrete placeholder PSO since the real VS reads a different constant
+    // layout). Only meaningful while is_placeholder.
+    std::atomic<bool> uses_interpreter{false};
+    // The placeholder PSO handle (nullptr if none). A draw loads state once and
+    // compares it against this to know whether it is about to bind the
+    // placeholder, consistent even though is_placeholder is cleared a few
+    // instructions after the real pipeline is swapped into state.
+    std::atomic<ID3D12PipelineState*> placeholder_state{nullptr};
     PipelineRuntimeDescription description;
     // For background creation: stores the untranslated shaders.
     // Background thread translates both VS and PS together, then creates the

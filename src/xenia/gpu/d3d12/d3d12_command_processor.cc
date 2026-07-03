@@ -2688,6 +2688,26 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   } else {
     bound_depth_and_color_render_target_bits = 0;
   }
+  // The ucode interpreter can rasterize a not-yet-translated vertex shader
+  // while its real shaders compile in the background (mirrors the Vulkan path).
+  // Eligible only for plain non-expanded vertex shaders with no textures /
+  // subroutines / memexport / loops, which the interpreter core handles.
+  bool use_interpreter =
+      cvars::async_shader_vs_interpreter &&
+      !vertex_shader_translation->is_translated() &&
+      active_vertex_shader_ucode_address() != 0 &&
+      primitive_processing_result.host_vertex_shader_type ==
+          Shader::HostVertexShaderType::kVertex &&
+      primitive_processing_result.host_primitive_type !=
+          xenos::PrimitiveType::kPointList &&
+      primitive_processing_result.host_primitive_type !=
+          xenos::PrimitiveType::kRectangleList &&
+      primitive_processing_result.host_primitive_type !=
+          xenos::PrimitiveType::kQuadList &&
+      vertex_shader->texture_bindings().empty() &&
+      !vertex_shader->uses_subroutine_calls() &&
+      vertex_shader->memexport_eM_written() == 0 &&
+      vertex_shader->constant_register_map().loop_bitmap == 0;
   void* pipeline_handle;
   ID3D12RootSignature* root_signature;
   if (!pipeline_cache_->ConfigurePipeline(
@@ -2695,8 +2715,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           primitive_processing_result, normalized_depth_control,
           normalized_color_mask, apply_host_depth_polygon_offset,
           bound_depth_and_color_render_target_bits,
-          bound_depth_and_color_render_target_formats, &pipeline_handle,
-          &root_signature)) {
+          bound_depth_and_color_render_target_formats, use_interpreter,
+          &pipeline_handle, &root_signature)) {
     return false;
   }
 
@@ -2727,14 +2747,27 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
       }
     } else if (pipeline_cache_->GetD3D12PipelineByHandle(pipeline_handle) ==
                nullptr) {
-      // No pipeline and no placeholder available (bindful async, or placeholder
-      // creation failed) - skip the draw until the real pipeline is ready.
+      // No pipeline and no placeholder available (async_shader_skip_draws with
+      // no interpreter stand-in, bindful async, or a failed placeholder) - skip
+      // the draw until the real pipeline is ready.
       XELOGI(
           "Skipping draw - pipeline not ready: VS {:016X} mod {:016X}, PS "
           "{:016X} mod {:016X}",
           vertex_shader->ucode_data_hash(), vertex_shader_modification.value,
           pixel_shader ? pixel_shader->ucode_data_hash() : 0,
           pixel_shader_modification.value);
+      return true;
+    }
+  }
+  // The interpreter reads the guest ucode from shared memory by its program
+  // address. A cached interpreter placeholder reused for an inline
+  // (IM_LOAD_IMMEDIATE, address 0) shader can't be fed, so skip until the real
+  // pipeline is ready rather than interpret from address 0.
+  if (active_vertex_shader_ucode_address() == 0) {
+    bool is_interpreter_placeholder = false;
+    pipeline_cache_->GetD3D12PipelineForDraw(pipeline_handle,
+                                             &is_interpreter_placeholder);
+    if (is_interpreter_placeholder) {
       return true;
     }
   }
@@ -2759,8 +2792,21 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   texture_cache_->RequestTextures(used_texture_mask);
 
   // Bind the pipeline after configuring it and doing everything that may bind
-  // other pipelines.
-  if (current_guest_pipeline_ != pipeline_handle) {
+  // other pipelines. For an interpreter placeholder, pin the concrete PSO
+  // instead of the swappable handle: the real VS reads a different (packed)
+  // float layout, so it must not run against the full-256 interpreter constants
+  // uploaded below if the real pipeline hot-swaps in before this is submitted.
+  bool interpreter_placeholder = false;
+  ID3D12PipelineState* draw_pipeline_state =
+      pipeline_cache_->GetD3D12PipelineForDraw(pipeline_handle,
+                                               &interpreter_placeholder);
+  if (interpreter_placeholder) {
+    if (current_external_pipeline_ != draw_pipeline_state) {
+      deferred_command_list_.D3DSetPipelineState(draw_pipeline_state);
+      current_external_pipeline_ = draw_pipeline_state;
+      current_guest_pipeline_ = nullptr;
+    }
+  } else if (current_guest_pipeline_ != pipeline_handle) {
     deferred_command_list_.SetPipelineStateHandle(
         reinterpret_cast<void*>(pipeline_handle));
     current_guest_pipeline_ = pipeline_handle;
@@ -2816,7 +2862,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           primitive_processing_result, viewport_info, normalized_depth_control,
           normalized_color_mask,
           apply_host_depth_polygon_offset ? &host_depth_polygon_offset
-                                          : nullptr)) {
+                                          : nullptr,
+          interpreter_placeholder)) {
     return false;
   }
   // Must not call anything that can change the descriptor heap from now on!
@@ -4151,7 +4198,8 @@ bool D3D12CommandProcessor::UpdateBindingsMesa(
     const draw_util::ViewportInfo& viewport_info,
     reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask,
-    const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset) {
+    const draw_util::HostDepthPolygonOffset* host_depth_polygon_offset,
+    bool interpreter_placeholder) {
   const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
   const RegisterFile& regs = *register_file_;
 
@@ -4230,6 +4278,17 @@ bool D3D12CommandProcessor::UpdateBindingsMesa(
   sc.vertex_index_endian = primitive_processing_result.host_shader_index_endian;
   sc.vertex_base_index = regs.Get<int32_t>(XE_GPU_REG_VGT_INDX_OFFSET);
   sc.vertex_index_count = primitive_processing_result.host_draw_vertex_count;
+
+  // Interpreter placeholder: tell the interpreter VS where the guest ucode is
+  // (dword base + CF instruction count) and make that shared memory resident.
+  if (interpreter_placeholder) {
+    uint32_t ucode_address = active_vertex_shader_ucode_address();
+    sc.interpreter_ucode_base_dwords = ucode_address >> 2;
+    sc.interpreter_cf_instr_count = vertex_shader->cf_pair_index_bound() * 2;
+    shared_memory_->RequestRange(
+        ucode_address,
+        uint32_t(vertex_shader->ucode_dword_count()) * sizeof(uint32_t));
+  }
 
   // Host normalized device coordinates.
   for (uint32_t i = 0; i < 3; ++i) {
@@ -4428,6 +4487,13 @@ bool D3D12CommandProcessor::UpdateBindingsMesa(
       }
     }
   }
+  // The interpreter placeholder needs the full 256 float4 register file (it
+  // indexes every constant by raw register index), a different layout than the
+  // packed subset, so invalidate the buffer when switching between them.
+  if (interpreter_placeholder != mesa_float_constants_vertex_full_) {
+    mesa_float_constants_vertex_full_ = interpreter_placeholder;
+    cbuffer_binding_float_vertex_.up_to_date = false;
+  }
   uint32_t float_count_pixel = 0;
   if (pixel_shader) {
     const Shader::ConstantRegisterMap& float_map_pixel =
@@ -4448,23 +4514,32 @@ bool D3D12CommandProcessor::UpdateBindingsMesa(
   }
 
   if (!cbuffer_binding_float_vertex_.up_to_date) {
+    uint32_t upload_count =
+        interpreter_placeholder ? 256u : std::max(float_count_vertex, 1u);
     uint8_t* mapping = constant_buffer_pool_->Request(
-        frame_current_, sizeof(float) * 4 * std::max(float_count_vertex, 1u),
+        frame_current_, sizeof(float) * 4 * upload_count,
         D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT, nullptr, nullptr,
         &cbuffer_binding_float_vertex_.address);
     if (!mapping) {
       return false;
     }
-    for (uint32_t i = 0; i < 4; ++i) {
-      uint64_t entry = float_map_vertex.float_bitmap[i];
-      uint32_t index;
-      while (xe::bit_scan_forward(entry, &index)) {
-        entry = xe::clear_lowest_bit(entry);
-        std::memcpy(
-            mapping,
-            &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) + (index << 2)],
-            4 * sizeof(float));
-        mapping += 4 * sizeof(float);
+    if (interpreter_placeholder) {
+      // The interpreter indexes all 256 float4 constants by raw register index,
+      // so upload the whole contiguous register file.
+      std::memcpy(mapping, &regs[XE_GPU_REG_SHADER_CONSTANT_000_X],
+                  sizeof(float) * 4 * 256);
+    } else {
+      for (uint32_t i = 0; i < 4; ++i) {
+        uint64_t entry = float_map_vertex.float_bitmap[i];
+        uint32_t index;
+        while (xe::bit_scan_forward(entry, &index)) {
+          entry = xe::clear_lowest_bit(entry);
+          std::memcpy(
+              mapping,
+              &regs[XE_GPU_REG_SHADER_CONSTANT_000_X + (i << 8) + (index << 2)],
+              4 * sizeof(float));
+          mapping += 4 * sizeof(float);
+        }
       }
     }
     cbuffer_binding_float_vertex_.up_to_date = true;

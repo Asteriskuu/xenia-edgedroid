@@ -481,6 +481,10 @@ void SpirvShaderTranslator::StartTranslation() {
       {"tessellation_vertex_index_min_max",
        offsetof(SystemConstants, tessellation_vertex_index_min_max),
        type_uint2_},
+      {"interpreter_ucode_base_dwords",
+       offsetof(SystemConstants, interpreter_ucode_base_dwords), type_uint_},
+      {"interpreter_cf_instr_count",
+       offsetof(SystemConstants, interpreter_cf_instr_count), type_uint_},
   };
   id_vector_temp_.clear();
   id_vector_temp_.reserve(xe::countof(system_constants));

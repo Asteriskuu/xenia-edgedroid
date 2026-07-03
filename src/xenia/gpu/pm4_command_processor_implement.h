@@ -1589,6 +1589,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_IM_LOAD(uint32_t packet,
   switch (shader_type) {
     case xenos::ShaderType::kVertex:
       active_vertex_shader_ = shader;
+      active_vertex_shader_ucode_address_ = addr;
       break;
     case xenos::ShaderType::kPixel:
       active_pixel_shader_ = shader;
@@ -1626,6 +1627,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_IM_LOAD_IMMEDIATE(
   switch (shader_type) {
     case xenos::ShaderType::kVertex:
       active_vertex_shader_ = shader;
+      // Embedded in the command buffer, no tracked address - the interpreter
+      // placeholder falls back to synchronous translation for these.
+      active_vertex_shader_ucode_address_ = 0;
       break;
     case xenos::ShaderType::kPixel:
       active_pixel_shader_ = shader;

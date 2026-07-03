@@ -183,6 +183,33 @@ DEFINE_bool(
     "created synchronously which causes stutter but no visual artifacts.",
     "GPU");
 
+DEFINE_bool(async_shader_vs_interpreter, true,
+            "Render new vertex shaders with the ucode interpreter while they "
+            "translate and compile in the background, instead of stalling on "
+            "translation. Requires async_shader_compilation.",
+            "GPU");
+DEFINE_bool(
+    async_shader_vs_interpreter_debug_color, false,
+    "Draw ucode interpreter VS placeholders with a flat grey pixel "
+    "shader so the interim geometry is visible (host render target path "
+    "only). Requires async_shader_vs_interpreter.",
+    "GPU");
+DEFINE_bool(
+    async_shader_skip_draws, true,
+    "Skip draws whose shaders can't render immediately via a placeholder "
+    "(no interpreter stand-in, e.g. tessellation or textured/memexport/loop "
+    "vertex shaders) until their real pipeline compiles in the background, "
+    "instead of translating them on the draw thread. Avoids stutter but the "
+    "geometry pops in a few frames later.",
+    "GPU");
+
+DEFINE_bool(
+    shader_profiling, false,
+    "Log shader translation and host pipeline (PSO) creation timings, tagged "
+    "with 'shader_profiling:'. Off by default because it logs per shader and "
+    "per pipeline.",
+    "GPU");
+
 DEFINE_bool(
     readback_resolve_half_pixel_offset, false,
     "When resolution scaling is active, sample from the center of each scaled "
