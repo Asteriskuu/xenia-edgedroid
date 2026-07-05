@@ -4319,7 +4319,7 @@ bool D3D12CommandProcessor::UpdateBindingsMesa(
   sc.tessellation_factor_range[1] =
       regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
   sc.tessellation_vertex_index_endian =
-      uint32_t(regs.Get<reg::VGT_DMA_SIZE>().swap_mode);
+      uint32_t(primitive_processing_result.host_shader_index_endian);
   sc.tessellation_vertex_index_offset = regs[XE_GPU_REG_VGT_INDX_OFFSET];
   sc.tessellation_vertex_index_min_max[0] = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
   sc.tessellation_vertex_index_min_max[1] = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];

@@ -6694,8 +6694,8 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
     dirty |= system_constants_.tessellation_factor_range[1] != tess_max;
     system_constants_.tessellation_factor_range[0] = tess_min;
     system_constants_.tessellation_factor_range[1] = tess_max;
-    uint32_t tess_vie =
-        static_cast<uint32_t>(regs.Get<reg::VGT_DMA_SIZE>().swap_mode);
+    uint32_t tess_vie = static_cast<uint32_t>(
+        primitive_processing_result.host_shader_index_endian);
     uint32_t tess_vio = regs[XE_GPU_REG_VGT_INDX_OFFSET];
     uint32_t tess_vmin = regs[XE_GPU_REG_VGT_MIN_VTX_INDX];
     uint32_t tess_vmax = regs[XE_GPU_REG_VGT_MAX_VTX_INDX];
