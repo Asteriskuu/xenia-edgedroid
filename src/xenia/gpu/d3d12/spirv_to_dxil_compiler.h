@@ -44,11 +44,14 @@ class SpirvToDxilCompiler {
   // Translates one SPIR-V module to signed DXIL for the given stage. When
   // lower_to_bindless is set, all descriptor-set resources are lowered to
   // SM 6.6 dynamic resource heap indexing (matching the Dozen driver), for the
-  // fully bindless guest path. Returns an empty vector on failure and logs the
-  // cause.
+  // fully bindless guest path. input_clip_size is the producer's clip distance
+  // count, needed by stages that read clip inputs (geometry, tessellation) so
+  // the clip / cull split matches the producer. Returns an empty vector on
+  // failure and logs the cause.
   static std::vector<uint8_t> Translate(const uint32_t* spirv_words,
                                         size_t spirv_word_count, Stage stage,
-                                        bool lower_to_bindless = false);
+                                        bool lower_to_bindless = false,
+                                        uint32_t input_clip_size = 0);
 
   // One SPIR-V stage for TranslateLinked.
   struct LinkedStage {

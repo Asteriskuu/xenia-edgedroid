@@ -890,9 +890,13 @@ const std::vector<uint8_t>* PipelineCache::GetGuestMesaGeometryDxil(
       features.spirv_version, features.denorm_flush_to_zero_float32,
       features.signed_zero_inf_nan_preserve_float32,
       features.rounding_mode_rte_float32);
+  // Producer clip count, so the isolated GS splits its clip/cull inputs where
+  // the vertex shader does. Cull planes contribute no clip inputs.
+  uint32_t input_clip_size =
+      key.user_clip_plane_cull ? 0 : key.user_clip_plane_count;
   std::vector<uint8_t> dxil = SpirvToDxilCompiler::Translate(
       spirv.data(), spirv.size(), SpirvToDxilCompiler::Stage::kGeometry,
-      /*lower_to_bindless=*/true);
+      /*lower_to_bindless=*/true, input_clip_size);
   if (dxil.empty()) {
     std::lock_guard<std::mutex> lock(mesa_dxil_cache_mutex_);
     mesa_geometry_dxil_cache_.emplace(key.key, std::vector<uint8_t>());
