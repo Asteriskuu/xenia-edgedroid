@@ -1603,10 +1603,9 @@ bool D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   uint32_t bytes_per_block = guest_format_info->bytes_per_block();
   uint32_t level_first = load_base ? 0 : 1;
   uint32_t level_last = load_mips ? texture_key.mip_max_level : 0;
-  // For scaled resolve textures, we only load level 0 from the scaled buffer -
-  // mips will be generated via compute shader after the base level is loaded.
+  // Load the guest's resolved mips from the scaled buffer, else generate them.
   uint32_t level_last_for_mip_gen = 0;
-  if (texture_resolution_scaled && level_last > 0) {
+  if (level_last > 0 && ScaledResolveMipsNeedGeneration(texture)) {
     level_last_for_mip_gen = level_last;
     level_last = 0;  // Only load base level from buffer.
   }

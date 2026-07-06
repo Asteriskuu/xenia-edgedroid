@@ -1235,10 +1235,9 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   uint32_t bytes_per_block = guest_format_info->bytes_per_block();
   uint32_t level_first = load_base ? 0 : 1;
   uint32_t level_last = load_mips ? texture_key.mip_max_level : 0;
-  // For scaled resolve textures, we only load level 0 from the scaled buffer -
-  // mips will be generated via blit.
+  // Load the guest's resolved mips from the scaled buffer, else generate them.
   uint32_t level_last_for_blit_gen = 0;
-  if (texture_key.scaled_resolve && level_last > 0) {
+  if (level_last > 0 && ScaledResolveMipsNeedGeneration(texture)) {
     level_last_for_blit_gen = level_last;
     level_last = 0;  // Only load base level from buffer
   }
@@ -1480,10 +1479,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
       write_descriptor_set_source_base.pTexelBufferView = nullptr;
     }
   }
-  // For scaled resolve textures, we don't load mips from buffers - they will
-  // be generated via blit from the base level. For unscaled textures, load
-  // mips from shared memory as usual.
-  if (level_last != 0 && !texture_key.scaled_resolve) {
+  // Set up the mips source: scaled resolve buffer or shared memory.
+  if (level_last != 0) {
     if (use_persistent_source) {
       descriptor_set_source_mips = shared_memory_persistent_descriptor_set_;
     } else {
@@ -1494,15 +1491,50 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
       if (!descriptor_set_source_mips) {
         return false;
       }
-      // Regular unscaled texture - use shared memory
-      write_descriptor_set_source_mips_buffer_info.buffer =
-          vulkan_shared_memory.buffer();
-      write_descriptor_set_source_mips_buffer_info.offset = texture_key.mip_page
-                                                            << 12;
-      // Align (primarily the last row of a linear packed mip tail) because
-      // shaders use up to 16-byte loads for multiple blocks at once.
-      write_descriptor_set_source_mips_buffer_info.range =
-          xe::align(vulkan_texture.GetGuestMipsSize(), uint32_t(16));
+      if (texture_key.scaled_resolve) {
+        // Scaled resolved mips live in the scaled buffer, like the base.
+        uint32_t guest_address = texture_key.mip_page << 12;
+        uint32_t guest_size = vulkan_texture.GetGuestMipsSize();
+        if (EnsureScaledResolveMemoryCommitted(guest_address, guest_size) &&
+            MakeScaledResolveRangeCurrent(guest_address, guest_size)) {
+          VkBuffer scaled_buffer = GetCurrentScaledResolveBuffer();
+          if (scaled_buffer != VK_NULL_HANDLE) {
+            uint32_t draw_resolution_scale_area =
+                draw_resolution_scale_x() * draw_resolution_scale_y();
+            uint64_t scaled_offset =
+                uint64_t(guest_address) * draw_resolution_scale_area;
+            uint64_t buffer_relative_offset =
+                scaled_offset - GetCurrentScaledResolveBufferBaseOffset();
+            write_descriptor_set_source_mips_buffer_info.buffer = scaled_buffer;
+            write_descriptor_set_source_mips_buffer_info.offset =
+                buffer_relative_offset;
+            write_descriptor_set_source_mips_buffer_info.range = xe::align(
+                guest_size * draw_resolution_scale_area, uint32_t(16));
+          } else {
+            XELOGE(
+                "Scaled resolve texture load: Failed to get current scaled "
+                "buffer for mips at 0x{:08X}",
+                guest_address);
+            return false;
+          }
+        } else {
+          XELOGE(
+              "Scaled resolve texture load: Failed to make range current for "
+              "mips at 0x{:08X}",
+              guest_address);
+          return false;
+        }
+      } else {
+        // Regular unscaled texture - use shared memory
+        write_descriptor_set_source_mips_buffer_info.buffer =
+            vulkan_shared_memory.buffer();
+        write_descriptor_set_source_mips_buffer_info.offset =
+            texture_key.mip_page << 12;
+        // Align (primarily the last row of a linear packed mip tail) because
+        // shaders use up to 16-byte loads for multiple blocks at once.
+        write_descriptor_set_source_mips_buffer_info.range =
+            xe::align(vulkan_texture.GetGuestMipsSize(), uint32_t(16));
+      }
       VkWriteDescriptorSet& write_descriptor_set_source_mips =
           write_descriptor_sets[write_descriptor_set_count++];
       write_descriptor_set_source_mips.sType =
