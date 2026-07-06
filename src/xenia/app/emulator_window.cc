@@ -9,6 +9,7 @@
 
 #include "xenia/app/emulator_window.h"
 
+#include "xenia/app/discord/discord_presence.h"
 #include "xenia/app/game_compat_db.h"
 #include "xenia/ui/advanced_settings_dialog_wx.h"
 #include "xenia/ui/game_list_panel_wx.h"
@@ -168,6 +169,7 @@
 DECLARE_bool(debug);
 DECLARE_path(target);
 DECLARE_bool(in_process_title_relaunch);
+DECLARE_bool(discord);
 
 DECLARE_string(hid);
 DECLARE_string(gpu);
@@ -1958,6 +1960,10 @@ void EmulatorWindow::FileClose() {
 bool EmulatorWindow::StopTitleAndReturnToList() {
   if (!emulator_->is_title_open()) {
     return false;
+  }
+  // Tear down Discord presence as the game stops, before we return to the list.
+  if (cvars::discord) {
+    discord::DiscordPresence::Shutdown();
   }
   target_pending_launch_ = false;
   // When in-process relaunch is off, spawn a fresh process with no target.
