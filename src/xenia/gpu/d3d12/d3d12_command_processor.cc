@@ -4042,6 +4042,11 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     // Queue operations done directly (like UpdateTileMappings) will be awaited
     // alongside the last submission if needed.
     queue_operations_done_since_submission_signal_ = false;
+
+    // Flush debug-layer messages per submission.
+    if (cvars::d3d12_debug) {
+      provider.LogD3D12DebugMessages();
+    }
   }
 
   if (is_closing_frame) {
