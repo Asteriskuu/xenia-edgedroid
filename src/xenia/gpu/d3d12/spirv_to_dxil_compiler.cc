@@ -136,6 +136,8 @@ dxil_spirv_runtime_conf MakeRuntimeConf(bool lower_to_bindless,
   // gl_Position is already in D3D clip space and SV_Position is a direct copy.
   // Flipping would double-invert.
   conf.yz_flip.mode = DXIL_SPIRV_YZ_FLIP_NONE;
+  // Strict IEEE float math, matching the DXC -Gis the HLSL path used.
+  conf.disable_math_refactoring = true;
   conf.shader_model_max = SHADER_MODEL_6_6;
   conf.lower_to_bindless = lower_to_bindless;
   // SpirvShaderTranslator::kDescriptorSetCount.
