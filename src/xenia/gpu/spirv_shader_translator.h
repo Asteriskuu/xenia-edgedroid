@@ -42,7 +42,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // TODO(Triang3l): Change to 0xYYYYMMDD once it's out of the rapid
     // prototyping stage (easier to do small granular updates with an
     // incremental counter).
-    static constexpr uint32_t kVersion = 14;
+    static constexpr uint32_t kVersion = 15;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -334,8 +334,19 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // memory as a dword address, and its control-flow instruction count. Zero
     // unless the interpreter is bound for this draw. Appended after the
     // tessellation tail so the static_assert offsets above are unaffected.
+    // Read as std140 uint4 [34].xy by ucode_interpreter.vs.slang.
     uint32_t interpreter_ucode_base_dwords;
     uint32_t interpreter_cf_instr_count;
+    uint32_t texture_integer_scale_pad[2];
+
+    // Integer num_format on fixed textures. Each dword packs the scale needed
+    // to turn normalized host samples back into guest integer values.
+    // bits 0:3 = component_bits - 1
+    // bit 4 = signed.
+    // Zero means no scale.
+    // Appended at the very tail (std140 uint4 [35]) so it disturbs neither the
+    // xenos_draw.glsli tessellation offsets nor the interpreter [34] slot.
+    uint32_t texture_integer_scale_bits[32];
   };
 
   // xenos_draw.glsli reads these tessellation fields from the system constants
@@ -1042,6 +1053,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     kSystemConstantTessellationVertexIndexMinMax,
     kSystemConstantInterpreterUcodeBaseDwords,
     kSystemConstantInterpreterCfInstrCount,
+    kSystemConstantTextureIntegerScaleBits,
   };
   spv::Id uniform_system_constants_;
   spv::Id uniform_float_constants_;

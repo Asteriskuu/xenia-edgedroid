@@ -4406,6 +4406,8 @@ bool D3D12CommandProcessor::UpdateBindingsMesa(
       sc.texture_swizzled_signs[texture_index >> 2] |=
           uint32_t(texture_cache_->GetActiveTextureSwizzledSigns(texture_index))
           << (8 * (texture_index & 3));
+      sc.texture_integer_scale_bits[texture_index] =
+          texture_cache_->GetActiveIntegerScaleBits(texture_index);
     }
   }
 
