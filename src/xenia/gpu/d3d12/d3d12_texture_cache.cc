@@ -13,6 +13,7 @@
 #include <cfloat>
 #include <cstddef>
 #include <cstring>
+#include <string>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
@@ -1160,6 +1161,8 @@ bool D3D12TextureCache::EnsureScaledResolveMemoryCommitted(
           "resolution scaling");
       return false;
     }
+    scaled_resolve_buffer_resource->SetName(
+        (std::wstring(L"Scaled Resolve Buffer ") + std::to_wstring(i)).c_str());
     scaled_resolve_2gb_buffers_[i] =
         std::unique_ptr<ScaledResolveVirtualBuffer>(
             new ScaledResolveVirtualBuffer(

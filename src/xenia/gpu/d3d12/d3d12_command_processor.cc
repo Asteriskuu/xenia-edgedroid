@@ -410,6 +410,7 @@ ID3D12Resource* D3D12CommandProcessor::RequestScratchGPUBuffer(
     XELOGE("Failed to create a {} MB scratch GPU buffer", size >> 20);
     return nullptr;
   }
+  buffer->SetName(L"Scratch GPU Buffer");
   if (scratch_buffer_ != nullptr) {
     resources_for_deletion_.emplace_back(GetCurrentSubmission(),
                                          scratch_buffer_);
@@ -3367,6 +3368,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
               GetCurrentSubmission(), resolve_downscale_buffer_.Detach());
         }
         resolve_downscale_buffer_.Attach(buffer);
+        resolve_downscale_buffer_->SetName(L"Resolve Downscale Buffer");
         resolve_downscale_buffer_size_ = downscale_buffer_size;
       } else {
         XELOGE("Failed to create {} MB resolve downscale buffer",

@@ -75,6 +75,7 @@ bool D3D12ZPDQueryPool::EnsureInitialized(
       Shutdown();
       return false;
     }
+    readback_buffer_->SetName(L"ZPD Occlusion Readback Buffer");
 
     D3D12_RANGE read_range = {};
     read_range.Begin = 0;
@@ -132,6 +133,7 @@ bool D3D12ZPDQueryPool::EnsureInitialized(
     XELOGW("D3D12ZPDQueryPool: Failed to allocate the ZPD ROV counter buffer.");
     return false;
   }
+  rov_counter_buffer_->SetName(L"ZPD ROV Counter Buffer");
 
   D3D12_RESOURCE_DESC readback_buffer_desc;
   ui::d3d12::util::FillBufferResourceDesc(readback_buffer_desc,
@@ -148,6 +150,7 @@ bool D3D12ZPDQueryPool::EnsureInitialized(
     rov_counter_buffer_.Reset();
     return false;
   }
+  rov_counter_readback_buffer_->SetName(L"ZPD ROV Counter Readback Buffer");
 
   D3D12_RANGE read_range = {};
   read_range.Begin = 0;

@@ -83,6 +83,7 @@ bool D3D12SharedMemory::Initialize() {
       return false;
     }
   }
+  buffer_->SetName(L"Shared Memory Buffer");
   buffer_gpu_address_ = buffer_->GetGPUVirtualAddress();
   buffer_uav_writes_commit_needed_ = false;
 
