@@ -1534,6 +1534,19 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
           spirv_version_, denorm_flush_to_zero_float32_,
           signed_zero_inf_nan_preserve_float32_, rounding_mode_rte_float32_);
 
+  // With --dump_shaders, write the built-in GS SPIR-V for signature checks.
+  if (!cvars::dump_shaders.empty() && !shader_code.empty()) {
+    std::filesystem::path dir = std::filesystem::absolute(cvars::dump_shaders);
+    std::filesystem::create_directories(dir);
+    std::filesystem::path spirv_path =
+        dir / fmt::format("shader_geometry_{:08X}.spirv.bin.geom", key.key);
+    if (FILE* spirv_file = xe::filesystem::OpenFile(spirv_path, "wb")) {
+      fwrite(shader_code.data(), sizeof(uint32_t), shader_code.size(),
+             spirv_file);
+      fclose(spirv_file);
+    }
+  }
+
   // Create the shader module, and store the handle even if creation fails not
   // to try to create it again later.
   VkShaderModule shader_module = ui::vulkan::util::CreateShaderModule(

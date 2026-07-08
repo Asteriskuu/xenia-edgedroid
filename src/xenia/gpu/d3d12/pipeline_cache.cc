@@ -905,6 +905,26 @@ const std::vector<uint8_t>* PipelineCache::GetGuestMesaGeometryDxil(
     return nullptr;
   }
 
+  // With --dump_shaders, write the built-in GS SPIR-V + DXIL for signature
+  // checks.
+  if (!cvars::dump_shaders.empty()) {
+    std::filesystem::path dir = std::filesystem::absolute(cvars::dump_shaders);
+    std::filesystem::create_directories(dir);
+    std::filesystem::path spirv_path =
+        dir / fmt::format("shader_geometry_{:08X}.spirv.bin.geom", key.key);
+    if (FILE* spirv_file = filesystem::OpenFile(spirv_path, "wb")) {
+      fwrite(spirv.data(), sizeof(unsigned int), spirv.size(), spirv_file);
+      fclose(spirv_file);
+    }
+    std::filesystem::path dxil_path =
+        dir /
+        fmt::format("shader_geometry_{:08X}.spirv_dxil.bin.geom", key.key);
+    if (FILE* dxil_file = filesystem::OpenFile(dxil_path, "wb")) {
+      fwrite(dxil.data(), 1, dxil.size(), dxil_file);
+      fclose(dxil_file);
+    }
+  }
+
   size_t dxil_size = dxil.size();
   bool newly_cached;
   const std::vector<uint8_t>* result;
