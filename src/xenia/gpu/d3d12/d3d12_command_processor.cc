@@ -5013,6 +5013,7 @@ CommandProcessor::QueryOpenResult D3D12CommandProcessor::OpenZPDQuery(
   // Clear the slot here so a recycled index never inherits old counts.
   if (zpd_active_query_is_rov_) {
     zpd_host_query_pool_->ClearROVCounter(deferred_command_list_,
+                                          GetCurrentSubmission(),
                                           zpd_active_query_index_);
     return QueryOpenResult::kOpened;
   }
@@ -5160,8 +5161,8 @@ bool D3D12CommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
 }
 
 void D3D12CommandProcessor::RecordZPDResolveBatch() {
-  zpd_host_query_pool_->FlushResolveBatch(deferred_command_list_,
-                                          submission_open_);
+  zpd_host_query_pool_->FlushResolveBatch(
+      deferred_command_list_, GetCurrentSubmission(), submission_open_);
 }
 
 void D3D12CommandProcessor::WriteGammaRampSRV(
