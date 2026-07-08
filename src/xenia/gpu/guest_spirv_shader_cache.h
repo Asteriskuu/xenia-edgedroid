@@ -121,8 +121,8 @@ class GuestSpirvShaderCache {
                                           uint64_t modification);
 
   // Built-in primitive-expansion geometry shader key (point/rect/quad). Derived
-  // from SPIR-V modifications. Shared by both backends. Each converts the
-  // SPIR-V from BuildGeometryShaderSpirv to its own bytecode.
+  // from SPIR-V modifications. Each backend builds the SPIR-V and converts it
+  // to its own bytecode.
   union GeometryShaderKey {
     uint32_t key;
     struct {
@@ -154,13 +154,6 @@ class GuestSpirvShaderCache {
                                    uint64_t vertex_shader_modification,
                                    uint64_t pixel_shader_modification,
                                    GeometryShaderKey& key_out);
-  // Builds the built-in geometry shader SPIR-V for the key, using the shared
-  // generator and this cache's translator float-control features so the stages
-  // link. user_clip_plane_count_for_build lets the caller request a fixed count
-  // (Vulkan passes 6 when any are enabled, D3D12 passes the exact count).
-  std::vector<uint32_t> BuildGeometryShaderSpirv(
-      GeometryShaderKey key, uint32_t user_clip_plane_count_for_build) const;
-
   // Each backend selects the host tessellation vertex/hull shaders itself. That
   // selection references the generated vulkan_spirv blobs, whose generation
   // links xenia-gpu, and this base-library component cannot depend on xenia-gpu

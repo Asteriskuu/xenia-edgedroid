@@ -17,7 +17,6 @@
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/render_target_cache.h"
-#include "xenia/gpu/spirv_builtin_geometry_shader.h"
 #include "xenia/gpu/spirv_shader.h"
 #include "xenia/gpu/spirv_shader_translator.h"
 
@@ -269,20 +268,6 @@ bool GuestSpirvShaderCache::GetGeometryShaderKey(
   key.has_point_coordinates = pixel_mod.pixel.param_gen_point;
   key_out = key;
   return true;
-}
-
-std::vector<uint32_t> GuestSpirvShaderCache::BuildGeometryShaderSpirv(
-    GeometryShaderKey key, uint32_t user_clip_plane_count_for_build) const {
-  // Build with the same float controls as the guest vertex/pixel shaders so the
-  // stages link.
-  const SpirvShaderTranslator::Features& features = translator_->features();
-  return BuildGuestPrimitiveGeometryShaderSpirv(
-      BuiltinGeometryShaderType(uint32_t(key.type)), key.interpolator_count,
-      user_clip_plane_count_for_build, key.user_clip_plane_cull,
-      key.has_vertex_kill_and, key.has_point_size, key.has_point_coordinates,
-      features.spirv_version, features.denorm_flush_to_zero_float32,
-      features.signed_zero_inf_nan_preserve_float32,
-      features.rounding_mode_rte_float32);
 }
 
 }  // namespace gpu
