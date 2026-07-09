@@ -159,7 +159,6 @@ void NanoSleep(int64_t ns) {
   in_nt_increments = -in_nt_increments;
   NtDelayExecutionPointer.invoke(0, &in_nt_increments);
 }
-void NanoSleepPrecise(int64_t ns) { NanoSleep(ns); }
 void SyncMemory() { MemoryBarrier(); }
 
 void Sleep(std::chrono::microseconds duration) {
@@ -169,6 +168,8 @@ void Sleep(std::chrono::microseconds duration) {
     ::Sleep(static_cast<DWORD>(duration.count() / 1000));
   }
 }
+
+void NanoSleepPrecise(int64_t ns) { NanoSleep(ns); }
 
 SleepResult AlertableSleep(std::chrono::microseconds duration) {
   if (SleepEx(static_cast<DWORD>(duration.count() / 1000), true) ==
