@@ -1922,6 +1922,8 @@ void EmulatorWindow::FileAddGames() {
       if (!changed) {
         continue;
       }
+      // A moved file reimports at its new path, so drop any now-missing ones.
+      library->PruneMissingPaths(primary.title_id);
       // STFS provides an icon; XEX/ISO don't. Only overwrite when we have one.
       if (!primary.icon_png.empty()) {
         library->SetIcon(primary.title_id, primary.icon_png);
@@ -3911,7 +3913,7 @@ std::filesystem::path EmulatorWindow::GetFilePickerInitialDirectory() const {
   // Recency from play data (newest first); the launch path from the library.
   for (const auto& title : profile_manager->ScanAllProfilesForTitles()) {
     auto* entry = game_library_->Find(title.title_id);
-    if (!entry) {
+    if (!entry || entry->paths.empty()) {
       continue;
     }
     const auto& path = entry->default_path().path;
