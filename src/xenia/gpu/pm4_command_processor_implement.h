@@ -789,6 +789,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_XE_SWAP(uint32_t packet,
   COMMAND_PROCESSOR::IssueSwap(frontbuffer_ptr, frontbuffer_width,
                                frontbuffer_height);
 
+  // Advance the present-frame counter shown in the log prefix.
+  logging::IncrementFrameNumber();
+
   // Apply host frame rate limiting (separate from guest vblank timing)
   COMMAND_PROCESSOR::ThrottlePresentation();
 

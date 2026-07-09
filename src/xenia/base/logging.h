@@ -91,6 +91,10 @@ constexpr char kPrefixCharDebug = 'd';
 void ToggleLogLevel();
 bool ShouldLog(LogLevel log_level,
                uint32_t log_mask = xe::LogSrc::Uncategorized);
+
+// Advances the present-frame counter shown in the log prefix.
+// Called once per guest present (VdSwap).
+void IncrementFrameNumber();
 namespace internal {
 
 uint32_t GetLogLevel();
