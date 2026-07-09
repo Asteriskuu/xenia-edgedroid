@@ -646,8 +646,10 @@ void EmulatorWindow::AddLaunchedTitleToLibrary(uint32_t title_id,
   if (!game_library_) {
     return;
   }
-  game_library_->AddDisc(title_id, name, emulator_->last_launch_path(),
-                         std::string());
+  const auto& launched = emulator_->last_launch_path();
+  game_library_->AddDisc(title_id, name, launched, std::string());
+  // The disc we just booted becomes the default for next launch.
+  game_library_->SetDefaultPath(title_id, launched);
 
   // Adopt the running title's icon if we have no art yet. The SPA writes it to
   // the per-title GPD on boot, so a signed-in profile has it by now.

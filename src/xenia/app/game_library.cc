@@ -241,6 +241,29 @@ bool GameLibrary::AddDisc(uint32_t title_id, const std::string& name,
   return Upsert(std::move(entry));
 }
 
+bool GameLibrary::SetDefaultPath(uint32_t title_id,
+                                 const std::filesystem::path& path) {
+  auto* existing = Find(title_id);
+  if (!existing) {
+    return false;
+  }
+  const bool present =
+      std::any_of(existing->paths.begin(), existing->paths.end(),
+                  [&](const LibraryPath& p) { return p.path == path; });
+  if (!present) {
+    return false;
+  }
+  if (existing->default_path().path == path) {
+    return true;  // already default, skip the rewrite
+  }
+
+  LibraryEntry entry = *existing;
+  for (auto& p : entry.paths) {
+    p.is_default = (p.path == path);
+  }
+  return Upsert(std::move(entry));
+}
+
 bool GameLibrary::SetIcon(uint32_t title_id, std::span<const uint8_t> png) {
   const auto dir = EntryDir(title_id);
   std::error_code ec;

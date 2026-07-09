@@ -60,6 +60,11 @@ class GameLibrary {
   bool AddDisc(uint32_t title_id, const std::string& name,
                const std::filesystem::path& path, const std::string& label);
 
+  // Promotes `path` to the title's default (double-click launch) disc and
+  // persists. No-op if it is already default. False if the title or path is
+  // unknown.
+  bool SetDefaultPath(uint32_t title_id, const std::filesystem::path& path);
+
   // Writes <root>/<title_id>/icon.png.
   bool SetIcon(uint32_t title_id, std::span<const uint8_t> png);
   std::filesystem::path IconPath(uint32_t title_id) const;
