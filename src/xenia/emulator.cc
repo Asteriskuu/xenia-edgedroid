@@ -1893,6 +1893,17 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     return result;
   }
 
+  // Expose the HDD content partition. Games that resolve saves/DLC to a raw
+  // \Device\Harddisk0\Partition1\Content path via XamContentResolve open it
+  // directly, not through the save:/dlc: symlinks. Without this the open lands
+  // on the NullDevice below and fails, so a title can never see its own
+  // existing content and keeps recreating it.
+  auto content_device = std::make_unique<vfs::HostPathDevice>(
+      "\\Device\\Harddisk0\\Partition1\\Content", content_root_, false, true);
+  if (content_device->Initialize()) {
+    file_system_->RegisterDevice(std::move(content_device));
+  }
+
   // Setup NullDevices for raw HDD partition accesses
   // Cache/STFC code baked into games tries reading/writing to these
   // By using a NullDevice that just returns success to all IO requests it
