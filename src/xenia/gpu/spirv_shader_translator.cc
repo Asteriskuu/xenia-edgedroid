@@ -1218,7 +1218,15 @@ void SpirvShaderTranslator::ProcessLabel(uint32_t cf_index) {
   new_case->addPredecessor(main_switch_header_);
   // The previous block may have already been terminated if was exece.
   if (!builder_->getBuildPoint()->isTerminated()) {
-    builder_->createBranch(new_case);
+    // Don't fall through directly into the next case block. An OpSwitch case
+    // fall-through inside the main loop makes the NVIDIA shader compiler emit a
+    // non-terminating loop. Instead re-enter the loop with this label as the
+    // program counter, like an unconditional jump to it does.
+    main_switch_next_pc_phi_operands_.push_back(
+        builder_->makeIntConstant(int(cf_index)));
+    main_switch_next_pc_phi_operands_.push_back(
+        builder_->getBuildPoint()->getId());
+    builder_->createBranch(main_loop_continue_);
   }
   function.addBlock(new_case);
   builder_->setBuildPoint(new_case);
