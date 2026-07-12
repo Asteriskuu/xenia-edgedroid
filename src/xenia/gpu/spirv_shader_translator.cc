@@ -707,6 +707,9 @@ void SpirvShaderTranslator::StartTranslation() {
     var_main_vfetch_address_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassFunction, type_int_,
         "xe_var_vfetch_address", const_int_0_);
+    var_main_vfetch_bound_ = builder_->createVariable(
+        spv::NoPrecision, spv::StorageClassFunction, type_int_,
+        "xe_var_vfetch_bound", const_int_0_);
     var_main_tfetch_lod_ = builder_->createVariable(
         spv::NoPrecision, spv::StorageClassFunction, type_float_,
         "xe_var_tfetch_lod", const_float_0_);
@@ -1591,6 +1594,7 @@ void SpirvShaderTranslator::ResetUcodeInvocationStateInMain() {
   builder_->createStore(const_int4_0_, var_main_loop_address_);
   builder_->createStore(const_float_0_, var_main_previous_scalar_);
   builder_->createStore(const_int_0_, var_main_vfetch_address_);
+  builder_->createStore(const_int_0_, var_main_vfetch_bound_);
   builder_->createStore(const_float_0_, var_main_tfetch_lod_);
   builder_->createStore(const_float3_0_, var_main_tfetch_gradients_h_);
   builder_->createStore(const_float3_0_, var_main_tfetch_gradients_v_);
