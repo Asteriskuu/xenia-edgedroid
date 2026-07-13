@@ -55,6 +55,11 @@ class VulkanSharedMemory : public SharedMemory {
 
   VkBuffer buffer() const { return buffer_; }
 
+  // True when the buffer aliases guest RAM directly
+  // (VK_EXT_external_memory_host import). Uploads and memexport readback copies
+  // are then unnecessary.
+  bool is_zero_copy() const { return zero_copy_; }
+
   // Returns true if any downloads were submitted to the command processor.
   bool InitializeTraceSubmitDownloads();
   void InitializeTraceCompleteDownloads();
@@ -74,10 +79,17 @@ class VulkanSharedMemory : public SharedMemory {
   TraceWriter& trace_writer_;
   VkPipelineStageFlags guest_shader_pipeline_stages_;
 
+  // Attempts to alias guest RAM as the buffer via VK_EXT_external_memory_host.
+  // Returns true on success (buffer_ and buffer_memory_ populated, zero_copy_
+  // set); false to fall back to the normal device-local path.
+  bool TryInitializeZeroCopy();
+
   VkBuffer buffer_ = VK_NULL_HANDLE;
   uint32_t buffer_memory_type_;
   // Single for non-sparse, every allocation so far for sparse.
   std::vector<VkDeviceMemory> buffer_memory_;
+  // Buffer memory is imported guest RAM - no uploads or readback copies needed.
+  bool zero_copy_ = false;
 
   Usage last_usage_;
   std::pair<uint32_t, uint32_t> last_written_range_;

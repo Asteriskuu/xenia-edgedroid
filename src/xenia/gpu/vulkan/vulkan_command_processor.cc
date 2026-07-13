@@ -3763,8 +3763,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       memexport_range.size_bytes);
   }
 
-  // CPU readback for memexport data (if enabled).
-  if (GetGPUSetting(GPUSetting::ReadbackMemexport) &&
+  // CPU readback for memexport data (if enabled). Skipped entirely under
+  // zero-copy: the buffer aliases guest RAM, so memexport output is already
+  // visible to the guest with no copy - matching the Metal backend, which does
+  // no per-draw readback. A per-draw completion drain here corrupts mid-frame
+  // render state (and the double-buffer copy would clobber the GPU-written
+  // guest RAM), so do neither.
+  if (!shared_memory_->is_zero_copy() &&
+      GetGPUSetting(GPUSetting::ReadbackMemexport) &&
       !memexport_ranges_.empty()) {
     // Calculate total size of all memexport ranges.
     uint32_t memexport_total_size = 0;

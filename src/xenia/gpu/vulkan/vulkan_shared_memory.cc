@@ -28,6 +28,14 @@ DEFINE_bool(vulkan_sparse_shared_memory, true,
             "work.",
             "Vulkan");
 
+DEFINE_bool(vulkan_shared_memory_zero_copy, false,
+            "Alias guest RAM as the shared-memory buffer via "
+            "VK_EXT_external_memory_host so memexport output and guest-built "
+            "indices are shared with the GPU without upload/readback copies, "
+            "matching the Metal backend. Fast on unified-memory GPUs; on "
+            "discrete GPUs shared-memory fetches cross PCIe and are slow.",
+            "Vulkan");
+
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -52,6 +60,19 @@ bool VulkanSharedMemory::Initialize() {
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
+
+  // Zero-copy: alias guest RAM as the buffer. On success the buffer is a single
+  // fully-resident non-sparse allocation backed by guest RAM, so the normal
+  // sparse/device-local paths below are skipped.
+  if (cvars::vulkan_shared_memory_zero_copy && TryInitializeZeroCopy()) {
+    last_usage_ = Usage::kTransferDestination;
+    last_written_range_ = std::make_pair<uint32_t, uint32_t>(0, 0);
+    upload_buffer_pool_ = std::make_unique<ui::vulkan::VulkanUploadBufferPool>(
+        vulkan_device, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        xe::align(ui::vulkan::VulkanUploadBufferPool::kDefaultPageSize,
+                  size_t(1) << page_size_log2()));
+    return true;
+  }
 
   const VkBufferCreateFlags sparse_flags =
       VK_BUFFER_CREATE_SPARSE_BINDING_BIT |
@@ -203,6 +224,138 @@ bool VulkanSharedMemory::Initialize() {
   return true;
 }
 
+bool VulkanSharedMemory::TryInitializeZeroCopy() {
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  PFN_vkGetMemoryHostPointerPropertiesEXT get_host_pointer_properties =
+      vulkan_device->vkGetMemoryHostPointerPropertiesEXT();
+  if (!vulkan_device->extensions().ext_EXT_external_memory_host ||
+      !get_host_pointer_properties) {
+    XELOGI(
+        "Shared memory zero-copy: VK_EXT_external_memory_host not available");
+    return false;
+  }
+
+  void* const guest_ram = memory().TranslatePhysical(0);
+  if (!guest_ram) {
+    XELOGE("Shared memory zero-copy: guest RAM is null");
+    return false;
+  }
+
+  // The host pointer and the imported size must both be aligned to the import
+  // granularity.
+  VkDeviceSize import_alignment =
+      vulkan_device->properties().minImportedHostPointerAlignment;
+  if (import_alignment == 0) {
+    import_alignment = 1;
+  }
+  if ((reinterpret_cast<uintptr_t>(guest_ram) % import_alignment) != 0 ||
+      (VkDeviceSize(kBufferSize) % import_alignment) != 0) {
+    XELOGI(
+        "Shared memory zero-copy: guest RAM 0x{:X} not aligned to import "
+        "granularity {}",
+        reinterpret_cast<uintptr_t>(guest_ram), import_alignment);
+    return false;
+  }
+
+  // Which memory types can back this exact host pointer.
+  VkMemoryHostPointerPropertiesEXT host_pointer_properties = {
+      VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+  if (get_host_pointer_properties(
+          device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+          guest_ram, &host_pointer_properties) != VK_SUCCESS) {
+    XELOGI(
+        "Shared memory zero-copy: vkGetMemoryHostPointerPropertiesEXT failed");
+    return false;
+  }
+
+  // A plain non-sparse buffer to bind the imported memory to.
+  const uint32_t transfer_family = vulkan_device->queue_family_transfer();
+  const uint32_t concurrent_queue_families[2] = {
+      vulkan_device->queue_family_graphics_compute(), transfer_family};
+  VkBufferCreateInfo buffer_create_info;
+  buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  buffer_create_info.pNext = nullptr;
+  buffer_create_info.flags = 0;
+  buffer_create_info.size = kBufferSize;
+  buffer_create_info.usage =
+      VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+  if (transfer_family != UINT32_MAX) {
+    buffer_create_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+    buffer_create_info.queueFamilyIndexCount = 2;
+    buffer_create_info.pQueueFamilyIndices = concurrent_queue_families;
+  } else {
+    buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    buffer_create_info.queueFamilyIndexCount = 0;
+    buffer_create_info.pQueueFamilyIndices = nullptr;
+  }
+  if (dfn.vkCreateBuffer(device, &buffer_create_info, nullptr, &buffer_) !=
+      VK_SUCCESS) {
+    XELOGE("Shared memory zero-copy: failed to create the buffer");
+    buffer_ = VK_NULL_HANDLE;
+    return false;
+  }
+
+  VkMemoryRequirements buffer_memory_requirements;
+  dfn.vkGetBufferMemoryRequirements(device, buffer_,
+                                    &buffer_memory_requirements);
+
+  // The memory type must satisfy the buffer, accept the host pointer, and be
+  // host-visible + host-coherent so guest and GPU observe the same bytes.
+  const uint32_t memory_type_bits = buffer_memory_requirements.memoryTypeBits &
+                                    host_pointer_properties.memoryTypeBits &
+                                    vulkan_device->memory_types().host_visible &
+                                    vulkan_device->memory_types().host_coherent;
+  if (!xe::bit_scan_forward(memory_type_bits, &buffer_memory_type_)) {
+    XELOGI(
+        "Shared memory zero-copy: no host-visible coherent memory type accepts "
+        "the guest RAM pointer");
+    dfn.vkDestroyBuffer(device, buffer_, nullptr);
+    buffer_ = VK_NULL_HANDLE;
+    return false;
+  }
+
+  VkImportMemoryHostPointerInfoEXT import_info;
+  import_info.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT;
+  import_info.pNext = nullptr;
+  import_info.handleType =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+  import_info.pHostPointer = guest_ram;
+
+  VkMemoryAllocateInfo memory_allocate_info;
+  memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  memory_allocate_info.pNext = &import_info;
+  memory_allocate_info.allocationSize = kBufferSize;
+  memory_allocate_info.memoryTypeIndex = buffer_memory_type_;
+
+  VkDeviceMemory buffer_memory;
+  if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr,
+                           &buffer_memory) != VK_SUCCESS) {
+    XELOGE("Shared memory zero-copy: failed to import {} MB of guest RAM",
+           kBufferSize >> 20);
+    dfn.vkDestroyBuffer(device, buffer_, nullptr);
+    buffer_ = VK_NULL_HANDLE;
+    return false;
+  }
+
+  if (dfn.vkBindBufferMemory(device, buffer_, buffer_memory, 0) != VK_SUCCESS) {
+    XELOGE("Shared memory zero-copy: failed to bind imported memory");
+    dfn.vkFreeMemory(device, buffer_memory, nullptr);
+    dfn.vkDestroyBuffer(device, buffer_, nullptr);
+    buffer_ = VK_NULL_HANDLE;
+    return false;
+  }
+  buffer_memory_.push_back(buffer_memory);
+
+  zero_copy_ = true;
+  XELOGI("Shared memory: using zero-copy guest RAM aliasing");
+  return true;
+}
+
 void VulkanSharedMemory::Shutdown(bool from_destructor) {
   ResetTraceDownload();
 
@@ -218,6 +371,7 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
     dfn.vkFreeMemory(device, memory, nullptr);
   }
   buffer_memory_.clear();
+  zero_copy_ = false;
 
   // If calling from the destructor, the SharedMemory destructor will call
   // ShutdownCommon.
@@ -401,6 +555,19 @@ bool VulkanSharedMemory::UploadRanges(
     const std::pair<uint32_t, uint32_t>* upload_page_ranges,
     uint32_t num_upload_ranges) {
   if (!num_upload_ranges) {
+    return true;
+  }
+
+  if (zero_copy_) {
+    // The buffer aliases guest RAM - nothing to copy, just mark the pages valid
+    // so RequestRange stops asking to upload them.
+    for (uint32_t i = 0; i < num_upload_ranges; ++i) {
+      trace_writer_.WriteMemoryRead(
+          upload_page_ranges[i].first << page_size_log2(),
+          upload_page_ranges[i].second << page_size_log2());
+      MakeRangeValid(upload_page_ranges[i].first << page_size_log2(),
+                     upload_page_ranges[i].second << page_size_log2(), false);
+    }
     return true;
   }
 
