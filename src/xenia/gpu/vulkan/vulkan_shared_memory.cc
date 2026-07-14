@@ -278,13 +278,21 @@ bool VulkanSharedMemory::CreateImportedGuestRamBuffer(
     return false;
   }
 
-  // A plain non-sparse buffer to bind the imported memory to.
+  // A plain non-sparse buffer to bind the imported memory to. It must declare
+  // the external handle type it will be bound to, or vkBindBufferMemory is
+  // invalid (VUID-vkBindBufferMemory-memory-02985).
   const uint32_t transfer_family = vulkan_device->queue_family_transfer();
   const uint32_t concurrent_queue_families[2] = {
       vulkan_device->queue_family_graphics_compute(), transfer_family};
+  VkExternalMemoryBufferCreateInfo external_memory_buffer_create_info;
+  external_memory_buffer_create_info.sType =
+      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+  external_memory_buffer_create_info.pNext = nullptr;
+  external_memory_buffer_create_info.handleTypes =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
   VkBufferCreateInfo buffer_create_info;
   buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  buffer_create_info.pNext = nullptr;
+  buffer_create_info.pNext = &external_memory_buffer_create_info;
   buffer_create_info.flags = 0;
   buffer_create_info.size = kBufferSize;
   buffer_create_info.usage =
