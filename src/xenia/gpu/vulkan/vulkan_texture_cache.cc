@@ -1214,6 +1214,22 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
   }
   const LoadShaderInfo& load_shader_info = GetLoadShaderInfo(load_shader);
 
+  // Memexport-generated textures have their source in the host-imported buffer
+  // (guest RAM); the load below reads the device buffer, so copy the sampled
+  // range across first. A no-op for normal textures and non-memexport ranges.
+  // Scaled-resolve textures read from separate scaled buffers, not shared
+  // memory, so they are unaffected.
+  if (!texture_key.scaled_resolve) {
+    if (load_base) {
+      command_processor_.EnsureMemexportRangeInDeviceBuffer(
+          texture_key.base_page << 12, vulkan_texture.GetGuestBaseSize());
+    }
+    if (load_mips) {
+      command_processor_.EnsureMemexportRangeInDeviceBuffer(
+          texture_key.mip_page << 12, vulkan_texture.GetGuestMipsSize());
+    }
+  }
+
   // Get the guest layout.
   const texture_util::TextureGuestLayout& guest_layout =
       vulkan_texture.guest_layout();

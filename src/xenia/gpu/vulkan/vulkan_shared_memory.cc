@@ -221,10 +221,15 @@ bool VulkanSharedMemory::Initialize() {
       xe::align(ui::vulkan::VulkanUploadBufferPool::kDefaultPageSize,
                 size_t(1) << page_size_log2()));
 
+  // Second (host-imported) buffer for memexport-touching draws on the
+  // device-local path, so their output stays coherent with the CPU.
+  TryInitializeHostBuffer();
+
   return true;
 }
 
-bool VulkanSharedMemory::TryInitializeZeroCopy() {
+bool VulkanSharedMemory::CreateImportedGuestRamBuffer(
+    VkBuffer& out_buffer, VkDeviceMemory& out_memory) {
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -235,13 +240,13 @@ bool VulkanSharedMemory::TryInitializeZeroCopy() {
   if (!vulkan_device->extensions().ext_EXT_external_memory_host ||
       !get_host_pointer_properties) {
     XELOGI(
-        "Shared memory zero-copy: VK_EXT_external_memory_host not available");
+        "Shared memory host import: VK_EXT_external_memory_host not available");
     return false;
   }
 
   void* const guest_ram = memory().TranslatePhysical(0);
   if (!guest_ram) {
-    XELOGE("Shared memory zero-copy: guest RAM is null");
+    XELOGE("Shared memory host import: guest RAM is null");
     return false;
   }
 
@@ -255,7 +260,7 @@ bool VulkanSharedMemory::TryInitializeZeroCopy() {
   if ((reinterpret_cast<uintptr_t>(guest_ram) % import_alignment) != 0 ||
       (VkDeviceSize(kBufferSize) % import_alignment) != 0) {
     XELOGI(
-        "Shared memory zero-copy: guest RAM 0x{:X} not aligned to import "
+        "Shared memory host import: guest RAM 0x{:X} not aligned to import "
         "granularity {}",
         reinterpret_cast<uintptr_t>(guest_ram), import_alignment);
     return false;
@@ -268,7 +273,8 @@ bool VulkanSharedMemory::TryInitializeZeroCopy() {
           device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
           guest_ram, &host_pointer_properties) != VK_SUCCESS) {
     XELOGI(
-        "Shared memory zero-copy: vkGetMemoryHostPointerPropertiesEXT failed");
+        "Shared memory host import: vkGetMemoryHostPointerPropertiesEXT "
+        "failed");
     return false;
   }
 
@@ -293,15 +299,15 @@ bool VulkanSharedMemory::TryInitializeZeroCopy() {
     buffer_create_info.queueFamilyIndexCount = 0;
     buffer_create_info.pQueueFamilyIndices = nullptr;
   }
-  if (dfn.vkCreateBuffer(device, &buffer_create_info, nullptr, &buffer_) !=
+  VkBuffer buffer;
+  if (dfn.vkCreateBuffer(device, &buffer_create_info, nullptr, &buffer) !=
       VK_SUCCESS) {
-    XELOGE("Shared memory zero-copy: failed to create the buffer");
-    buffer_ = VK_NULL_HANDLE;
+    XELOGE("Shared memory host import: failed to create the buffer");
     return false;
   }
 
   VkMemoryRequirements buffer_memory_requirements;
-  dfn.vkGetBufferMemoryRequirements(device, buffer_,
+  dfn.vkGetBufferMemoryRequirements(device, buffer,
                                     &buffer_memory_requirements);
 
   // The memory type must satisfy the buffer, accept the host pointer, and be
@@ -310,12 +316,12 @@ bool VulkanSharedMemory::TryInitializeZeroCopy() {
                                     host_pointer_properties.memoryTypeBits &
                                     vulkan_device->memory_types().host_visible &
                                     vulkan_device->memory_types().host_coherent;
-  if (!xe::bit_scan_forward(memory_type_bits, &buffer_memory_type_)) {
+  uint32_t memory_type;
+  if (!xe::bit_scan_forward(memory_type_bits, &memory_type)) {
     XELOGI(
-        "Shared memory zero-copy: no host-visible coherent memory type accepts "
-        "the guest RAM pointer");
-    dfn.vkDestroyBuffer(device, buffer_, nullptr);
-    buffer_ = VK_NULL_HANDLE;
+        "Shared memory host import: no host-visible coherent memory type "
+        "accepts the guest RAM pointer");
+    dfn.vkDestroyBuffer(device, buffer, nullptr);
     return false;
   }
 
@@ -330,30 +336,51 @@ bool VulkanSharedMemory::TryInitializeZeroCopy() {
   memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   memory_allocate_info.pNext = &import_info;
   memory_allocate_info.allocationSize = kBufferSize;
-  memory_allocate_info.memoryTypeIndex = buffer_memory_type_;
+  memory_allocate_info.memoryTypeIndex = memory_type;
 
-  VkDeviceMemory buffer_memory;
-  if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr,
-                           &buffer_memory) != VK_SUCCESS) {
-    XELOGE("Shared memory zero-copy: failed to import {} MB of guest RAM",
+  VkDeviceMemory memory;
+  if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr, &memory) !=
+      VK_SUCCESS) {
+    XELOGE("Shared memory host import: failed to import {} MB of guest RAM",
            kBufferSize >> 20);
-    dfn.vkDestroyBuffer(device, buffer_, nullptr);
-    buffer_ = VK_NULL_HANDLE;
+    dfn.vkDestroyBuffer(device, buffer, nullptr);
     return false;
   }
 
-  if (dfn.vkBindBufferMemory(device, buffer_, buffer_memory, 0) != VK_SUCCESS) {
-    XELOGE("Shared memory zero-copy: failed to bind imported memory");
-    dfn.vkFreeMemory(device, buffer_memory, nullptr);
-    dfn.vkDestroyBuffer(device, buffer_, nullptr);
+  if (dfn.vkBindBufferMemory(device, buffer, memory, 0) != VK_SUCCESS) {
+    XELOGE("Shared memory host import: failed to bind imported memory");
+    dfn.vkFreeMemory(device, memory, nullptr);
+    dfn.vkDestroyBuffer(device, buffer, nullptr);
+    return false;
+  }
+
+  out_buffer = buffer;
+  out_memory = memory;
+  return true;
+}
+
+bool VulkanSharedMemory::TryInitializeZeroCopy() {
+  VkDeviceMemory buffer_memory;
+  if (!CreateImportedGuestRamBuffer(buffer_, buffer_memory)) {
     buffer_ = VK_NULL_HANDLE;
     return false;
   }
   buffer_memory_.push_back(buffer_memory);
-
   zero_copy_ = true;
   XELOGI("Shared memory: using zero-copy guest RAM aliasing");
   return true;
+}
+
+void VulkanSharedMemory::TryInitializeHostBuffer() {
+  // A second, host-imported (guest RAM) buffer used only for memexport-touching
+  // draws while the main buffer stays fast device-local. Non-sparse, so it can
+  // accept host memory where the sparse buffer can't.
+  if (!CreateImportedGuestRamBuffer(host_buffer_, host_buffer_memory_)) {
+    host_buffer_ = VK_NULL_HANDLE;
+    host_buffer_memory_ = VK_NULL_HANDLE;
+    return;
+  }
+  XELOGI("Shared memory: host buffer for memexport ranges ready");
 }
 
 void VulkanSharedMemory::Shutdown(bool from_destructor) {
@@ -372,6 +399,10 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
   }
   buffer_memory_.clear();
   zero_copy_ = false;
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                         host_buffer_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                         host_buffer_memory_);
 
   // If calling from the destructor, the SharedMemory destructor will call
   // ShutdownCommon.
@@ -421,6 +452,16 @@ void VulkanSharedMemory::Use(Usage usage,
         buffer_, offset, size, src_stage_mask, dst_stage_mask, src_access_mask,
         dst_access_mask, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
         false);
+    // Memexport-touching draws are routed to the host-imported buffer, so their
+    // writes and the reads that consume them go through host_buffer_, not
+    // buffer_. Mirror the same ordering barrier onto it so those GPU
+    // write->read dependencies are synchronized too.
+    if (host_buffer_ != VK_NULL_HANDLE) {
+      command_processor_.PushBufferMemoryBarrier(
+          host_buffer_, offset, size, src_stage_mask, dst_stage_mask,
+          src_access_mask, dst_access_mask, VK_QUEUE_FAMILY_IGNORED,
+          VK_QUEUE_FAMILY_IGNORED, false);
+    }
   }
   last_written_range_ = written_range;
 }

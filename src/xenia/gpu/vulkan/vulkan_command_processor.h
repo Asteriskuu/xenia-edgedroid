@@ -215,6 +215,15 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // render pass will also be closed.
   bool SubmitBarriers(bool force_end_render_pass);
 
+  // If [base_bytes, base_bytes + size_bytes) holds memexport output (which
+  // under two-buffer routing lives in the host-imported buffer aliasing guest
+  // RAM), copies it into the device-local buffer so a following device-buffer
+  // read - a texture load - sees it. No-op for non-memexport ranges (already in
+  // the device buffer) and when the host buffer is unavailable. Called by the
+  // texture cache before loading a texture. Ends the render pass.
+  void EnsureMemexportRangeInDeviceBuffer(uint32_t base_bytes,
+                                          uint32_t size_bytes);
+
   // If not started yet, begins a render pass from the render target cache.
   // Submission must be open.
   void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
@@ -304,8 +313,14 @@ class VulkanCommandProcessor final : public CommandProcessor {
                  bool major_mode_explicit) override;
   bool IssueCopy() override;
 
-  void IssueDraw_MemexportReadbackFullPath(uint32_t memexport_total_size);
-  void IssueDraw_MemexportReadbackFastPath(uint32_t memexport_total_size);
+  // Two-buffer memexport routing helpers. Track and test the guest pages any
+  // memexport draw has written so geometry draws consuming that output can be
+  // routed to read the host-imported buffer directly. See
+  // memexport_written_pages_.
+  void MarkMemexportPagesWritten(uint32_t base_bytes, uint32_t size_bytes);
+  bool IsMemexportRange(uint32_t base_bytes, uint32_t size_bytes) const;
+  bool VertexFetchInMemexportRange(const RegisterFile& regs,
+                                   const VulkanShader& vertex_shader) const;
 
   void InitializeTrace() override;
 
@@ -451,9 +466,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
     return !submission_open_ &&
            GetCompletedSubmission() + 1u >= GetCurrentSubmission();
   }
-
-  // Requests a readback buffer for CPU access to GPU data.
-  VkBuffer RequestReadbackBuffer(uint32_t size);
 
   void ClearTransientDescriptorPools();
 
@@ -697,6 +709,28 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   VkDescriptorPool shared_memory_and_edram_descriptor_pool_ = VK_NULL_HANDLE;
   VkDescriptorSet shared_memory_and_edram_descriptor_set_;
+  // Second set identical to the one above except binding 0 points at the
+  // host-imported shared-memory buffer (aliasing guest RAM). Bound instead of
+  // the device set for memexport-touching draws so their GPU-written geometry
+  // stays coherent with the CPU. VK_NULL_HANDLE when the host buffer is
+  // unavailable - routing is then disabled and every draw uses the device set.
+  VkDescriptorSet shared_memory_host_and_edram_descriptor_set_ = VK_NULL_HANDLE;
+  // Guest pages (4 KB) that any memexport draw has written, at their host
+  // buffer offsets. Used to route geometry draws that consume the output to
+  // read host_buffer_. Never cleared - over-routing a repurposed page only
+  // costs performance, never correctness.
+  static constexpr uint32_t kMemexportPageCount =
+      SharedMemory::kBufferSize >> 12;
+  std::array<uint64_t, kMemexportPageCount / 64> memexport_written_pages_{};
+  // Cleared until the first memexport draw, so consumer-side routing checks are
+  // skipped entirely for titles that never memexport.
+  bool any_memexport_pages_written_ = false;
+  // Inclusive min/max written memexport page, so IsMemexportRange can reject a
+  // range outside the memexport region in O(1) - without this the per-page scan
+  // runs for every texture load even in titles that do memexport. Empty
+  // (min > max) until the first memexport draw.
+  uint32_t memexport_written_page_min_ = kMemexportPageCount;
+  uint32_t memexport_written_page_max_ = 0;
 
   // Bytes 0x0...0x3FF - 256-entry gamma ramp table with B10G10R10X2 data (read
   // as R10G10B10X2 with swizzle).
@@ -985,15 +1019,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
   std::vector<VkSemaphore> transfer_wait_semaphores_free_;
   std::deque<std::pair<uint64_t, VkSemaphore>>
       transfer_wait_semaphores_in_flight_;
-
-  // Simple single buffer for memexport (full mode - always syncs, no
-  // double-buffering)
-  VkBuffer memexport_readback_buffer_ = VK_NULL_HANDLE;
-  VkDeviceMemory memexport_readback_buffer_memory_ = VK_NULL_HANDLE;
-  uint32_t memexport_readback_buffer_size_ = 0;
-
-  // Per-memexport double-buffered readback for fast mode (delayed sync)
-  std::unordered_map<uint64_t, ReadbackBuffer> memexport_readback_buffers_;
 
   // Debug marker support for RenderDoc/debug tools.
   bool debug_markers_enabled_ = false;
