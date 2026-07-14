@@ -1741,12 +1741,12 @@ void SpirvShaderTranslator::FSI_LoadSampleMask(spv::Id msaa_samples) {
                                 input_sample_mask_value),
         builder_->makeUintConstant(32 - 2));
   } else {
-    // 0 and 3 to 0 and 1.
+    // 0 and 3 to 0 and 1 - guest sample 1 comes from host sample 3
     sample_mask_2x = builder_->createQuadOp(
         spv::OpBitFieldInsert, type_uint_, input_sample_mask_value,
         builder_->createTriOp(spv::OpBitFieldUExtract, type_uint_,
-                              input_sample_mask_value, const_uint_2,
-                              const_uint_1),
+                              input_sample_mask_value,
+                              builder_->makeUintConstant(3), const_uint_1),
         const_uint_1, builder_->makeUintConstant(32 - 1));
   }
   builder_->createBranch(&block_msaa_merge);
