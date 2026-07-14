@@ -645,6 +645,22 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
             block_rt_0_alpha_tests_rt_written_head->getId());
         main_fsi_sample_mask_ =
             builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
+      } else if (edram_fragment_shader_interlock_) {
+        // Demote path: the alpha test demotes instead of touching the mask, but
+        // alpha to coverage still modified main_fsi_sample_mask_ inside the
+        // written branch. Merge in the pre-branch mask
+        // (fsi_sample_mask_in_rt_0_alpha_tests) on the not-written edge so the
+        // value dominates the merge. Otherwise it is undefined there (invalid
+        // SPIR-V dominance and garbage coverage).
+        id_vector_temp_.clear();
+        id_vector_temp_.push_back(main_fsi_sample_mask_);
+        id_vector_temp_.push_back(
+            block_rt_0_alpha_tests_rt_written_end.getId());
+        id_vector_temp_.push_back(fsi_sample_mask_in_rt_0_alpha_tests);
+        id_vector_temp_.push_back(
+            block_rt_0_alpha_tests_rt_written_head->getId());
+        main_fsi_sample_mask_ =
+            builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
       }
     }
   }
