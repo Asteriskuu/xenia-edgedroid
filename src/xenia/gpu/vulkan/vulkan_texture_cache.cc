@@ -1787,10 +1787,17 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
     copy_region.imageOffset.x = 0;
     copy_region.imageOffset.y = 0;
     copy_region.imageOffset.z = 0;
-    copy_region.imageExtent.width =
-        std::max((width * texture_resolution_scale_x) >> level, UINT32_C(1));
-    copy_region.imageExtent.height =
-        std::max((height * texture_resolution_scale_y) >> level, UINT32_C(1));
+    // The image mip is scale-then-reduce (max((dim*scale)>>level,1)) while the
+    // buffer footprint (bufferRowLength/bufferImageHeight) is
+    // reduce-then-scale, so for the deepest mips of scaled textures the mip can
+    // be a row or column larger than the buffer holds. Clamp the copy extent to
+    // the footprint so the GPU never reads past the buffer.
+    copy_region.imageExtent.width = std::min(
+        std::max((width * texture_resolution_scale_x) >> level, UINT32_C(1)),
+        copy_region.bufferRowLength);
+    copy_region.imageExtent.height = std::min(
+        std::max((height * texture_resolution_scale_y) >> level, UINT32_C(1)),
+        copy_region.bufferImageHeight);
     copy_region.imageExtent.depth = std::max(depth >> level, UINT32_C(1));
   }
 
