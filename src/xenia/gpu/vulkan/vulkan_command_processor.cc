@@ -2500,15 +2500,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     }
   }
 
-  // End current render pass/rendering if active.
-  if (in_render_pass_) {
-    if (use_dynamic_rendering) {
-      deferred_command_buffer_.CmdVkEndRendering();
-    } else {
-      deferred_command_buffer_.CmdVkEndRenderPass();
-    }
-    in_render_pass_ = false;
-  }
+  // End current render pass/rendering if active, via EndRenderPass so any open
+  // occlusion query segment is closed first. A query begun inside the pass must
+  // be ended before the pass is.
+  EndRenderPass();
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
@@ -2596,15 +2591,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     }
   }
 
-  // End current render pass/rendering if active.
-  if (in_render_pass_) {
-    if (use_dynamic_rendering) {
-      deferred_command_buffer_.CmdVkEndRendering();
-    } else {
-      deferred_command_buffer_.CmdVkEndRenderPass();
-    }
-    in_render_pass_ = false;
-  }
+  // End current render pass/rendering if active, via EndRenderPass so any open
+  // occlusion query segment is closed first. A query begun inside the pass must
+  // be ended before the pass is.
+  EndRenderPass();
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
