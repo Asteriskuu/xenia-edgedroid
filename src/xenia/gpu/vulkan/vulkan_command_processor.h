@@ -958,17 +958,26 @@ class VulkanCommandProcessor final : public CommandProcessor {
     VkDeviceMemory memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     uint32_t sizes[2] = {0, 0};
     void* mapped_data[2] = {nullptr, nullptr};  // Persistent mappings
+    // Device-local snapshot of the resolved region, filled by the graphics
+    // queue so the transfer copy reads it instead of shared memory a later
+    // resolve would overwrite. One per slot, paired with buffers[].
+    VkBuffer snapshot_buffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory snapshot_memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    uint32_t snapshot_sizes[2] = {0, 0};
+    // Transfer submission that filled buffers[i]. The CPU read of buffers[i]
+    // and the graphics reuse of snapshot_buffers[i] wait on it. 0 = none in
+    // flight.
+    uint64_t transfer_submission[2] = {0, 0};
     uint32_t current_index = 0;
     uint64_t last_used_frame = 0;
   };
 
   // A resolve readback copy deferred to the transfer queue (DMA engine),
   // flushed as a batch after the graphics submission that produced its source
-  // data.
+  // data. Copies snapshot_buffers[buffer_index] -> buffers[buffer_index].
   struct PendingReadbackCopy {
     ReadbackBuffer* readback_buffer;
     uint32_t buffer_index;
-    uint32_t src_offset;
     uint32_t size;
   };
 
@@ -985,6 +994,12 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // Helper to evict old readback buffers from a cache map
   void EvictOldReadbackBuffers(
       std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map);
+
+  // Allocates a device-local buffer shared concurrently with the transfer
+  // queue, used as the private snapshot the graphics queue copies resolved data
+  // into. Returns false on failure (handles left VK_NULL_HANDLE).
+  bool CreateReadbackSnapshotBuffer(uint32_t size, VkBuffer& buffer_out,
+                                    VkDeviceMemory& memory_out);
 
   // Map: (written_address << 32 | written_length) -> ReadbackBuffer
   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;

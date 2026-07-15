@@ -1469,6 +1469,12 @@ void VulkanCommandProcessor::ShutdownContext() {
                                            pair.second.buffers[1]);
     ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
                                            pair.second.memories[1]);
+    for (int i = 0; i < 2; i++) {
+      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                             pair.second.snapshot_buffers[i]);
+      ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                             pair.second.snapshot_memories[i]);
+    }
   }
   readback_buffers_.clear();
 
@@ -3857,6 +3863,71 @@ void VulkanCommandProcessor::EnsureMemexportRangeInDeviceBuffer(
                           VK_ACCESS_TRANSFER_WRITE_BIT, read_access);
 }
 
+bool VulkanCommandProcessor::CreateReadbackSnapshotBuffer(
+    uint32_t size, VkBuffer& buffer_out, VkDeviceMemory& memory_out) {
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  // Written by the graphics queue, read by the transfer queue. Shared
+  // concurrently so no queue family ownership transfer is needed.
+  const uint32_t snapshot_queue_families[2] = {
+      vulkan_device->queue_family_graphics_compute(),
+      vulkan_device->queue_family_transfer()};
+  VkBufferCreateInfo buffer_info = {};
+  buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  buffer_info.size = size;
+  buffer_info.usage =
+      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  buffer_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+  buffer_info.queueFamilyIndexCount = 2;
+  buffer_info.pQueueFamilyIndices = snapshot_queue_families;
+
+  VkBuffer new_buffer;
+  if (dfn.vkCreateBuffer(device, &buffer_info, nullptr, &new_buffer) !=
+      VK_SUCCESS) {
+    XELOGE("VulkanCommandProcessor: Failed to create {} MB readback snapshot",
+           size >> 20);
+    return false;
+  }
+
+  VkMemoryRequirements memory_requirements;
+  dfn.vkGetBufferMemoryRequirements(device, new_buffer, &memory_requirements);
+  const uint32_t memory_type_index = ui::vulkan::util::ChooseMemoryType(
+      vulkan_device->memory_types(), memory_requirements.memoryTypeBits,
+      ui::vulkan::util::MemoryPurpose::kDeviceLocal);
+  if (memory_type_index == UINT32_MAX) {
+    XELOGE(
+        "VulkanCommandProcessor: Failed to find memory type for readback "
+        "snapshot");
+    dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    return false;
+  }
+
+  VkMemoryAllocateInfo memory_info = {};
+  memory_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  memory_info.allocationSize = memory_requirements.size;
+  memory_info.memoryTypeIndex = memory_type_index;
+  VkDeviceMemory new_memory;
+  if (dfn.vkAllocateMemory(device, &memory_info, nullptr, &new_memory) !=
+      VK_SUCCESS) {
+    XELOGE(
+        "VulkanCommandProcessor: Failed to allocate readback snapshot memory");
+    dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    return false;
+  }
+  if (dfn.vkBindBufferMemory(device, new_buffer, new_memory, 0) != VK_SUCCESS) {
+    XELOGE("VulkanCommandProcessor: Failed to bind readback snapshot memory");
+    dfn.vkFreeMemory(device, new_memory, nullptr);
+    dfn.vkDestroyBuffer(device, new_buffer, nullptr);
+    return false;
+  }
+
+  buffer_out = new_buffer;
+  memory_out = new_memory;
+  return true;
+}
+
 void VulkanCommandProcessor::EvictOldReadbackBuffers(
     std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map) {
   if (frame_current_ <= kReadbackBufferEvictionAgeFrames) {
@@ -3870,7 +3941,7 @@ void VulkanCommandProcessor::EvictOldReadbackBuffers(
   for (auto it = buffer_map.begin(); it != buffer_map.end();) {
     if (it->second.last_used_frame <
         frame_current_ - kReadbackBufferEvictionAgeFrames) {
-      // Unmap and release both buffers
+      // Unmap and release both buffers, plus their snapshots.
       for (int i = 0; i < 2; i++) {
         if (it->second.mapped_data[i] != nullptr) {
           dfn.vkUnmapMemory(device, it->second.memories[i]);
@@ -3880,6 +3951,12 @@ void VulkanCommandProcessor::EvictOldReadbackBuffers(
         }
         if (it->second.memories[i] != VK_NULL_HANDLE) {
           dfn.vkFreeMemory(device, it->second.memories[i], nullptr);
+        }
+        if (it->second.snapshot_buffers[i] != VK_NULL_HANDLE) {
+          dfn.vkDestroyBuffer(device, it->second.snapshot_buffers[i], nullptr);
+        }
+        if (it->second.snapshot_memories[i] != VK_NULL_HANDLE) {
+          dfn.vkFreeMemory(device, it->second.snapshot_memories[i], nullptr);
         }
       }
       it = buffer_map.erase(it);
@@ -3960,15 +4037,15 @@ bool VulkanCommandProcessor::SubmitReadbackCopiesToTransferQueue(
     return false;
   }
 
-  VkBuffer shared_memory_buffer = shared_memory_->buffer();
   for (const PendingReadbackCopy& copy : pending_readback_copies_) {
     VkBufferCopy region = {};
-    region.srcOffset = copy.src_offset;
+    region.srcOffset = 0;
     region.dstOffset = 0;
     region.size = copy.size;
-    dfn.vkCmdCopyBuffer(command_buffer.buffer, shared_memory_buffer,
-                        copy.readback_buffer->buffers[copy.buffer_index], 1,
-                        &region);
+    dfn.vkCmdCopyBuffer(
+        command_buffer.buffer,
+        copy.readback_buffer->snapshot_buffers[copy.buffer_index],
+        copy.readback_buffer->buffers[copy.buffer_index], 1, &region);
   }
 
   if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
@@ -3976,9 +4053,9 @@ bool VulkanCommandProcessor::SubmitReadbackCopiesToTransferQueue(
     return false;
   }
 
-  // Wait for the graphics submission that wrote the resolved data into shared
-  // memory (the semaphore also makes those writes visible to the transfer
-  // queue). Shared memory is created with concurrent sharing for this.
+  // Wait for the graphics submission that wrote the resolved data into the
+  // snapshots (the semaphore also makes those writes visible to the transfer
+  // queue). Snapshots are created with concurrent sharing for this.
   VkPipelineStageFlags wait_stage_mask = VK_PIPELINE_STAGE_TRANSFER_BIT;
   VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit_info.waitSemaphoreCount = 1;
@@ -4001,6 +4078,12 @@ bool VulkanCommandProcessor::SubmitReadbackCopiesToTransferQueue(
   transfer_command_buffers_writable_.pop_back();
   transfer_wait_semaphores_in_flight_.emplace_back(transfer_submission,
                                                    graphics_signal_semaphore);
+  // Stamp the submission onto each filled slot so the CPU read of the buffer
+  // and the graphics reuse of the snapshot can wait for this copy to complete.
+  for (const PendingReadbackCopy& copy : pending_readback_copies_) {
+    copy.readback_buffer->transfer_submission[copy.buffer_index] =
+        transfer_submission;
+  }
   pending_readback_copies_.clear();
   return true;
 }
@@ -4203,27 +4286,12 @@ bool VulkanCommandProcessor::IssueCopy() {
 
     if (use_transfer_queue) {
       uint32_t read_index = 1 - write_index;
-      bool read_available = rb.buffers[read_index] != VK_NULL_HANDLE &&
-                            written_length <= rb.sizes[read_index] &&
-                            rb.mapped_data[read_index] != nullptr;
-      if (read_available) {
-        // "some" only reads on a cache miss, so a cache hit does nothing.
-        if (readback_mode != ReadbackResolveMode::kSome) {
-          // "fast" defers the copy to the transfer queue and reads last frame's
-          // buffer without waiting. A later resolve may overwrite shared memory
-          // while the copy reads it. Accepted as the documented approximate
-          // tradeoff for fast/some (full stays synchronous on graphics).
-          pending_readback_copies_.push_back(
-              {&rb, write_index, written_address, written_length});
-          uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
-          memory::vastcpy(dest_ptr,
-                          static_cast<uint8_t*>(rb.mapped_data[read_index]),
-                          written_length);
-        }
-      } else {
-        // No previous buffer yet (first use or resize). Copy and read
-        // synchronously on the graphics queue so on-demand readback
-        // (screenshots) still gets data this frame.
+
+      // Synchronous fallback on the graphics queue: copy this resolve straight
+      // to the host buffer and read it back this frame. Used on first use,
+      // resize, or if the snapshot can't be allocated. Returns false if the GPU
+      // wait failed.
+      auto sync_current_readback = [&]() -> bool {
         VkBuffer shared_memory_buffer = shared_memory_->buffer();
         shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
         PushBufferMemoryBarrier(
@@ -4244,14 +4312,96 @@ bool VulkanCommandProcessor::IssueCopy() {
           XELOGE(
               "VulkanCommandProcessor: Failed to complete queue operations for "
               "resolve readback fallback");
-          PopDebugMarker();
-          return true;
+          return false;
         }
         if (rb.mapped_data[write_index] != nullptr) {
           uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
           memory::vastcpy(dest_ptr,
                           static_cast<uint8_t*>(rb.mapped_data[write_index]),
                           written_length);
+        }
+        return true;
+      };
+
+      bool read_available = rb.buffers[read_index] != VK_NULL_HANDLE &&
+                            written_length <= rb.sizes[read_index] &&
+                            rb.mapped_data[read_index] != nullptr;
+
+      if (!read_available) {
+        // No previous buffer yet (first use or resize). Read this frame's data
+        // synchronously so on-demand readback (screenshots) still gets data.
+        if (!sync_current_readback()) {
+          PopDebugMarker();
+          return true;
+        }
+      } else if (readback_mode != ReadbackResolveMode::kSome) {
+        // "fast": snapshot the resolved region on the graphics queue, hand the
+        // device->host copy to the transfer queue, and read last frame's
+        // finished buffer. "some" on a cache hit does nothing.
+
+        // The snapshot slot is reused every other resolve. Wait for the prior
+        // transfer copy that read it before the graphics queue overwrites it.
+        if (rb.transfer_submission[write_index]) {
+          transfer_completion_timeline_.AwaitSubmissionAndUpdateCompleted(
+              rb.transfer_submission[write_index]);
+          rb.transfer_submission[write_index] = 0;
+        }
+
+        // Ensure the device-local snapshot for this slot exists and is big
+        // enough.
+        bool snapshot_ready =
+            rb.snapshot_buffers[write_index] != VK_NULL_HANDLE &&
+            size <= rb.snapshot_sizes[write_index];
+        if (!snapshot_ready) {
+          if (rb.snapshot_buffers[write_index] != VK_NULL_HANDLE) {
+            dfn.vkDestroyBuffer(device, rb.snapshot_buffers[write_index],
+                                nullptr);
+            dfn.vkFreeMemory(device, rb.snapshot_memories[write_index],
+                             nullptr);
+            rb.snapshot_buffers[write_index] = VK_NULL_HANDLE;
+            rb.snapshot_memories[write_index] = VK_NULL_HANDLE;
+            rb.snapshot_sizes[write_index] = 0;
+          }
+          if (CreateReadbackSnapshotBuffer(size,
+                                           rb.snapshot_buffers[write_index],
+                                           rb.snapshot_memories[write_index])) {
+            rb.snapshot_sizes[write_index] = size;
+            snapshot_ready = true;
+          }
+        }
+
+        if (snapshot_ready) {
+          // Graphics queue: snapshot the resolved region. Same-queue ordering
+          // puts it after the resolve and before the next resolve overwrites
+          // shared memory, so the transfer copy reads stable data.
+          shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+          InsertDebugMarker("Resolve Readback (snapshot): 0x%08X, %u bytes",
+                            written_address, written_length);
+          VkBufferCopy copy_region = {};
+          copy_region.srcOffset = written_address;
+          copy_region.dstOffset = 0;
+          copy_region.size = written_length;
+          deferred_command_buffer_.CmdVkCopyBuffer(
+              shared_memory_->buffer(), rb.snapshot_buffers[write_index], 1,
+              &copy_region);
+          // Defer the device->host copy (snapshot -> host buffer) to the DMA
+          // queue.
+          pending_readback_copies_.push_back(
+              {&rb, write_index, written_length});
+          // Read last frame's data, waiting for the transfer copy that filled
+          // it so the CPU never reads an in-flight copy.
+          if (rb.transfer_submission[read_index]) {
+            transfer_completion_timeline_.AwaitSubmissionAndUpdateCompleted(
+                rb.transfer_submission[read_index]);
+          }
+          uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
+          memory::vastcpy(dest_ptr,
+                          static_cast<uint8_t*>(rb.mapped_data[read_index]),
+                          written_length);
+        } else if (!sync_current_readback()) {
+          // Snapshot allocation failed. Fall back to a synchronous read.
+          PopDebugMarker();
+          return true;
         }
       }
     } else {
