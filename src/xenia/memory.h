@@ -296,7 +296,7 @@ class PhysicalHeap : public BaseHeap {
   // doesn't map here), and that decoded to a PageAccess.
   uint32_t GetPageProtect(uint32_t physical_address);
   xe::memory::PageAccess GetPageAccess(uint32_t physical_address);
-  template <bool enable_invalidation_notifications>
+  template <bool enable_invalidation_notifications, bool enable_data_providers>
   XE_NOINLINE void EnableAccessCallbacksInner(
       const uint32_t system_page_first, const uint32_t system_page_last,
       xe::memory::PageAccess protect_access) XE_RESTRICT;
@@ -336,7 +336,10 @@ class PhysicalHeap : public BaseHeap {
   struct SystemPageFlagsBlock {
     // Whether writing to each page should result trigger invalidation
     // callbacks.
-    uint64_t notify_on_invalidation;
+    uint64_t notify_on_invalidation = 0;
+    // Whether the first access of each page triggers read callbacks. These
+    // pages are protected no-access. The watch is one-shot, cleared on access.
+    uint64_t notify_on_read = 0;
   };
   // Protected by global_critical_region. Flags for each 64 system pages,
   // interleaved as blocks, so bit scan can be used to quickly extract ranges.
@@ -523,6 +526,18 @@ class Memory {
   // RegisterPhysicalMemoryInvalidationCallback.
   void UnregisterPhysicalMemoryInvalidationCallback(void* callback_handle);
 
+  // Called on the first CPU access of a page armed as a read watch (via
+  // EnablePhysicalMemoryAccessCallbacks with data providers). The page is
+  // downgraded and unwatched right after, so it fires once per arm. Must be
+  // lightweight and non-blocking. It runs in the fault handler under the global
+  // critical region.
+  typedef void (*PhysicalMemoryReadCallback)(void* context_ptr,
+                                             uint32_t physical_address_start,
+                                             uint32_t length);
+  void* RegisterPhysicalMemoryReadCallback(PhysicalMemoryReadCallback callback,
+                                           void* callback_context);
+  void UnregisterPhysicalMemoryReadCallback(void* callback_handle);
+
   // Enables physical memory access callbacks for the specified memory range,
   // snapped to system page boundaries.
   void EnablePhysicalMemoryAccessCallbacks(
@@ -644,6 +659,8 @@ class Memory {
   xe::global_critical_region global_critical_region_;
   std::vector<std::pair<PhysicalMemoryInvalidationCallback, void*>*>
       physical_memory_invalidation_callbacks_;
+  std::vector<std::pair<PhysicalMemoryReadCallback, void*>*>
+      physical_memory_read_callbacks_;
 };
 
 }  // namespace xe

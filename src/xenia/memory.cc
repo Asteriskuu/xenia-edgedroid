@@ -740,6 +740,30 @@ void Memory::UnregisterPhysicalMemoryInvalidationCallback(
   delete entry;
 }
 
+void* Memory::RegisterPhysicalMemoryReadCallback(
+    PhysicalMemoryReadCallback callback, void* callback_context) {
+  auto entry = new std::pair<PhysicalMemoryReadCallback, void*>(
+      callback, callback_context);
+  auto lock = global_critical_region_.Acquire();
+  physical_memory_read_callbacks_.push_back(entry);
+  return entry;
+}
+
+void Memory::UnregisterPhysicalMemoryReadCallback(void* callback_handle) {
+  auto entry = reinterpret_cast<std::pair<PhysicalMemoryReadCallback, void*>*>(
+      callback_handle);
+  {
+    auto lock = global_critical_region_.Acquire();
+    auto it = std::find(physical_memory_read_callbacks_.begin(),
+                        physical_memory_read_callbacks_.end(), entry);
+    assert_true(it != physical_memory_read_callbacks_.end());
+    if (it != physical_memory_read_callbacks_.end()) {
+      physical_memory_read_callbacks_.erase(it);
+    }
+  }
+  delete entry;
+}
+
 void Memory::EnablePhysicalMemoryAccessCallbacks(
     uint32_t physical_address, uint32_t length,
     bool enable_invalidation_notifications, bool enable_data_providers) {
@@ -2110,8 +2134,6 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address,
                                          uint32_t length,
                                          bool enable_invalidation_notifications,
                                          bool enable_data_providers) {
-  // TODO(Triang3l): Implement data providers.
-  assert_false(enable_data_providers);
   if (!enable_invalidation_notifications && !enable_data_providers) {
     return;
   }
@@ -2149,15 +2171,20 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address,
 
   auto global_lock = global_critical_region_.Acquire();
   if (enable_invalidation_notifications) {
-    EnableAccessCallbacksInner<true>(system_page_first, system_page_last,
-                                     protect_access);
+    if (enable_data_providers) {
+      EnableAccessCallbacksInner<true, true>(system_page_first,
+                                             system_page_last, protect_access);
+    } else {
+      EnableAccessCallbacksInner<true, false>(system_page_first,
+                                              system_page_last, protect_access);
+    }
   } else {
-    EnableAccessCallbacksInner<false>(system_page_first, system_page_last,
-                                      protect_access);
+    EnableAccessCallbacksInner<false, true>(system_page_first, system_page_last,
+                                            protect_access);
   }
 }
 
-template <bool enable_invalidation_notifications>
+template <bool enable_invalidation_notifications, bool enable_data_providers>
 XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
     const uint32_t system_page_first, const uint32_t system_page_last,
     xe::memory::PageAccess protect_access) XE_RESTRICT {
@@ -2225,15 +2252,23 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
     // enable invalidation notifications for read-only pages for the same
     // reason.
     if (current_page_access != xe::memory::PageAccess::kNoAccess) {
-      // TODO(Triang3l): Enable data providers.
       if constexpr (enable_invalidation_notifications) {
         if (current_page_access != xe::memory::PageAccess::kReadOnly &&
             (page_flags_block.notify_on_invalidation & page_flags_bit) == 0) {
-          // TODO(Triang3l): Check if data providers are already enabled.
-          // If data providers are already enabled for the page, it has even
-          // stricter protection.
-          protect_system_page = true;
           page_flags_block.notify_on_invalidation |= page_flags_bit;
+          // A read-watched page is already protected no-access, stricter than
+          // read-only, so don't loosen it here.
+          if ((page_flags_block.notify_on_read & page_flags_bit) == 0) {
+            protect_system_page = true;
+          }
+        }
+      }
+      if constexpr (enable_data_providers) {
+        // Read watches protect the page no-access, so an accessible page not
+        // yet read-watched needs protecting.
+        if ((page_flags_block.notify_on_read & page_flags_bit) == 0) {
+          protect_system_page = true;
+          page_flags_block.notify_on_read |= page_flags_bit;
         }
       }
     }
@@ -2263,12 +2298,6 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
 bool PhysicalHeap::TriggerCallbacks(
     global_unique_lock_type global_lock_locked_once, uint32_t virtual_address,
     uint32_t length, bool is_write, bool unwatch_exact_range, bool unprotect) {
-  // TODO(Triang3l): Support read watches.
-  assert_true(is_write);
-  if (!is_write) {
-    return false;
-  }
-
   if (virtual_address < heap_base_) {
     if (heap_base_ - virtual_address >= length) {
       return false;
@@ -2295,10 +2324,98 @@ bool PhysicalHeap::TriggerCallbacks(
   uint32_t block_index_first = system_page_first >> 6;
   uint32_t block_index_last = system_page_last >> 6;
 
+  // Read watches: the first read of a no-access-armed page notifies the read
+  // callbacks, then the page is downgraded and unwatched so the access
+  // proceeds. A write to such a page is handled by the write path below, which
+  // also clears the read watch.
+  if (!is_write) {
+    bool any_read_watched = false;
+    for (uint32_t i = block_index_first; i <= block_index_last; ++i) {
+      uint64_t block = system_page_flags_[i].notify_on_read;
+      if (i == block_index_first) {
+        block &= ~((uint64_t(1) << (system_page_first & 63)) - 1);
+      }
+      if (i == block_index_last && (system_page_last & 63) != 63) {
+        block &= (uint64_t(1) << ((system_page_last & 63) + 1)) - 1;
+      }
+      if (block) {
+        any_read_watched = true;
+        break;
+      }
+    }
+    if (!any_read_watched) {
+      // No read watch here. If the guest page is accessible this is a race with
+      // another thread that cleared the watch, so retry. If it is no-access it
+      // is a genuine access violation, so propagate. Checked via the page table
+      // to stay signal safe.
+      uint32_t guest_page_number =
+          xe::sat_sub(system_page_first << system_page_shift_,
+                      host_address_offset()) >>
+          page_size_shift_;
+      return ToPageAccess(page_table_[guest_page_number].current_protect) !=
+             xe::memory::PageAccess::kNoAccess;
+    }
+    uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
+    uint32_t physical_address_start =
+        xe::sat_sub(system_page_first << system_page_shift_,
+                    host_address_offset()) +
+        physical_address_offset;
+    uint32_t physical_length = std::min(
+        xe::sat_sub(
+            (system_page_last << system_page_shift_) + system_page_size_,
+            host_address_offset()) +
+            physical_address_offset - physical_address_start,
+        heap_size_ - (physical_address_start - physical_address_offset));
+    for (auto read_callback : memory_->physical_memory_read_callbacks_) {
+      read_callback->first(read_callback->second, physical_address_start,
+                           physical_length);
+    }
+    // Downgrade each read-watched page so the access proceeds. Keep it
+    // read-only if it also has a write watch, otherwise restore the guest
+    // protection. Then clear the read watch.
+    if (unprotect) {
+      uint8_t* protect_base = membase_ + heap_base_;
+      for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
+        uint64_t bit = uint64_t(1) << (i & 63);
+        SystemPageFlagsBlock& flags = system_page_flags_[i >> 6];
+        if (!(flags.notify_on_read & bit)) {
+          continue;
+        }
+        uint32_t guest_page_number =
+            xe::sat_sub(i << system_page_shift_, host_address_offset()) >>
+            page_size_shift_;
+        xe::memory::PageAccess guest_access =
+            ToPageAccess(page_table_[guest_page_number].current_protect);
+        xe::memory::PageAccess target;
+        if (guest_access == xe::memory::PageAccess::kNoAccess) {
+          target = xe::memory::PageAccess::kNoAccess;
+        } else if (flags.notify_on_invalidation & bit) {
+          target = xe::memory::PageAccess::kReadOnly;
+        } else {
+          target = guest_access;
+        }
+        xe::memory::Protect(protect_base + (i << system_page_shift_),
+                            system_page_size_, target);
+      }
+    }
+    for (uint32_t i = block_index_first; i <= block_index_last; ++i) {
+      uint64_t mask = 0;
+      if (i == block_index_first) {
+        mask |= (uint64_t(1) << (system_page_first & 63)) - 1;
+      }
+      if (i == block_index_last && (system_page_last & 63) != 63) {
+        mask |= ~((uint64_t(1) << ((system_page_last & 63) + 1)) - 1);
+      }
+      system_page_flags_[i].notify_on_read &= mask;
+    }
+    return true;
+  }
+
   // Check if watching any page, whether need to call the callback at all.
   bool any_watched = false;
   for (uint32_t i = block_index_first; i <= block_index_last; ++i) {
-    uint64_t block = system_page_flags_[i].notify_on_invalidation;
+    uint64_t block = system_page_flags_[i].notify_on_invalidation |
+                     system_page_flags_[i].notify_on_read;
     if (i == block_index_first) {
       block &= ~((uint64_t(1) << (system_page_first & 63)) - 1);
     }
@@ -2387,9 +2504,12 @@ bool PhysicalHeap::TriggerCallbacks(
     uint8_t* protect_base = membase_ + heap_base_;
     uint32_t unprotect_system_page_first = UINT32_MAX;
     for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
-      // Check if need to allow writing to this page.
-      bool unprotect_page = (system_page_flags_[i >> 6].notify_on_invalidation &
-                             (uint64_t(1) << (i & 63))) != 0;
+      // Check if need to allow writing to this page. Read-watched pages are
+      // unprotected here too so a write to one doesn't re-fault.
+      bool unprotect_page =
+          ((system_page_flags_[i >> 6].notify_on_invalidation |
+            system_page_flags_[i >> 6].notify_on_read) &
+           (uint64_t(1) << (i & 63))) != 0;
       if (unprotect_page) {
         uint32_t guest_page_number =
             xe::sat_sub(i << system_page_shift_, host_address_offset()) >>
@@ -2423,7 +2543,8 @@ bool PhysicalHeap::TriggerCallbacks(
     }
   }
 
-  // Mark pages as not write-watched.
+  // Mark pages as not write-watched. Unprotected pages are readable and
+  // writable now, so clear the read watch too.
   for (uint32_t i = block_index_first; i <= block_index_last; ++i) {
     uint64_t mask = 0;
     if (i == block_index_first) {
@@ -2433,6 +2554,7 @@ bool PhysicalHeap::TriggerCallbacks(
       mask |= ~((uint64_t(1) << ((system_page_last & 63) + 1)) - 1);
     }
     system_page_flags_[i].notify_on_invalidation &= mask;
+    system_page_flags_[i].notify_on_read &= mask;
   }
 
   return true;
