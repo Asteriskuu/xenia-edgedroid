@@ -958,6 +958,9 @@ class VulkanCommandProcessor final : public CommandProcessor {
     VkDeviceMemory memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     uint32_t sizes[2] = {0, 0};
     void* mapped_data[2] = {nullptr, nullptr};  // Persistent mappings
+    // Host memory type of buffers[i], to invalidate the CPU cache before
+    // reading when the readback memory is not host-coherent.
+    uint32_t memory_type_indices[2] = {0, 0};
     // Device-local snapshot of the resolved region, filled by the graphics
     // queue so the transfer copy reads it instead of shared memory a later
     // resolve would overwrite. One per slot, paired with buffers[].
@@ -1000,6 +1003,16 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // into. Returns false on failure (handles left VK_NULL_HANDLE).
   bool CreateReadbackSnapshotBuffer(uint32_t size, VkBuffer& buffer_out,
                                     VkDeviceMemory& memory_out);
+
+  // Destroys a readback buffer's host buffers, snapshots and mappings. The GPU
+  // must no longer be using them.
+  void DestroyReadbackBuffer(ReadbackBuffer& rb);
+
+  // Invalidates the CPU cache for the finished slot then copies it to guest
+  // memory. The GPU copy that filled the slot must have completed.
+  void CopyReadbackBufferToGuest(const ReadbackBuffer& rb, uint32_t index,
+                                 uint32_t written_address,
+                                 uint32_t written_length);
 
   // Map: (written_address << 32 | written_length) -> ReadbackBuffer
   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;

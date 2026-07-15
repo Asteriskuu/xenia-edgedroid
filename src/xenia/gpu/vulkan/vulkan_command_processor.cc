@@ -161,10 +161,14 @@ void VulkanCommandProcessor::InvalidateGpuMemory() {
 }
 
 void VulkanCommandProcessor::ClearReadbackBuffers() {
-  // Pending copies hold pointers into readback_buffers_, and in-flight transfer
-  // copies target its buffers, so drain and drop them before clearing.
+  // Both queues may still be reading or writing these buffers, so drain them
+  // before freeing. Pending copies hold pointers into readback_buffers_.
+  AwaitAllQueueOperationsCompletion();
   transfer_completion_timeline_.AwaitAllSubmissions();
   pending_readback_copies_.clear();
+  for (auto& pair : readback_buffers_) {
+    DestroyReadbackBuffer(pair.second);
+  }
   readback_buffers_.clear();
 }
 
@@ -1456,25 +1460,7 @@ void VulkanCommandProcessor::ShutdownContext() {
 
   // Clean up all readback buffers.
   for (auto& pair : readback_buffers_) {
-    for (int i = 0; i < 2; i++) {
-      if (pair.second.mapped_data[i] != nullptr) {
-        dfn.vkUnmapMemory(device, pair.second.memories[i]);
-      }
-    }
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                           pair.second.buffers[0]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                           pair.second.memories[0]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                           pair.second.buffers[1]);
-    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                           pair.second.memories[1]);
-    for (int i = 0; i < 2; i++) {
-      ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
-                                             pair.second.snapshot_buffers[i]);
-      ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
-                                             pair.second.snapshot_memories[i]);
-    }
+    DestroyReadbackBuffer(pair.second);
   }
   readback_buffers_.clear();
 
@@ -3928,37 +3914,51 @@ bool VulkanCommandProcessor::CreateReadbackSnapshotBuffer(
   return true;
 }
 
+void VulkanCommandProcessor::DestroyReadbackBuffer(ReadbackBuffer& rb) {
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  for (int i = 0; i < 2; i++) {
+    if (rb.mapped_data[i] != nullptr) {
+      dfn.vkUnmapMemory(device, rb.memories[i]);
+      rb.mapped_data[i] = nullptr;
+    }
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                           rb.buffers[i]);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                           rb.memories[i]);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                           rb.snapshot_buffers[i]);
+    ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                           rb.snapshot_memories[i]);
+  }
+}
+
+void VulkanCommandProcessor::CopyReadbackBufferToGuest(
+    const ReadbackBuffer& rb, uint32_t index, uint32_t written_address,
+    uint32_t written_length) {
+  if (rb.mapped_data[index] == nullptr) {
+    return;
+  }
+  // Make the GPU copy visible to the CPU on non-coherent readback memory.
+  ui::vulkan::util::InvalidateMappedMemoryRange(
+      GetVulkanDevice(), rb.memories[index], rb.memory_type_indices[index], 0,
+      rb.sizes[index], written_length);
+  uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
+  memory::vastcpy(dest_ptr, static_cast<uint8_t*>(rb.mapped_data[index]),
+                  written_length);
+}
+
 void VulkanCommandProcessor::EvictOldReadbackBuffers(
     std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map) {
   if (frame_current_ <= kReadbackBufferEvictionAgeFrames) {
     return;
   }
 
-  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
-  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-  const VkDevice device = vulkan_device->device();
-
   for (auto it = buffer_map.begin(); it != buffer_map.end();) {
     if (it->second.last_used_frame <
         frame_current_ - kReadbackBufferEvictionAgeFrames) {
-      // Unmap and release both buffers, plus their snapshots.
-      for (int i = 0; i < 2; i++) {
-        if (it->second.mapped_data[i] != nullptr) {
-          dfn.vkUnmapMemory(device, it->second.memories[i]);
-        }
-        if (it->second.buffers[i] != VK_NULL_HANDLE) {
-          dfn.vkDestroyBuffer(device, it->second.buffers[i], nullptr);
-        }
-        if (it->second.memories[i] != VK_NULL_HANDLE) {
-          dfn.vkFreeMemory(device, it->second.memories[i], nullptr);
-        }
-        if (it->second.snapshot_buffers[i] != VK_NULL_HANDLE) {
-          dfn.vkDestroyBuffer(device, it->second.snapshot_buffers[i], nullptr);
-        }
-        if (it->second.snapshot_memories[i] != VK_NULL_HANDLE) {
-          dfn.vkFreeMemory(device, it->second.snapshot_memories[i], nullptr);
-        }
-      }
+      DestroyReadbackBuffer(it->second);
       it = buffer_map.erase(it);
     } else {
       ++it;
@@ -4273,6 +4273,7 @@ bool VulkanCommandProcessor::IssueCopy() {
       rb.buffers[write_index] = new_buffer;
       rb.memories[write_index] = new_memory;
       rb.sizes[write_index] = size;
+      rb.memory_type_indices[write_index] = memory_type_index;
 
       // Map the new buffer persistently
       if (dfn.vkMapMemory(device, new_memory, 0, size, 0,
@@ -4314,12 +4315,8 @@ bool VulkanCommandProcessor::IssueCopy() {
               "resolve readback fallback");
           return false;
         }
-        if (rb.mapped_data[write_index] != nullptr) {
-          uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
-          memory::vastcpy(dest_ptr,
-                          static_cast<uint8_t*>(rb.mapped_data[write_index]),
-                          written_length);
-        }
+        CopyReadbackBufferToGuest(rb, write_index, written_address,
+                                  written_length);
         return true;
       };
 
@@ -4394,10 +4391,8 @@ bool VulkanCommandProcessor::IssueCopy() {
             transfer_completion_timeline_.AwaitSubmissionAndUpdateCompleted(
                 rb.transfer_submission[read_index]);
           }
-          uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
-          memory::vastcpy(dest_ptr,
-                          static_cast<uint8_t*>(rb.mapped_data[read_index]),
-                          written_length);
+          CopyReadbackBufferToGuest(rb, read_index, written_address,
+                                    written_length);
         } else if (!sync_current_readback()) {
           // Snapshot allocation failed. Fall back to a synchronous read.
           PopDebugMarker();
@@ -4464,12 +4459,9 @@ bool VulkanCommandProcessor::IssueCopy() {
       bool should_copy =
           (readback_mode == ReadbackResolveMode::kSome) ? is_cache_miss : true;
       if (should_copy && rb.buffers[read_index] != VK_NULL_HANDLE &&
-          written_length <= rb.sizes[read_index] &&
-          rb.mapped_data[read_index] != nullptr) {
-        uint8_t* dest_ptr = memory_->TranslatePhysical(written_address);
-        memory::vastcpy(dest_ptr,
-                        static_cast<uint8_t*>(rb.mapped_data[read_index]),
-                        written_length);
+          written_length <= rb.sizes[read_index]) {
+        CopyReadbackBufferToGuest(rb, read_index, written_address,
+                                  written_length);
       }
     }
 
@@ -4668,6 +4660,7 @@ bool VulkanCommandProcessor::IssueCopy() {
       rb.buffers[write_index] = new_buffer;
       rb.memories[write_index] = new_memory;
       rb.sizes[write_index] = size;
+      rb.memory_type_indices[write_index] = memory_type_index;
 
       // Map the new buffer persistently
       if (dfn.vkMapMemory(device, new_memory, 0, size, 0,
@@ -4990,13 +4983,10 @@ bool VulkanCommandProcessor::IssueCopy() {
     bool should_copy =
         (readback_mode == ReadbackResolveMode::kSome) ? is_cache_miss : true;
 
-    // Simple memcpy - data is already downscaled by GPU
-    if (should_copy && rb.mapped_data[read_index] != nullptr &&
-        written_length <= rb.sizes[read_index]) {
-      uint8_t* physaddr = memory_->TranslatePhysical(written_address);
-      memory::vastcpy(physaddr,
-                      static_cast<uint8_t*>(rb.mapped_data[read_index]),
-                      written_length);
+    // Data is already downscaled by the GPU.
+    if (should_copy && written_length <= rb.sizes[read_index]) {
+      CopyReadbackBufferToGuest(rb, read_index, written_address,
+                                written_length);
     }
 
     // Swap buffer index for next time
