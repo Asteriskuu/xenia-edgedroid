@@ -3006,14 +3006,21 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   if (memexport_used_pixel) {
     draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
   }
-  for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-    if (!shared_memory_->RequestRange(memexport_range.base_address_dwords << 2,
-                                      memexport_range.size_bytes)) {
-      XELOGE(
-          "Failed to request memexport stream at 0x{:08X} (size {}) in the "
-          "shared memory",
-          memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
-      return false;
+  // Host-routed producers write output to host_buffer_ (guest RAM), not the
+  // device buffer, so this upload is redundant. It also drops the draw when the
+  // guest committed only part of the declared capacity, so skip it.
+  if (!route_to_host) {
+    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+      if (!shared_memory_->RequestRange(
+              memexport_range.base_address_dwords << 2,
+              memexport_range.size_bytes)) {
+        XELOGE(
+            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
+            "shared memory",
+            memexport_range.base_address_dwords << 2,
+            memexport_range.size_bytes);
+        return false;
+      }
     }
   }
   // Primitive topology.

@@ -3691,7 +3691,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
     uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords
                                           << 2;
-    if (!shared_memory_->RequestRange(memexport_range_base_bytes,
+    // Host-routed producers write output to host_buffer_ (guest RAM), not the
+    // device buffer, so this upload is redundant. It also drops the draw when
+    // the guest committed only part of the declared capacity, so skip it.
+    if (!route_to_host &&
+        !shared_memory_->RequestRange(memexport_range_base_bytes,
                                       memexport_range.size_bytes)) {
       XELOGE(
           "Failed to request memexport stream at 0x{:08X} (size {}) in the "
