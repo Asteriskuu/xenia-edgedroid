@@ -313,15 +313,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
                  bool major_mode_explicit) override;
   bool IssueCopy() override;
 
-  // Two-buffer memexport routing helpers. Track and test the guest pages any
-  // memexport draw has written so geometry draws consuming that output can be
-  // routed to read the host-imported buffer directly. See
-  // memexport_written_pages_.
-  void MarkMemexportPagesWritten(uint32_t base_bytes, uint32_t size_bytes);
-  bool IsMemexportRange(uint32_t base_bytes, uint32_t size_bytes) const;
-  bool VertexFetchInMemexportRange(const RegisterFile& regs,
-                                   const VulkanShader& vertex_shader) const;
-
   void InitializeTrace() override;
 
  private:
@@ -715,22 +706,10 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // stays coherent with the CPU. VK_NULL_HANDLE when the host buffer is
   // unavailable - routing is then disabled and every draw uses the device set.
   VkDescriptorSet shared_memory_host_and_edram_descriptor_set_ = VK_NULL_HANDLE;
-  // Guest pages (4 KB) that any memexport draw has written, at their host
-  // buffer offsets. Used to route geometry draws that consume the output to
-  // read host_buffer_. Never cleared - over-routing a repurposed page only
-  // costs performance, never correctness.
-  static constexpr uint32_t kMemexportPageCount =
-      SharedMemory::kBufferSize >> 12;
-  std::array<uint64_t, kMemexportPageCount / 64> memexport_written_pages_{};
-  // Cleared until the first memexport draw, so consumer-side routing checks are
-  // skipped entirely for titles that never memexport.
-  bool any_memexport_pages_written_ = false;
-  // Inclusive min/max written memexport page, so IsMemexportRange can reject a
-  // range outside the memexport region in O(1) - without this the per-page scan
-  // runs for every texture load even in titles that do memexport. Empty
-  // (min > max) until the first memexport draw.
-  uint32_t memexport_written_page_min_ = kMemexportPageCount;
-  uint32_t memexport_written_page_max_ = 0;
+  // Two-buffer memexport page tracking (data + methods), shared with the D3D12
+  // backend as a class-body fragment so each backend gets its own non-virtual,
+  // inlinable copy. Requires <array> and SharedMemory, both included above.
+#include "../command_processor_memexport.inc"
 
   // Bytes 0x0...0x3FF - 256-entry gamma ramp table with B10G10R10X2 data (read
   // as R10G10B10X2 with swizzle).

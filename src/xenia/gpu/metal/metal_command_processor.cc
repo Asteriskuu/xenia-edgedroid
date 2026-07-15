@@ -995,8 +995,8 @@ void MetalCommandProcessor::InvalidateGpuMemory() {
 }
 
 void MetalCommandProcessor::ClearReadbackBuffers() {
-  // TODO(wmarti): Implement readback buffer clearing when memexport readback
-  // is added. See D3D12's readback_buffers_ and memexport_readback_buffers_.
+  // TODO(wmarti): Implement readback buffer clearing when resolve readback
+  // is added. See D3D12's readback_buffers_.
 }
 
 ui::metal::MetalProvider& MetalCommandProcessor::GetMetalProvider() const {

@@ -20,8 +20,6 @@
 #include "xenia/ui/imgui_host_notification.h"
 
 DECLARE_bool(clear_memory_page_state);
-DECLARE_bool(readback_memexport);
-DECLARE_bool(readback_memexport_fast);
 DECLARE_string(readback_resolve);
 DECLARE_bool(guest_display_refresh_cap);
 DECLARE_string(occlusion_query);
@@ -38,7 +36,6 @@ ImGuiPerformanceDialog::ImGuiPerformanceDialog(
 
   // Initialize highlight positions to match current selections
   resolve_highlight_ = readback_resolve_mode_;
-  memexport_highlight_ = readback_memexport_mode_;
   occlusion_query_highlight_ = occlusion_query_mode_;
 }
 
@@ -74,15 +71,6 @@ void ImGuiPerformanceDialog::LoadCurrentSettings() {
     readback_resolve_mode_ = 3;
   } else {
     readback_resolve_mode_ = 2;  // Default to "fast"
-  }
-
-  // Load Readback Memexport setting (0=none, 1=fast, 2=full)
-  if (!cvars::readback_memexport) {
-    readback_memexport_mode_ = 0;
-  } else if (cvars::readback_memexport_fast) {
-    readback_memexport_mode_ = 1;
-  } else {
-    readback_memexport_mode_ = 2;
   }
 
   // Load Clear Memory Page State setting
@@ -134,33 +122,6 @@ void ImGuiPerformanceDialog::OnReadbackResolveChanged(int value) {
 
   const char* mode_names[] = {"None", "Some", "Fast", "Full"};
   ShowNotification("Readback Resolve", mode_names[value]);
-}
-
-void ImGuiPerformanceDialog::OnReadbackMemexportChanged(int value) {
-  bool memexport_enabled = true;
-  bool memexport_fast = true;
-
-  switch (value) {
-    case 0:
-      memexport_enabled = false;
-      break;
-    case 1:
-      memexport_fast = true;
-      break;
-    case 2:
-      memexport_fast = false;
-      break;
-  }
-
-  gpu::SaveGPUSetting(gpu::GPUSetting::ReadbackMemexport, memexport_enabled);
-  gpu::SaveGPUSetting(gpu::GPUSetting::ReadbackMemexportFast, memexport_fast);
-  config::SaveGameConfigSetting(emulator_window_->emulator(), "GPU",
-                                "readback_memexport", memexport_enabled);
-  config::SaveGameConfigSetting(emulator_window_->emulator(), "GPU",
-                                "readback_memexport_fast", memexport_fast);
-
-  const char* mode_names[] = {"None", "Fast", "Full"};
-  ShowNotification("Readback Memexport", mode_names[value]);
 }
 
 void ImGuiPerformanceDialog::OnEmulatedDisplayUncappedChanged(bool uncapped) {
@@ -292,45 +253,6 @@ void ImGuiPerformanceDialog::OnDraw(ImGuiIO& io) {
       }
 
       if (i < 3) {
-        ImGui::SameLine();
-      }
-    }
-    ImGui::PopID();
-    ImGui::Unindent(10);
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Readback Memexport section
-    ImGui::PushStyleColor(ImGuiCol_Text, xbox_green);
-    ImGui::Text("Readback Memexport");
-    ImGui::PopStyleColor();
-
-    ImGui::Indent(10);
-    ImGui::PushID("memexport");
-    const char* memexport_labels[] = {"None", "Fast", "Full"};
-    for (int i = 0; i < 3; i++) {
-      bool is_selected = (readback_memexport_mode_ == i);
-      bool is_highlighted = (memexport_highlight_ == i);
-
-      if (is_highlighted && !is_selected) {
-        ImGui::PushStyleColor(ImGuiCol_Text, highlight_color);
-      }
-
-      if (ImGui::RadioButton(memexport_labels[i], is_selected)) {
-        if (!is_selected) {
-          readback_memexport_mode_ = i;
-          memexport_highlight_ = i;
-          OnReadbackMemexportChanged(i);
-        }
-      }
-
-      if (is_highlighted && !is_selected) {
-        ImGui::PopStyleColor();
-      }
-
-      if (i < 2) {
         ImGui::SameLine();
       }
     }

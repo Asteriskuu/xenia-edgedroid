@@ -11,6 +11,7 @@
 #define XENIA_GPU_D3D12_D3D12_COMMAND_PROCESSOR_H_
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <deque>
 #include <memory>
@@ -176,6 +177,17 @@ class D3D12CommandProcessor final : public CommandProcessor {
     kNullRawSRV = kNullRawSRVAndSharedMemoryRawUAVStart,
     kSharedMemoryRawUAV,
 
+    // Host-imported (guest RAM) buffer pairs mirroring the device pairs above,
+    // bound instead for memexport-touching draws. Written only when the host
+    // buffer exists (two-buffer memexport routing). Unused otherwise.
+    kSharedMemoryHostRawSRVAndNullRawUAVStart,
+    kSharedMemoryHostRawSRV = kSharedMemoryHostRawSRVAndNullRawUAVStart,
+    kSharedMemoryHostNullRawUAV,
+
+    kNullRawSRVAndSharedMemoryHostRawUAVStart,
+    kSharedMemoryHostNullRawSRV = kNullRawSRVAndSharedMemoryHostRawUAVStart,
+    kSharedMemoryHostRawUAV,
+
     kEdramRawSRV,
     kEdramR32UintSRV,
     kEdramR32G32UintSRV,
@@ -215,6 +227,14 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // by its user.
   void ReleaseScratchGPUBuffer(ID3D12Resource* buffer,
                                D3D12_RESOURCE_STATES new_state);
+
+  // If this shared memory range holds memexport output (which lives in the host
+  // buffer under two-buffer routing), copies just it into the device buffer so
+  // a following texture load reading the device buffer sees it. No-op for
+  // normal ranges and when the host buffer is unavailable. Called by the
+  // texture cache before loading.
+  void EnsureMemexportRangeInDeviceBuffer(uint32_t base_bytes,
+                                          uint32_t size_bytes);
 
   // Returns a pipeline with deferred creation by its handle. May return nullptr
   // if failed to create the pipeline.
@@ -332,8 +352,6 @@ class D3D12CommandProcessor final : public CommandProcessor {
   bool IssueCopy() override;
   XE_NOINLINE
   bool IssueCopy_ReadbackResolvePath();
-  void IssueDraw_MemexportReadbackFullPath(uint32_t memexport_total_size);
-  void IssueDraw_MemexportReadbackFastPath(uint32_t memexport_total_size);
 
   void InitializeTrace() override;
 
@@ -498,7 +516,7 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // shared memory descriptor table. Bindless only.
   bool UpdateBindingsMesa(
       const SpirvShader* vertex_shader, const SpirvShader* pixel_shader,
-      bool memexport_used, bool primitive_polygonal,
+      bool memexport_used, bool route_to_host, bool primitive_polygonal,
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
       const draw_util::ViewportInfo& viewport_info,
       reg::RB_DEPTHCONTROL normalized_depth_control,
@@ -515,10 +533,6 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // a retired heap once its submission completes). Returns false if a new heap
   // could not be created.
   bool SwitchToNewBindlessSamplerHeap();
-
-  // Returns a buffer for reading GPU data back to the CPU. Assuming
-  // synchronizing immediately after use. Always in COPY_DEST state.
-  ID3D12Resource* RequestReadbackBuffer(uint32_t size);
 
   void WriteGammaRampSRV(bool is_pwl, D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
 
@@ -807,13 +821,10 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // Map: (written_address << 32 | written_length) -> ReadbackBuffer
   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
 
-  // Simple single buffer for memexport (full mode - always syncs, no
-  // double-buffering)
-  ID3D12Resource* memexport_readback_buffer_ = nullptr;
-  uint32_t memexport_readback_buffer_size_ = 0;
-
-  // Per-memexport double-buffered readback for fast mode (delayed sync)
-  std::unordered_map<uint64_t, ReadbackBuffer> memexport_readback_buffers_;
+  // Two-buffer memexport page tracking (data + methods), shared with the Vulkan
+  // backend as a class-body fragment so each backend gets its own non-virtual,
+  // inlinable copy. Requires <array> and SharedMemory, both included above.
+#include "../command_processor_memexport.inc"
 
   // The current fixed-function drawing state.
   D3D12_VIEWPORT ff_viewport_;

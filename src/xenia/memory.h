@@ -414,6 +414,13 @@ class Memory {
   // This is often something like 0x200000000.
   inline uint8_t* physical_membase() const { return physical_membase_; }
 
+  // The file mapping backing all guest memory views. Lets a consumer map its
+  // own separate view of guest RAM, e.g. to hand to a GPU heap import, without
+  // colliding with the write-watch protection on the managed views.
+  inline xe::memory::FileMappingHandle mapping_handle() const {
+    return mapping_;
+  }
+
   // Translates a guest physical address to a host address that can be accessed
   // as a normal pointer.
   // Note that the contents at the specified host address are big-endian.

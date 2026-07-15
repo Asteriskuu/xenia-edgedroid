@@ -118,7 +118,92 @@ bool D3D12SharedMemory::Initialize() {
       provider, xe::align(ui::d3d12::D3D12UploadBufferPool::kDefaultPageSize,
                           size_t(1) << page_size_log2()));
 
+  TryInitializeHostBuffer();
+
   return true;
+}
+
+void D3D12SharedMemory::TryInitializeHostBuffer() {
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+
+  // OpenExistingHeapFromAddress is on ID3D12Device3.
+  ID3D12Device3* device3 = nullptr;
+  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device3)))) {
+    XELOGI("Shared memory host import: ID3D12Device3 not available");
+    return;
+  }
+
+  D3D12_FEATURE_DATA_EXISTING_HEAPS existing_heaps = {};
+  if (FAILED(device3->CheckFeatureSupport(D3D12_FEATURE_EXISTING_HEAPS,
+                                          &existing_heaps,
+                                          sizeof(existing_heaps))) ||
+      !existing_heaps.Supported) {
+    XELOGI("Shared memory host import: existing heaps not supported");
+    device3->Release();
+    return;
+  }
+
+  // Map a dedicated view of guest physical RAM for the heap import. Importing
+  // the memory-managed view (TranslatePhysical(0)) makes D3D12 own those pages
+  // and Xenia's write-watch VirtualProtect on the same view then fails. A
+  // separate view of the same file-mapping pages keeps them coherent (shared
+  // backing) while isolating protection (per-view PTEs).
+  const size_t physical_offset =
+      size_t(memory().physical_membase() - memory().virtual_membase());
+  host_buffer_view_ = xe::memory::MapFileView(
+      memory().mapping_handle(), nullptr, kBufferSize,
+      xe::memory::PageAccess::kReadWrite, physical_offset);
+  if (host_buffer_view_ == nullptr) {
+    XELOGI(
+        "Shared memory host import: failed to map a dedicated guest RAM view");
+    device3->Release();
+    return;
+  }
+
+  // Import the 512 MB view as a heap. Its size comes from the enclosing OS
+  // allocation (this fresh view is exactly the buffer), so the buffer is placed
+  // at offset 0.
+  ID3D12Heap* heap = nullptr;
+  HRESULT hr = device3->OpenExistingHeapFromAddress(host_buffer_view_,
+                                                    IID_PPV_ARGS(&heap));
+  device3->Release();
+  if (FAILED(hr)) {
+    XELOGI(
+        "Shared memory host import: OpenExistingHeapFromAddress failed "
+        "(0x{:08X})",
+        static_cast<uint32_t>(hr));
+    xe::memory::UnmapFileView(memory().mapping_handle(), host_buffer_view_,
+                              kBufferSize);
+    host_buffer_view_ = nullptr;
+    return;
+  }
+
+  // OpenExistingHeapFromAddress returns a SHARED_CROSS_ADAPTER heap, so the
+  // buffer needs ALLOW_CROSS_ADAPTER. Memexport writes to it as a UAV.
+  D3D12_RESOURCE_DESC buffer_desc;
+  ui::d3d12::util::FillBufferResourceDesc(
+      buffer_desc, kBufferSize,
+      D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER |
+          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  host_buffer_state_ = D3D12_RESOURCE_STATE_COMMON;
+  hr = device->CreatePlacedResource(heap, 0, &buffer_desc, host_buffer_state_,
+                                    nullptr, IID_PPV_ARGS(&host_buffer_));
+  if (FAILED(hr)) {
+    XELOGI("Shared memory host import: UAV buffer placement failed (0x{:08X})",
+           static_cast<uint32_t>(hr));
+    host_buffer_ = nullptr;
+    heap->Release();
+    xe::memory::UnmapFileView(memory().mapping_handle(), host_buffer_view_,
+                              kBufferSize);
+    host_buffer_view_ = nullptr;
+    return;
+  }
+  host_buffer_->SetName(L"Shared Memory Host Buffer");
+  host_buffer_heap_ = heap;
+  host_buffer_gpu_address_ = host_buffer_->GetGPUVirtualAddress();
+  XELOGI("Shared memory: host buffer for memexport ranges ready");
 }
 
 void D3D12SharedMemory::Shutdown(bool from_destructor) {
@@ -127,6 +212,17 @@ void D3D12SharedMemory::Shutdown(bool from_destructor) {
   upload_buffer_pool_.reset();
 
   ui::d3d12::util::ReleaseAndNull(buffer_descriptor_heap_);
+
+  // Free the host buffer before its imported heap, and unmap the view backing
+  // the heap only after the heap is gone.
+  ui::d3d12::util::ReleaseAndNull(host_buffer_);
+  ui::d3d12::util::ReleaseAndNull(host_buffer_heap_);
+  host_buffer_gpu_address_ = 0;
+  if (host_buffer_view_ != nullptr) {
+    xe::memory::UnmapFileView(memory().mapping_handle(), host_buffer_view_,
+                              kBufferSize);
+    host_buffer_view_ = nullptr;
+  }
 
   // First free the buffer to detach it from the heaps.
   ui::d3d12::util::ReleaseAndNull(buffer_);
@@ -156,6 +252,12 @@ void D3D12SharedMemory::CompletedSubmissionUpdated() {
 void D3D12SharedMemory::BeginSubmission() {
   // ExecuteCommandLists is a full UAV barrier.
   buffer_uav_writes_commit_needed_ = false;
+  host_buffer_uav_writes_commit_needed_ = false;
+  // The host buffer is used only on memexport frames, so unlike buffer_ it can
+  // sit idle across submissions. Buffers decay to COMMON at each
+  // ExecuteCommandLists, so track it from COMMON every submission to avoid a
+  // stale before-state on the next transition.
+  host_buffer_state_ = D3D12_RESOURCE_STATE_COMMON;
 }
 
 void D3D12SharedMemory::CommitUAVWritesAndTransitionBuffer(
@@ -172,6 +274,25 @@ void D3D12SharedMemory::CommitUAVWritesAndTransitionBuffer(
   buffer_state_ = new_state;
   // "UAV -> anything" transition commits the writes implicitly.
   buffer_uav_writes_commit_needed_ = false;
+}
+
+void D3D12SharedMemory::CommitHostUAVWritesAndTransitionBuffer(
+    D3D12_RESOURCE_STATES new_state) {
+  if (host_buffer_ == nullptr) {
+    return;
+  }
+  if (host_buffer_state_ == new_state) {
+    if (new_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS &&
+        host_buffer_uav_writes_commit_needed_) {
+      command_processor_.PushUAVBarrier(host_buffer_);
+      host_buffer_uav_writes_commit_needed_ = false;
+    }
+    return;
+  }
+  command_processor_.PushTransitionBarrier(host_buffer_, host_buffer_state_,
+                                           new_state);
+  host_buffer_state_ = new_state;
+  host_buffer_uav_writes_commit_needed_ = false;
 }
 
 void D3D12SharedMemory::WriteRawSRVDescriptor(

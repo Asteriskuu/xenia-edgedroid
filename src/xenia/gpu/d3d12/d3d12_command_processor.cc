@@ -42,7 +42,6 @@ DECLARE_bool(clear_memory_page_state);
 DECLARE_bool(d3d12_debug);
 DECLARE_bool(gpu_debug_markers);
 DECLARE_bool(submit_on_primary_buffer_end);
-DECLARE_bool(readback_memexport_fast);
 
 namespace xe {
 namespace gpu {
@@ -112,7 +111,6 @@ void D3D12CommandProcessor::InvalidateGpuMemory() {
 
 void D3D12CommandProcessor::ClearReadbackBuffers() {
   readback_buffers_.clear();
-  memexport_readback_buffers_.clear();
 }
 
 void D3D12CommandProcessor::InitializeShaderStorage(
@@ -1522,6 +1520,35 @@ bool D3D12CommandProcessor::SetupContext() {
     shared_memory_->WriteRawUAVDescriptor(provider.OffsetViewDescriptor(
         view_bindless_heap_cpu_start_,
         uint32_t(SystemBindlessView::kSharedMemoryRawUAV)));
+    // Host buffer pairs for two-buffer memexport routing, only when it exists.
+    // The read pair is [host SRV, null UAV], the write pair [null SRV, host
+    // UAV], matching the device layout above.
+    if (shared_memory_->GetHostBuffer()) {
+      ui::d3d12::util::CreateBufferRawSRV(
+          device,
+          provider.OffsetViewDescriptor(
+              view_bindless_heap_cpu_start_,
+              uint32_t(SystemBindlessView::kSharedMemoryHostRawSRV)),
+          shared_memory_->GetHostBuffer(), SharedMemory::kBufferSize);
+      ui::d3d12::util::CreateBufferRawUAV(
+          device,
+          provider.OffsetViewDescriptor(
+              view_bindless_heap_cpu_start_,
+              uint32_t(SystemBindlessView::kSharedMemoryHostNullRawUAV)),
+          nullptr, 0);
+      ui::d3d12::util::CreateBufferRawSRV(
+          device,
+          provider.OffsetViewDescriptor(
+              view_bindless_heap_cpu_start_,
+              uint32_t(SystemBindlessView::kSharedMemoryHostNullRawSRV)),
+          nullptr, 0);
+      ui::d3d12::util::CreateBufferRawUAV(
+          device,
+          provider.OffsetViewDescriptor(
+              view_bindless_heap_cpu_start_,
+              uint32_t(SystemBindlessView::kSharedMemoryHostRawUAV)),
+          shared_memory_->GetHostBuffer(), SharedMemory::kBufferSize);
+    }
     // kEdramRawSRV.
     render_target_cache_->WriteEdramRawSRVDescriptor(
         provider.OffsetViewDescriptor(
@@ -1613,14 +1640,7 @@ void D3D12CommandProcessor::ShutdownContext() {
   }
   readback_buffers_.clear();
 
-  for (auto& pair : memexport_readback_buffers_) {
-    ui::d3d12::util::ReleaseAndNull(pair.second.buffers[0]);
-    ui::d3d12::util::ReleaseAndNull(pair.second.buffers[1]);
-  }
-  memexport_readback_buffers_.clear();
-
-  ui::d3d12::util::ReleaseAndNull(memexport_readback_buffer_);
-  memexport_readback_buffer_size_ = 0;
+  ResetMemexportPages();
 
   ShutdownZPDQueryResources();
   zpd_host_query_pool_.reset();
@@ -2546,6 +2566,29 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type,
   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
+void D3D12CommandProcessor::EnsureMemexportRangeInDeviceBuffer(
+    uint32_t base_bytes, uint32_t size_bytes) {
+  if (shared_memory_->GetHostBuffer() == nullptr || !size_bytes ||
+      base_bytes >= SharedMemory::kBufferSize) {
+    return;
+  }
+  size_bytes = std::min(size_bytes, SharedMemory::kBufferSize - base_bytes);
+  if (!IsMemexportRange(base_bytes, size_bytes)) {
+    return;
+  }
+  // Transition the host buffer to a copy source (ordering the memexport writes,
+  // which may have run several draws ago, before the read) and the device
+  // buffer to a copy destination, then copy just this range across. The
+  // following texture-load UseForReading transitions the device buffer to a
+  // read state, ordering the copy before the load.
+  shared_memory_->UseHostAsCopySource();
+  shared_memory_->UseAsCopyDestination();
+  SubmitBarriers();
+  deferred_command_list_.D3DCopyBufferRegion(
+      shared_memory_->GetBuffer(), base_bytes, shared_memory_->GetHostBuffer(),
+      base_bytes, size_bytes);
+}
+
 bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
@@ -2623,6 +2666,25 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   if (!primitive_processing_result.host_draw_vertex_count) {
     // Nothing to draw.
     return true;
+  }
+
+  // Two-buffer memexport routing: producer draws (memexport_used) and geometry
+  // draws consuming memexport output use the host buffer (aliasing guest RAM)
+  // so the output stays CPU coherent and consumers read it directly. Only
+  // texture-sampled ranges are copied into the device buffer on demand. Inert
+  // without the host buffer.
+  bool route_to_host = false;
+  if (shared_memory_->GetHostBuffer() != nullptr) {
+    route_to_host =
+        memexport_used ||
+        (any_memexport_pages_written_ &&
+         ((primitive_processing_result.index_buffer_type ==
+               PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+           IsMemexportRange(
+               primitive_processing_result.guest_index_base,
+               primitive_processing_result.guest_draw_vertex_count *
+                   uint32_t(sizeof(uint32_t)))) ||
+          VertexFetchInMemexportRange(regs, *vertex_shader)));
   }
 
   reg::RB_DEPTHCONTROL normalized_depth_control =
@@ -2859,9 +2921,9 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   // The spirv_to_dxil guest path fills SPIR-V system constants and binds the
   // Mesa root signature itself.
   if (!UpdateBindingsMesa(
-          vertex_shader, pixel_shader, memexport_used, primitive_polygonal,
-          primitive_processing_result, viewport_info, normalized_depth_control,
-          normalized_color_mask,
+          vertex_shader, pixel_shader, memexport_used, route_to_host,
+          primitive_polygonal, primitive_processing_result, viewport_info,
+          normalized_depth_control, normalized_color_mask,
           apply_host_depth_polygon_offset ? &host_depth_polygon_offset
                                           : nullptr,
           interpreter_placeholder)) {
@@ -3024,10 +3086,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   if (primitive_processing_result.index_buffer_type ==
       PrimitiveProcessor::ProcessedIndexBufferType::kNone) {
     if (!memexport_used) {
-      shared_memory_->UseForReading();
-
+      route_to_host ? shared_memory_->UseHostForReading()
+                    : shared_memory_->UseForReading();
     } else {
-      shared_memory_->UseForWriting();
+      route_to_host ? shared_memory_->UseHostForWriting()
+                    : shared_memory_->UseForWriting();
     }
     SubmitBarriers();
     deferred_command_list_.D3DDrawInstanced(
@@ -3056,10 +3119,13 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           if (scratch_index_buffer == nullptr) {
             return false;
           }
-          shared_memory_->UseAsCopySource();
+          route_to_host ? shared_memory_->UseHostAsCopySource()
+                        : shared_memory_->UseAsCopySource();
           SubmitBarriers();
           deferred_command_list_.D3DCopyBufferRegion(
-              scratch_index_buffer, 0, shared_memory_->GetBuffer(),
+              scratch_index_buffer, 0,
+              route_to_host ? shared_memory_->GetHostBuffer()
+                            : shared_memory_->GetBuffer(),
               primitive_processing_result.guest_index_base,
               index_buffer_view.SizeInBytes);
           PushTransitionBarrier(scratch_index_buffer,
@@ -3069,7 +3135,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
               scratch_index_buffer->GetGPUVirtualAddress();
         } else {
           index_buffer_view.BufferLocation =
-              shared_memory_->GetGPUAddress() +
+              (route_to_host ? shared_memory_->GetHostGPUAddress()
+                             : shared_memory_->GetGPUAddress()) +
               primitive_processing_result.guest_index_base;
         }
       } break;
@@ -3090,9 +3157,11 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     }
     deferred_command_list_.D3DIASetIndexBuffer(&index_buffer_view);
     if (memexport_used) {
-      shared_memory_->UseForWriting();
+      route_to_host ? shared_memory_->UseHostForWriting()
+                    : shared_memory_->UseForWriting();
     } else {
-      shared_memory_->UseForReading();
+      route_to_host ? shared_memory_->UseHostForReading()
+                    : shared_memory_->UseForReading();
     }
     SubmitBarriers();
     deferred_command_list_.D3DDrawIndexedInstanced(
@@ -3112,27 +3181,21 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     // memory as a UAV.
     // TODO(Triang3l): Find some PM4 command that can be used for indication of
     // when memexports should be awaited?
-    shared_memory_->MarkUAVWritesCommitNeeded();
+    route_to_host ? shared_memory_->MarkHostUAVWritesCommitNeeded()
+                  : shared_memory_->MarkUAVWritesCommitNeeded();
     // Invalidate textures in memexported memory and watch for changes.
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
       shared_memory_->RangeWrittenByGpu(
           memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
     }
-    if (GetGPUSetting(GPUSetting::ReadbackMemexport)) {
-      // Read the exported data on the CPU.
-      uint32_t memexport_total_size = 0;
+    if (route_to_host) {
+      // Output landed in host_buffer_ (guest RAM), already CPU coherent, so no
+      // readback. Record the written pages so geometry consumers route to the
+      // host buffer and texture loads copy their range into the device buffer.
       for (const draw_util::MemExportRange& memexport_range :
            memexport_ranges_) {
-        memexport_total_size += memexport_range.size_bytes;
-      }
-      if (memexport_total_size != 0) {
-        if (cvars::readback_memexport_fast) {
-          // Fast mode: use double-buffered readback with last frame'sd data
-          IssueDraw_MemexportReadbackFastPath(memexport_total_size);
-        } else {
-          // Full mode: immediate sync with stall
-          IssueDraw_MemexportReadbackFullPath(memexport_total_size);
-        }
+        MarkMemexportPagesWritten(memexport_range.base_address_dwords << 2,
+                                  memexport_range.size_bytes);
       }
     }
   }
@@ -3207,6 +3270,11 @@ bool D3D12CommandProcessor::IssueCopy() {
     result = render_target_cache_->Resolve(*memory_, *shared_memory_,
                                            *texture_cache_, written_address,
                                            written_length);
+    if (result) {
+      // The resolve wrote the device buffer. Drop any stale memexport marks so
+      // the output isn't overwritten with guest RAM by a later texture load.
+      ClearMemexportPages(written_address, written_length);
+    }
   } else {
     result = IssueCopy_ReadbackResolvePath();
   }
@@ -3229,6 +3297,9 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   if (!written_length) {
     return true;
   }
+  // Readback keeps guest RAM coherent, so this is only for accuracy, but a
+  // resolved page is no longer memexport output either way.
+  ClearMemexportPages(written_address, written_length);
 
   // Early check: if destination memory is not accessible, skip readback.
   VirtualHeap* physical_heap = memory_->GetPhysicalHeap();
@@ -3546,162 +3617,6 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   rb.current_index = 1 - rb.current_index;
 
   return true;
-}
-
-void D3D12CommandProcessor::IssueDraw_MemexportReadbackFullPath(
-    uint32_t memexport_total_size) {
-  // Full mode: immediate sync with stall
-  ID3D12Resource* readback_buffer = RequestReadbackBuffer(memexport_total_size);
-  if (readback_buffer != nullptr) {
-    shared_memory_->UseAsCopySource();
-    SubmitBarriers();
-    InsertDebugMarker("Memexport Readback (sync): %u bytes, %zu ranges",
-                      memexport_total_size, memexport_ranges_.size());
-    ID3D12Resource* shared_memory_buffer = shared_memory_->GetBuffer();
-    uint32_t readback_buffer_offset = 0;
-    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-      uint32_t memexport_range_size = memexport_range.size_bytes;
-      deferred_command_list_.D3DCopyBufferRegion(
-          readback_buffer, readback_buffer_offset, shared_memory_buffer,
-          memexport_range.base_address_dwords << 2, memexport_range_size);
-      readback_buffer_offset += memexport_range_size;
-    }
-    if (AwaitAllQueueOperationsCompletion()) {
-      D3D12_RANGE readback_range;
-      readback_range.Begin = 0;
-      readback_range.End = memexport_total_size;
-      void* readback_mapping;
-      if (SUCCEEDED(
-              readback_buffer->Map(0, &readback_range, &readback_mapping))) {
-        const uint8_t* readback_bytes =
-            reinterpret_cast<const uint8_t*>(readback_mapping);
-        for (const draw_util::MemExportRange& memexport_range :
-             memexport_ranges_) {
-          memory::vastcpy(
-              memory_->TranslatePhysical(memexport_range.base_address_dwords
-                                         << 2),
-              const_cast<uint8_t*>(readback_bytes), memexport_range.size_bytes);
-          readback_bytes += memexport_range.size_bytes;
-        }
-        D3D12_RANGE readback_write_range = {};
-        readback_buffer->Unmap(0, &readback_write_range);
-      }
-    }
-  }
-}
-
-void D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(
-    uint32_t memexport_total_size) {
-  // Fast mode: double-buffered readback (similar to resolve readback)
-  // Create a key based on first range address and total size
-  // This should be stable across frames for the same memexport operation
-  if (memexport_ranges_.empty()) {
-    return;
-  }
-
-  uint64_t memexport_key = MakeReadbackResolveKey(
-      memexport_ranges_[0].base_address_dwords, memexport_total_size);
-
-  ReadbackBuffer& rb = memexport_readback_buffers_[memexport_key];
-  rb.last_used_frame = frame_current_;
-
-  uint32_t write_index = rb.current_index;
-  uint32_t size = AlignReadbackBufferSize(memexport_total_size);
-
-  // Allocate/resize write buffer if needed
-  if (size > rb.sizes[write_index]) {
-    const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
-    ID3D12Device* device = provider.GetDevice();
-    D3D12_RESOURCE_DESC buffer_desc;
-    ui::d3d12::util::FillBufferResourceDesc(buffer_desc, size,
-                                            D3D12_RESOURCE_FLAG_NONE);
-    ID3D12Resource* buffer;
-    if (SUCCEEDED(device->CreateCommittedResource(
-            &ui::d3d12::util::kHeapPropertiesReadback,
-            provider.GetHeapFlagCreateNotZeroed(), &buffer_desc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer)))) {
-      // Unmap and release old buffer
-      if (rb.buffers[write_index] != nullptr) {
-        if (rb.mapped_data[write_index] != nullptr) {
-          rb.buffers[write_index]->Unmap(0, nullptr);
-          rb.mapped_data[write_index] = nullptr;
-        }
-        rb.buffers[write_index]->Release();
-      }
-      rb.buffers[write_index] = buffer;
-      rb.sizes[write_index] = size;
-
-      // Map the new buffer persistently
-      D3D12_RANGE read_range = {0, size};
-      if (SUCCEEDED(
-              buffer->Map(0, &read_range, &rb.mapped_data[write_index]))) {
-        // Successfully mapped
-      } else {
-        XELOGE("Failed to persistently map memexport readback buffer");
-        rb.mapped_data[write_index] = nullptr;
-      }
-    } else {
-      XELOGE("Failed to create a {} MB memexport readback buffer", size >> 20);
-      return;
-    }
-  }
-
-  // Copy exported data to current frame's buffer
-  shared_memory_->UseAsCopySource();
-  SubmitBarriers();
-  // Delayed sync reads the previous frame's buffer; on a cache miss (first use
-  // or buffer resize) it must stall and read this frame's buffer instead. Known
-  // here so the marker reports whether this readback actually stalled.
-  uint32_t read_index = 1 - write_index;
-  bool is_cache_miss = rb.buffers[read_index] == nullptr ||
-                       memexport_total_size > rb.sizes[read_index];
-  InsertDebugMarker("Memexport Readback (async%s): %u bytes, %zu ranges",
-                    is_cache_miss ? ", sync fallback" : "",
-                    memexport_total_size, memexport_ranges_.size());
-  ID3D12Resource* shared_memory_buffer = shared_memory_->GetBuffer();
-  uint32_t readback_buffer_offset = 0;
-  for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-    uint32_t memexport_range_size = memexport_range.size_bytes;
-    deferred_command_list_.D3DCopyBufferRegion(
-        rb.buffers[write_index], readback_buffer_offset, shared_memory_buffer,
-        memexport_range.base_address_dwords << 2, memexport_range_size);
-    readback_buffer_offset += memexport_range_size;
-  }
-
-  // On a cache miss, stall and read the buffer just written this frame.
-  if (is_cache_miss) {
-    read_index = write_index;
-    if (!AwaitAllQueueOperationsCompletion()) {
-      return;
-    }
-  }
-
-  // Only copy on cache miss (when we have fresh data from GPU sync)
-  // On cache hit, we'd be copying stale data from previous frame
-  if (is_cache_miss && rb.buffers[read_index] != nullptr &&
-      memexport_total_size <= rb.sizes[read_index] &&
-      rb.mapped_data[read_index] != nullptr) {
-    const uint8_t* readback_bytes =
-        static_cast<const uint8_t*>(rb.mapped_data[read_index]);
-    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-      uint8_t* dest_ptr =
-          memory_->TranslatePhysical(memexport_range.base_address_dwords << 2);
-      // vastcpy requires 64-byte alignment for non-temporal stores.
-      // If addresses aren't aligned, fall back to memcpy.
-      if ((reinterpret_cast<uintptr_t>(dest_ptr) & 63) == 0 &&
-          (reinterpret_cast<uintptr_t>(readback_bytes) & 63) == 0) {
-        memory::vastcpy(dest_ptr, const_cast<uint8_t*>(readback_bytes),
-                        memexport_range.size_bytes);
-      } else {
-        std::memcpy(dest_ptr, readback_bytes, memexport_range.size_bytes);
-      }
-      readback_bytes += memexport_range.size_bytes;
-    }
-  }
-
-  // Swap buffer index for next time this specific memexport address is used
-  // This way next time we write to the other buffer and read from this one
-  rb.current_index = 1 - rb.current_index;
 }
 
 void D3D12CommandProcessor::CheckSubmissionCompletion(
@@ -4070,7 +3985,6 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
 
     // Evict old readback buffers once per frame
     EvictOldReadbackBuffers(readback_buffers_);
-    EvictOldReadbackBuffers(memexport_readback_buffers_);
 
     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
       cache_clear_requested_ = false;
@@ -4200,7 +4114,7 @@ void D3D12CommandProcessor::UpdateFixedFunctionState(
 }
 bool D3D12CommandProcessor::UpdateBindingsMesa(
     const SpirvShader* vertex_shader, const SpirvShader* pixel_shader,
-    bool memexport_used, bool primitive_polygonal,
+    bool memexport_used, bool route_to_host, bool primitive_polygonal,
     const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
     const draw_util::ViewportInfo& viewport_info,
     reg::RB_DEPTHCONTROL normalized_depth_control,
@@ -4662,14 +4576,22 @@ bool D3D12CommandProcessor::UpdateBindingsMesa(
   // Shared memory descriptor table (SRV t0 + UAV u0, space0). The bindless
   // system view heap holds an adjacent [shared SRV, null UAV] pair for reads
   // and [null SRV, shared UAV] pair for memexport writes, matching the table
-  // layout.
+  // layout. Memexport-routed draws pick the host buffer's equivalent pairs.
+  SystemBindlessView shared_memory_view;
+  if (route_to_host) {
+    shared_memory_view =
+        memexport_used
+            ? SystemBindlessView::kNullRawSRVAndSharedMemoryHostRawUAVStart
+            : SystemBindlessView::kSharedMemoryHostRawSRVAndNullRawUAVStart;
+  } else {
+    shared_memory_view =
+        memexport_used
+            ? SystemBindlessView::kNullRawSRVAndSharedMemoryRawUAVStart
+            : SystemBindlessView::kSharedMemoryRawSRVAndNullRawUAVStart;
+  }
   D3D12_GPU_DESCRIPTOR_HANDLE shared_memory_handle =
-      provider.OffsetViewDescriptor(
-          view_bindless_heap_gpu_start_,
-          uint32_t(
-              memexport_used
-                  ? SystemBindlessView::kNullRawSRVAndSharedMemoryRawUAVStart
-                  : SystemBindlessView::kSharedMemoryRawSRVAndNullRawUAVStart));
+      provider.OffsetViewDescriptor(view_bindless_heap_gpu_start_,
+                                    uint32_t(shared_memory_view));
   deferred_command_list_.D3DSetGraphicsRootDescriptorTable(
       kRootParameter_Mesa_SharedMemory, shared_memory_handle);
 
@@ -4849,36 +4771,6 @@ bool D3D12CommandProcessor::SwitchToNewBindlessSamplerHeap() {
   deferred_command_list_.SetDescriptorHeaps(view_bindless_heap_,
                                             sampler_bindless_heap_current_);
   return true;
-}
-
-ID3D12Resource* D3D12CommandProcessor::RequestReadbackBuffer(uint32_t size) {
-  if (size == 0) {
-    return nullptr;
-  }
-
-  size = AlignReadbackBufferSize(size);
-
-  if (size > memexport_readback_buffer_size_) {
-    const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
-    ID3D12Device* device = provider.GetDevice();
-    D3D12_RESOURCE_DESC buffer_desc;
-    ui::d3d12::util::FillBufferResourceDesc(buffer_desc, size,
-                                            D3D12_RESOURCE_FLAG_NONE);
-    ID3D12Resource* buffer;
-    if (FAILED(device->CreateCommittedResource(
-            &ui::d3d12::util::kHeapPropertiesReadback,
-            provider.GetHeapFlagCreateNotZeroed(), &buffer_desc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer)))) {
-      XELOGE("Failed to create a {} MB readback buffer", size >> 20);
-      return nullptr;
-    }
-    if (memexport_readback_buffer_ != nullptr) {
-      memexport_readback_buffer_->Release();
-    }
-    memexport_readback_buffer_ = buffer;
-    memexport_readback_buffer_size_ = size;
-  }
-  return memexport_readback_buffer_;
 }
 
 void D3D12CommandProcessor::EnsureZPDQueryResources() {

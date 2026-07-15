@@ -39,8 +39,6 @@ namespace gpu {
 
 enum class GPUSetting {
   ClearMemoryPageState,
-  ReadbackMemexport,
-  ReadbackMemexportFast
 };
 
 enum class ReadbackResolveMode {

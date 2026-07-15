@@ -182,8 +182,6 @@ DECLARE_bool(clear_memory_page_state);
 
 DECLARE_string(readback_resolve);
 
-DECLARE_bool(readback_memexport);
-
 DEFINE_transient_bool(return_to_ui, false,
                       "Return to UI process when game exits. Set automatically "
                       "when launching from UI.",
@@ -3470,11 +3468,6 @@ void EmulatorWindow::ToggleGPUSetting(gpu::GPUSetting setting) {
       new_value = !cvars::clear_memory_page_state;
       SaveGPUSetting(GPUSetting::ClearMemoryPageState, new_value);
       cvar_name = "clear_memory_page_state";
-      break;
-    case GPUSetting::ReadbackMemexport:
-      new_value = !cvars::readback_memexport;
-      SaveGPUSetting(GPUSetting::ReadbackMemexport, new_value);
-      cvar_name = "readback_memexport";
       break;
   }
 

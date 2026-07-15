@@ -93,22 +93,6 @@ DEFINE_bool(
     "Vulkan, SV_Barycentrics on Direct3D 12).",
     "GPU");
 
-DEFINE_bool(
-    readback_memexport, true,
-    "Read data written by memory export in shaders on the CPU. "
-    "This is needed in some games but many only access exported data on "
-    "the GPU, so can be disabled for minor optimization. When "
-    "combined with readback_memexport_fast, performance impact is minimal.",
-    "GPU");
-
-DEFINE_bool(readback_memexport_fast, true,
-            "Use fast (double-buffered, 1 frame delayed) readback for "
-            "memexport instead\n"
-            "of immediate GPU sync. Removes main performance penalty when "
-            "readback_memexport\n"
-            "is enabled at the expense of accuracy.",
-            "GPU");
-
 namespace xe {
 namespace gpu {
 
@@ -119,12 +103,6 @@ void SaveGPUSetting(GPUSetting setting, uint64_t value) {
     case GPUSetting::ClearMemoryPageState:
       OVERRIDE_bool(clear_memory_page_state, static_cast<bool>(value));
       break;
-    case GPUSetting::ReadbackMemexport:
-      OVERRIDE_bool(readback_memexport, static_cast<bool>(value));
-      break;
-    case GPUSetting::ReadbackMemexportFast:
-      OVERRIDE_bool(readback_memexport_fast, static_cast<bool>(value));
-      break;
   }
 }
 
@@ -132,10 +110,6 @@ bool GetGPUSetting(GPUSetting setting) {
   switch (setting) {
     case GPUSetting::ClearMemoryPageState:
       return cvars::clear_memory_page_state;
-    case GPUSetting::ReadbackMemexport:
-      return cvars::readback_memexport;
-    case GPUSetting::ReadbackMemexportFast:
-      return cvars::readback_memexport_fast;
     default:
       return false;
   }

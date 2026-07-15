@@ -1478,10 +1478,7 @@ void VulkanCommandProcessor::ShutdownContext() {
   // Both sets are freed with the pool - drop the routing handle so it stays
   // null (routing disabled) until the pool is recreated.
   shared_memory_host_and_edram_descriptor_set_ = VK_NULL_HANDLE;
-  memexport_written_pages_.fill(0);
-  any_memexport_pages_written_ = false;
-  memexport_written_page_min_ = kMemexportPageCount;
-  memexport_written_page_max_ = 0;
+  ResetMemexportPages();
   zpd_fsi_counter_descriptor_buffer_ = VK_NULL_HANDLE;
   zpd_fsi_counter_descriptor_range_ = 0;
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
@@ -3042,69 +3039,6 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type,
   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
-void VulkanCommandProcessor::MarkMemexportPagesWritten(uint32_t base_bytes,
-                                                       uint32_t size_bytes) {
-  if (!size_bytes || base_bytes >= SharedMemory::kBufferSize) {
-    return;
-  }
-  size_bytes = std::min(size_bytes, SharedMemory::kBufferSize - base_bytes);
-  uint32_t first_page = base_bytes >> 12;
-  uint32_t last_page = (base_bytes + size_bytes - 1) >> 12;
-  for (uint32_t page = first_page; page <= last_page; ++page) {
-    memexport_written_pages_[page >> 6] |= uint64_t(1) << (page & 63);
-  }
-  any_memexport_pages_written_ = true;
-  memexport_written_page_min_ =
-      std::min(memexport_written_page_min_, first_page);
-  memexport_written_page_max_ =
-      std::max(memexport_written_page_max_, last_page);
-}
-
-bool VulkanCommandProcessor::IsMemexportRange(uint32_t base_bytes,
-                                              uint32_t size_bytes) const {
-  if (!any_memexport_pages_written_ || !size_bytes ||
-      base_bytes >= SharedMemory::kBufferSize) {
-    return false;
-  }
-  size_bytes = std::min(size_bytes, SharedMemory::kBufferSize - base_bytes);
-  // Clamp the scan to the written memexport window. A range entirely outside it
-  // (the common case - most textures are nowhere near the memexport region)
-  // scans nothing. This is called per texture load, including in titles that do
-  // memexport, so the window check is what keeps those loads cheap.
-  uint32_t first_page = std::max(base_bytes >> 12, memexport_written_page_min_);
-  uint32_t last_page = std::min((base_bytes + size_bytes - 1) >> 12,
-                                memexport_written_page_max_);
-  for (uint32_t page = first_page; page <= last_page; ++page) {
-    if (memexport_written_pages_[page >> 6] & (uint64_t(1) << (page & 63))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool VulkanCommandProcessor::VertexFetchInMemexportRange(
-    const RegisterFile& regs, const VulkanShader& vertex_shader) const {
-  const Shader::ConstantRegisterMap& constant_map =
-      vertex_shader.constant_register_map();
-  for (uint32_t i = 0; i < xe::countof(constant_map.vertex_fetch_bitmap); ++i) {
-    uint32_t vfetch_bits = constant_map.vertex_fetch_bitmap[i];
-    uint32_t j;
-    while (xe::bit_scan_forward(vfetch_bits, &j)) {
-      vfetch_bits = xe::clear_lowest_bit(vfetch_bits);
-      xenos::xe_gpu_vertex_fetch_t vfetch_constant =
-          regs.GetVertexFetch(i * 32 + j);
-      if (vfetch_constant.type != xenos::FetchConstantType::kVertex) {
-        continue;
-      }
-      if (IsMemexportRange(vfetch_constant.address << 2,
-                           vfetch_constant.size << 2)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                        uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
@@ -4094,6 +4028,10 @@ bool VulkanCommandProcessor::IssueCopy() {
     return false;
   }
   ++submission_in_progress_.resolve_count;
+
+  // The resolve wrote the device buffer. Drop any stale memexport marks so the
+  // output isn't overwritten with guest RAM by a later texture load.
+  ClearMemexportPages(written_address, written_length);
 
   // CPU readback resolve path (if not disabled).
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
