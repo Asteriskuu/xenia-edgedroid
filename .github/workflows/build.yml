@@ -432,3 +432,64 @@ jobs:
           name: xenia_edge_windows
           path: artifacts\xenia_edge
           if-no-files-found: error
+
+  build-android:
+    name: Build Android
+    needs: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache Slang
+        id: cache-slang
+        uses: actions/cache@v5
+        with:
+          path: .slang
+          key: ${{ runner.os }}-${{ runner.arch }}-slang-2026.8
+
+      - name: Download Slang
+        if: steps.cache-slang.outputs.cache-hit != 'true'
+        run: ./xenia-build.py slang
+
+      - name: Setup
+        run: |
+          git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/DirectXShaderCompiler).+' .gitmodules)
+          ./xenia-build.py fetchdata
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Build
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          CMAKE_C_COMPILER_LAUNCHER: sccache
+          CMAKE_CXX_COMPILER_LAUNCHER: sccache
+        run: |
+          ./xenia-build.py build --config=Release --os=android
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
+      - name: Prepare artifacts
+        id: prepare_artifacts
+        run: |
+          mkdir -p artifacts/android
+          find . -name "*.apk" -exec cp {} artifacts/android/ \;
+          cp LICENSE artifacts/android/
+
+      - name: Upload xenia edge Android artifacts
+        if: steps.prepare_artifacts.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia_edge_android
+          path: artifacts/android
+          if-no-files-found: error
