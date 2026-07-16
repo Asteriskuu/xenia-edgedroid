@@ -10,6 +10,8 @@
 #ifndef XENIA_UI_ICON_DECODE_H_
 #define XENIA_UI_ICON_DECODE_H_
 
+#ifndef __ANDROID__
+
 #include <cstdint>
 #include <vector>
 
@@ -32,5 +34,7 @@ wxBitmapBundle WrapRgbaIcon(const std::vector<uint8_t>& rgba, int width,
 
 }  // namespace ui
 }  // namespace xe
+
+#endif  // !__ANDROID__
 
 #endif  // XENIA_UI_ICON_DECODE_H_
