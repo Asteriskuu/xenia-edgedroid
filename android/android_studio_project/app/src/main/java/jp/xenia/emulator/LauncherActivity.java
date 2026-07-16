@@ -16,9 +16,6 @@ public class LauncherActivity extends AppCompatActivity {
     private TextView statusText;
     private String selectedFilePath = null;
 
-    private final ActivityResultContracts.OpenDocument openDocumentContract = 
-        new ActivityResultContracts.OpenDocument();
-
     private androidx.activity.result.ActivityResultLauncher<String[]> filePickerLauncher;
 
     @Override
