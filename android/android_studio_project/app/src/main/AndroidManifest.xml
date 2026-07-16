@@ -14,6 +14,9 @@
 
     <!-- Granted automatically - guest sockets. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application
         android:allowBackup="true"
@@ -43,6 +46,7 @@
             android:name="jp.xenia.emulator.WindowDemoActivity"
             android:exported="true"
             android:label="@string/activity_label_window_demo"
+            android:screenOrientation="sensorLandscape"
             android:theme="@android:style/Theme.Material.Light.NoActionBar" />
 
     </application>
