@@ -8,6 +8,10 @@
 #include <android/log.h>
 
 #include "xenia/emulator.h"
+#include "xenia/gpu/vulkan/vulkan_graphics_system.h"
+#include "xenia/apu/nop/nop_audio_system.h"
+#include "xenia/hid/nop/nop_input_driver.h"
+#include "xenia/config.h"
 
 #define LOG_TAG "XeniaAndroid"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -54,17 +58,37 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 storage_root / "cache"
             );
 
-            LOGI("Setting up emulator...");
-            if (XFAILED(g_emulator->Setup(nullptr, nullptr, false, nullptr, nullptr, nullptr))) {
+            LOGI("Loading game config...");
+            config::LoadGameConfigForFile(game_path);
+
+            auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
+                LOGI("Creating Vulkan graphics system");
+                return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
+            };
+
+            auto audio_factory = [](xe::cpu::Processor* processor) -> std::unique_ptr<xe::apu::AudioSystem> {
+                LOGI("Creating NOP audio system");
+                return std::make_unique<xe::apu::nop::NopAudioSystem>(processor);
+            };
+
+            auto input_factory = [](xe::ui::Window* window) -> std::vector<std::unique_ptr<xe::hid::InputDriver>> {
+                std::vector<std::unique_ptr<xe::hid::InputDriver>> drivers;
+                LOGI("Creating NOP input driver");
+                drivers.push_back(std::make_unique<xe::hid::nop::NopInputDriver>(window, 0));
+                return drivers;
+            };
+
+            LOGI("Setting up emulator");
+            if (XFAILED(g_emulator->Setup(nullptr, nullptr, false, audio_factory, graphics_factory, input_factory))) {
                 LOGE("Failed to setup emulator");
                 g_emulator_running = false;
                 return;
             }
 
-            LOGI("Mounting standard drives...");
+            LOGI("Mounting standard drives");
             g_emulator->MountStandardDrives();
 
-            LOGI("Launching game path...");
+            LOGI("Launching game: %s", game_path.c_str());
             X_STATUS result = g_emulator->LaunchPath(game_path);
             if (XFAILED(result)) {
                 LOGE("Failed to launch game: %08X", result);
@@ -75,7 +99,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             LOGI("Game running, waiting for exit...");
             g_emulator->WaitUntilExit();
 
-            LOGI("Game exited");
+            LOGI("Game exited successfully");
 
         } catch (const std::exception& e) {
             LOGE("Exception: %s", e.what());
@@ -90,7 +114,7 @@ JNIEXPORT void JNICALL
 Java_jp_xenia_emulator_WindowDemoActivity_nativeShutdown(
     JNIEnv* env, jobject thiz) {
 
-    LOGI("Shutting down emulator...");
+    LOGI("Shutting down emulator");
     g_emulator_running = false;
 
     if (g_emulator) {
