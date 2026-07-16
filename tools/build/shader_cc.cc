@@ -238,6 +238,31 @@ int RunCommand(const std::vector<std::string>& args) {
     return -1;
   }
   return static_cast<int>(rc);
+#elif defined(__ANDROID__)
+  std::vector<char*> argv;
+  argv.reserve(args.size() + 1);
+  for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+  argv.push_back(nullptr);
+  
+  pid_t pid = fork();
+  if (pid < 0) {
+    std::fprintf(stderr, "fork failed: %s\n", std::strerror(errno));
+    return -1;
+  }
+  
+  if (pid == 0) {
+    execvp(argv[0], argv.data());
+    std::fprintf(stderr, "execvp(%s) failed: %s\n", argv[0], std::strerror(errno));
+    exit(127);
+  }
+  
+  int status = 0;
+  if (waitpid(pid, &status, 0) < 0) {
+    std::fprintf(stderr, "waitpid failed for %s\n", argv[0]);
+    return -1;
+  }
+  if (!WIFEXITED(status)) return -1;
+  return WEXITSTATUS(status);
 #else
   std::vector<char*> argv;
   argv.reserve(args.size() + 1);
