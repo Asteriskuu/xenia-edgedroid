@@ -10,7 +10,7 @@ public class WindowDemoActivity extends AppCompatActivity implements SurfaceHold
     private String gamePath = null;
 
     static {
-        System.loadLibrary("xenia-jni");
+        System.loadLibrary("xenia-app");
     }
 
     @Override
