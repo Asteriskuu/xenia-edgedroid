@@ -136,6 +136,25 @@ bool VirtualFileSystem::ResolveSymbolicLink(const std::string_view path,
   return was_resolved;
 }
 
+namespace {
+
+// A mount path matches only on a whole path component. Without this a device
+// mounted at ...\Content also swallows ...\Content_Eng.
+bool MountPathMatches(const std::string_view path,
+                      const std::string_view mount_path) {
+  if (mount_path.empty() || !xe::utf8::starts_with_case(path, mount_path)) {
+    return false;
+  }
+  // Mounts ending in a delimiter already sit on a component boundary.
+  const char last = mount_path.back();
+  if (last == '\\' || last == ':') {
+    return true;
+  }
+  return path.size() == mount_path.size() || path[mount_path.size()] == '\\';
+}
+
+}  // namespace
+
 Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
   auto global_lock = global_critical_region_.Acquire();
 
@@ -153,7 +172,7 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
   // most specific mount must win regardless of registration order.
   Device* device = nullptr;
   for (const auto& d : devices_) {
-    if (xe::utf8::starts_with_case(normalized_path, d->mount_path()) &&
+    if (MountPathMatches(normalized_path, d->mount_path()) &&
         (!device || d->mount_path().size() > device->mount_path().size())) {
       device = d.get();
     }
