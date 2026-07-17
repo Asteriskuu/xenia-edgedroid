@@ -43,10 +43,11 @@ enum class GPUSetting {
 
 enum class ReadbackResolveMode {
   kDisabled,  // No readback (none)
-  kSome,      // Delayed sync, skip copy on cache hit (some)
-  kFast,      // Delayed sync, copy every frame (fast)
-  kFull       // Immediate sync with GPU stall (full)
+  kFast,      // Copy only CPU-read resolves into guest RAM (fast)
+  kAll        // Copy every resolve into guest RAM (all)
 };
+// The readback_resolve_sync cvar makes fast/all copies stall for same-frame
+// coherency instead of running deferred, about a frame behind.
 
 // Occlusion queries - ZPD report mode.
 enum class ZPDMode {
@@ -233,10 +234,6 @@ class CommandProcessor {
 
   static constexpr uint32_t kReadbackBufferSizeIncrement = 16 * 1024 * 1024;
 
-  // Eviction policy constants for readback buffer cache
-  static constexpr size_t kMaxReadbackBuffers = 256;
-  static constexpr uint64_t kReadbackBufferEvictionAgeFrames = 60;
-
   // Progressive alignment for readback buffers to avoid wasting memory
   static inline uint32_t AlignReadbackBufferSize(uint32_t size) {
     if (size < 1 * 1024 * 1024) {
@@ -253,6 +250,21 @@ class CommandProcessor {
                                                 uint32_t length) {
     return (uint64_t(address) << 32) | uint64_t(length);
   }
+
+  // Constants for the shared resolve-downscale compute shader (used by the
+  // D3D12 and Vulkan backends to downscale a scaled resolve back to 1x).
+  struct ResolveDownscaleConstants {
+    uint32_t scale_x;          // 1 to kMaxDrawResolutionScaleAlongAxis
+    uint32_t scale_y;          // 1 to kMaxDrawResolutionScaleAlongAxis
+    uint32_t pixel_size_log2;  // 0=8bit, 1=16bit, 2=32bit, 3=64bit
+    uint32_t tile_count;       // Number of 32x32 tiles to process
+    // Byte offset into the source buffer. On D3D12 this is 0 (the offset is
+    // baked into the source SRV); on Vulkan it is the real byte offset.
+    uint32_t source_offset_bytes;
+    // When non-zero, apply half-pixel offset correction by sampling from
+    // (scale/2, scale/2) within each scaled block instead of (0, 0).
+    uint32_t half_pixel_offset;
+  };
 
   void WorkerThreadMain();
   virtual bool SetupContext() = 0;

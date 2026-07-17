@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -73,7 +74,6 @@ class D3D12CommandProcessor final : public CommandProcessor {
 
   void ClearCaches() override;
   void InvalidateGpuMemory() override;
-  void ClearReadbackBuffers() override;
 
   void InitializeShaderStorage(
       const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
@@ -752,23 +752,10 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // Resolve downscale compute shader for scaled resolution readback.
   // Downscales scaled resolve buffer data back to 1x resolution on the GPU,
   // avoiding expensive CPU-side downscaling and reducing PCIe bandwidth.
-  struct ResolveDownscaleConstants {
-    uint32_t scale_x;          // 1 to kMaxDrawResolutionScaleAlongAxis
-    uint32_t scale_y;          // 1 to kMaxDrawResolutionScaleAlongAxis
-    uint32_t pixel_size_log2;  // 0=8bit, 1=16bit, 2=32bit, 3=64bit
-    uint32_t tile_count;       // Number of 32x32 tiles to process
-    // Byte offset into the source buffer. Always 0 on D3D12 (the offset is
-    // baked into the source SRV). Kept for a shared shader with Vulkan.
-    uint32_t source_offset_bytes;
-    // When non-zero, apply half-pixel offset correction by sampling from
-    // (scale/2, scale/2) within each scaled block instead of (0, 0).
-    uint32_t half_pixel_offset;
-  };
   enum class ResolveDownscaleRootParameter : UINT {
     kConstants,
     kSource,
     kDestination,
-
     kCount,
   };
   Microsoft::WRL::ComPtr<ID3D12RootSignature> resolve_downscale_root_signature_;
@@ -805,26 +792,18 @@ class D3D12CommandProcessor final : public CommandProcessor {
   D3D12_RESOURCE_STATES scratch_buffer_state_;
   bool scratch_buffer_used_ = false;
 
-  // Per-resolve double-buffered readback for delayed sync
-  struct ReadbackBuffer {
-    ID3D12Resource* buffers[2] = {nullptr, nullptr};
-    uint32_t sizes[2] = {0, 0};
-    void* mapped_data[2] = {nullptr, nullptr};  // Persistent mappings
-    uint32_t current_index = 0;
-    uint64_t last_used_frame = 0;
-  };
-
-  // Helper to evict old readback buffers from a cache map
-  void EvictOldReadbackBuffers(
-      std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map);
-
-  // Map: (written_address << 32 | written_length) -> ReadbackBuffer
-  std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
-
   // Two-buffer memexport page tracking (data + methods), shared with the Vulkan
   // backend as a class-body fragment so each backend gets its own non-virtual,
   // inlinable copy. Requires <array> and SharedMemory, both included above.
 #include "../command_processor_memexport.inc"
+
+  // Backend-agnostic resolve read-watch consumption tracking, shared with the
+  // Vulkan backend (same class-body fragment).
+#include "../command_processor_resolve_readwatch.inc"
+  // Per-backend trampoline from the memory read callback into the shared
+  // MarkResolvePagesRead.
+  static void ResolveReadCallbackThunk(void* context, uint32_t physical_address,
+                                       uint32_t length);
 
   // The current fixed-function drawing state.
   D3D12_VIEWPORT ff_viewport_;

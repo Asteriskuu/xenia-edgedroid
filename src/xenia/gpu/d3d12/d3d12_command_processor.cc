@@ -109,10 +109,6 @@ void D3D12CommandProcessor::InvalidateGpuMemory() {
   shared_memory_->InvalidateAllPages();
 }
 
-void D3D12CommandProcessor::ClearReadbackBuffers() {
-  readback_buffers_.clear();
-}
-
 void D3D12CommandProcessor::InitializeShaderStorage(
     const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
     std::function<void()> completion_callback) {
@@ -647,6 +643,11 @@ bool D3D12CommandProcessor::SetupContext() {
     XELOGE("Failed to initialize shared memory");
     return false;
   }
+
+  // Read-watch consumption tracking for resolves.
+  InitResolveReadWatch();
+  resolve_read_callback_ = memory_->RegisterPhysicalMemoryReadCallback(
+      ResolveReadCallbackThunk, this);
 
   // Initialize the render target cache before configuring binding - need to
   // know if using rasterizer-ordered views for the bindless root signature.
@@ -1627,20 +1628,8 @@ bool D3D12CommandProcessor::SetupContext() {
 void D3D12CommandProcessor::ShutdownContext() {
   AwaitAllQueueOperationsCompletion();
 
-  for (auto& pair : readback_buffers_) {
-    for (int i = 0; i < 2; i++) {
-      if (pair.second.buffers[i] != nullptr) {
-        if (pair.second.mapped_data[i] != nullptr) {
-          pair.second.buffers[i]->Unmap(0, nullptr);
-        }
-      }
-    }
-    ui::d3d12::util::ReleaseAndNull(pair.second.buffers[0]);
-    ui::d3d12::util::ReleaseAndNull(pair.second.buffers[1]);
-  }
-  readback_buffers_.clear();
-
   ResetMemexportPages();
+  ResetResolveReadWatch();
 
   ShutdownZPDQueryResources();
   zpd_host_query_pool_.reset();
@@ -3232,29 +3221,11 @@ void D3D12CommandProcessor::InitializeTrace() {
   }
 }
 
-void D3D12CommandProcessor::EvictOldReadbackBuffers(
-    std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map) {
-  if (frame_current_ <= kReadbackBufferEvictionAgeFrames) {
-    return;
-  }
-
-  for (auto it = buffer_map.begin(); it != buffer_map.end();) {
-    if (it->second.last_used_frame <
-        frame_current_ - kReadbackBufferEvictionAgeFrames) {
-      // Unmap and release both buffers
-      for (int i = 0; i < 2; i++) {
-        if (it->second.buffers[i] != nullptr) {
-          if (it->second.mapped_data[i] != nullptr) {
-            it->second.buffers[i]->Unmap(0, nullptr);
-          }
-          it->second.buffers[i]->Release();
-        }
-      }
-      it = buffer_map.erase(it);
-    } else {
-      ++it;
-    }
-  }
+void D3D12CommandProcessor::ResolveReadCallbackThunk(void* context,
+                                                     uint32_t physical_address,
+                                                     uint32_t length) {
+  static_cast<D3D12CommandProcessor*>(context)->MarkResolvePagesRead(
+      physical_address, length);
 }
 
 bool D3D12CommandProcessor::IssueCopy() {
@@ -3308,75 +3279,25 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   // resolved page is no longer memexport output either way.
   ClearMemexportPages(written_address, written_length);
 
-  // Early check: if destination memory is not accessible, skip readback.
-  VirtualHeap* physical_heap = memory_->GetPhysicalHeap();
-  bool memory_accessible = false;
-  if (physical_heap) {
-    HeapAllocationInfo alloc_info;
-    if (physical_heap->QueryRegionInfo(written_address, &alloc_info) &&
-        (alloc_info.state & kMemoryAllocationCommit) &&
-        IsWritableProtect(alloc_info.protect)) {
-      uint32_t end_address = written_address + written_length;
-      uint32_t region_end = alloc_info.base_address + alloc_info.region_size;
-      if (end_address <= region_end) {
-        memory_accessible = true;
-      }
-    }
+  ID3D12Resource* host_buffer = shared_memory_->GetHostBuffer();
+  if (host_buffer == nullptr ||
+      !IsResolveDestinationResident(written_address, written_length)) {
+    return true;
   }
-  if (!memory_accessible) {
+
+  ReadbackResolveMode readback_mode = GetReadbackResolveMode();
+  bool stall_after_copy;
+  if (!DecideResolveHostCopy(readback_mode, written_address, written_length,
+                             cvars::readback_resolve_sync, stall_after_copy)) {
+    // some mode: the range has not been read since its last resolve.
     return true;
   }
 
   bool is_scaled = texture_cache_->IsDrawResolutionScaled();
+  ID3D12Resource* dest_buffer = host_buffer;
+  uint32_t dest_offset = written_address;
 
-  // Get ReadbackBuffer for this resolve operation
-  uint64_t resolve_key =
-      MakeReadbackResolveKey(written_address, written_length);
-  ReadbackBuffer& rb = readback_buffers_[resolve_key];
-  rb.last_used_frame = frame_current_;
-
-  uint32_t write_index = rb.current_index;
-  uint32_t size = AlignReadbackBufferSize(written_length);
-
-  // Allocate/resize write buffer if needed
-  if (size > rb.sizes[write_index]) {
-    const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
-    ID3D12Device* device = provider.GetDevice();
-    D3D12_RESOURCE_DESC buffer_desc;
-    ui::d3d12::util::FillBufferResourceDesc(buffer_desc, size,
-                                            D3D12_RESOURCE_FLAG_NONE);
-    ID3D12Resource* buffer;
-    if (SUCCEEDED(device->CreateCommittedResource(
-            &ui::d3d12::util::kHeapPropertiesReadback,
-            provider.GetHeapFlagCreateNotZeroed(), &buffer_desc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer)))) {
-      // Unmap and release old buffer
-      if (rb.buffers[write_index] != nullptr) {
-        if (rb.mapped_data[write_index] != nullptr) {
-          rb.buffers[write_index]->Unmap(0, nullptr);
-          rb.mapped_data[write_index] = nullptr;
-        }
-        rb.buffers[write_index]->Release();
-      }
-      rb.buffers[write_index] = buffer;
-      rb.sizes[write_index] = size;
-
-      // Map the new buffer persistently
-      D3D12_RANGE read_range = {0, size};
-      if (SUCCEEDED(
-              buffer->Map(0, &read_range, &rb.mapped_data[write_index]))) {
-        // Successfully mapped
-      } else {
-        XELOGE("Failed to persistently map readback buffer");
-        rb.mapped_data[write_index] = nullptr;
-      }
-    } else {
-      XELOGE("Failed to create a {} MB readback buffer", size >> 20);
-      return true;
-    }
-  }
-
-  // Copy resolved data to readback buffer (with downscaling if scaled)
+  // Copy the resolved data into host_buffer_ (downscaling first if scaled).
   if (is_scaled) {
     // Scaled path: GPU compute shader downscaling
 
@@ -3542,15 +3463,17 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     // Dispatch compute shader - one thread group per 32x32 tile
     deferred_command_list_.D3DDispatch(tile_count, 1, 1);
 
-    // Transition downscale buffer to copy source
+    // Transition the downscale buffer to copy source and host_buffer_ to copy
+    // dest.
     PushUAVBarrier(resolve_downscale_buffer_.Get());
     PushTransitionBarrier(resolve_downscale_buffer_.Get(),
                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                           D3D12_RESOURCE_STATE_COPY_SOURCE);
+    shared_memory_->UseHostAsCopyDestination();
     SubmitBarriers();
 
-    // Copy downscaled data to readback buffer
-    deferred_command_list_.D3DCopyBufferRegion(rb.buffers[write_index], 0,
+    // Copy the downscaled data into host_buffer_ (guest RAM).
+    deferred_command_list_.D3DCopyBufferRegion(dest_buffer, dest_offset,
                                                resolve_downscale_buffer_.Get(),
                                                0, written_length);
 
@@ -3565,63 +3488,24 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
 
     PopDebugMarker();
   } else {
-    // Non-scaled path: direct copy from shared memory
+    // Non-scaled: copy straight from the device buffer into host_buffer_.
     shared_memory_->UseAsCopySource();
+    shared_memory_->UseHostAsCopyDestination();
     SubmitBarriers();
     InsertDebugMarker("Resolve Readback: 0x%08X, %u bytes", written_address,
                       written_length);
-    ID3D12Resource* shared_memory_buffer = shared_memory_->GetBuffer();
-    deferred_command_list_.D3DCopyBufferRegion(rb.buffers[write_index], 0,
-                                               shared_memory_buffer,
+    deferred_command_list_.D3DCopyBufferRegion(dest_buffer, dest_offset,
+                                               shared_memory_->GetBuffer(),
                                                written_address, written_length);
   }
 
-  // Handle sync and copy to guest memory
-  ReadbackResolveMode readback_mode = GetReadbackResolveMode();
-  bool use_delayed_sync = (readback_mode == ReadbackResolveMode::kFast ||
-                           readback_mode == ReadbackResolveMode::kSome);
-  uint32_t read_index = write_index;
-
-  if (use_delayed_sync) {
-    // Use previous frame's data (avoid stall)
-    read_index = 1 - write_index;
-  } else {
-    // Wait for GPU to finish (accurate but slow)
-    if (!AwaitAllQueueOperationsCompletion()) {
-      return true;
-    }
+  if (stall_after_copy) {
+    // host_buffer_ is CPU-coherent guest RAM, so waiting makes the copy visible
+    // to the guest CPU before a later read races it. Within-frame GPU consumers
+    // are ordered by the next host-routed draw transitioning host_buffer_ out
+    // of COPY_DEST.
+    AwaitAllQueueOperationsCompletion();
   }
-
-  // Check if we have valid data to read from
-  bool is_cache_miss = false;
-  if (use_delayed_sync && (rb.buffers[read_index] == nullptr ||
-                           written_length > rb.sizes[read_index] ||
-                           rb.mapped_data[read_index] == nullptr)) {
-    // Cache miss - need to sync and use current buffer
-    is_cache_miss = true;
-    read_index = write_index;
-    if (!AwaitAllQueueOperationsCompletion()) {
-      return true;
-    }
-  }
-
-  // Copy to guest memory
-  // "some" mode: only copy on cache miss (saves CPU)
-  // "fast" mode: always copy (1 frame behind, no GPU stall)
-  // "full" mode: always copy (GPU sync already done above)
-  bool should_copy =
-      (readback_mode == ReadbackResolveMode::kSome) ? is_cache_miss : true;
-
-  if (should_copy && rb.buffers[read_index] != nullptr &&
-      written_length <= rb.sizes[read_index] &&
-      rb.mapped_data[read_index] != nullptr) {
-    uint8_t* physaddr = memory_->TranslatePhysical(written_address);
-    memory::vastcpy(physaddr, (uint8_t*)rb.mapped_data[read_index],
-                    written_length);
-  }
-
-  // Swap buffer index for next time
-  rb.current_index = 1 - rb.current_index;
 
   return true;
 }
@@ -3989,9 +3873,6 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     // Submission already closed now, so minus 1.
     closed_frame_submissions_[(frame_current_++) % kQueueFrames] =
         GetCurrentSubmission() - 1;
-
-    // Evict old readback buffers once per frame
-    EvictOldReadbackBuffers(readback_buffers_);
 
     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
       cache_clear_requested_ = false;

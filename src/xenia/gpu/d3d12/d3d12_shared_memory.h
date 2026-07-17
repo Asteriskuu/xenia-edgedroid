@@ -104,6 +104,9 @@ class D3D12SharedMemory : public SharedMemory {
   void UseHostAsCopySource() {
     CommitHostUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_SOURCE);
   }
+  void UseHostAsCopyDestination() {
+    CommitHostUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
+  }
   void MarkHostUAVWritesCommitNeeded() {
     if (host_buffer_state_ == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
       host_buffer_uav_writes_commit_needed_ = true;
