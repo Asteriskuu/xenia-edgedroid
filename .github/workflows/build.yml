@@ -69,7 +69,6 @@ jobs:
         run: |
          cmake -S . -B build-host \
           -G "Ninja" \
-          -DXENIA_BUILD_MISC=ON \
           -DXENIA_ENABLE_LTO=OFF
 
          cmake --build build-host \
@@ -106,6 +105,7 @@ jobs:
         run: sccache --show-stats
 
       - name: inspect shader compiler
+        if: always()
         run: |
          file build-android/host_tools/xenia-shader-cc
 
