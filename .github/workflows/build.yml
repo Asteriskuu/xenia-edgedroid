@@ -86,17 +86,20 @@ jobs:
           CMAKE_CXX_COMPILER_LAUNCHER: sccache
           ANDROID_NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
         run: |
-          mkdir -p build-android/host_tools
-          cp build-host/host_tools/xenia-shader-cc build-android/host_tools/
-          cmake -S . -B build-android \
-            -DCMAKE_SYSTEM_NAME=Android \
-            -DCMAKE_SYSTEM_VERSION=24 \
-            -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
-            -DCMAKE_ANDROID_NDK=${{ steps.setup_ndk.outputs.ndk-path }} \
-            -DCMAKE_ANDROID_PLATFORM=android-24 \
-            -G "Ninja" \
-            -DXENIA_ENABLE_LTO=OFF
-          cmake --build build-android --config Release -j$(getconf _NPROCESSORS_ONLN)
+         mkdir -p build-android/host_tools
+         cp build-host/host_tools/xenia-shader-cc build-android/host_tools/
+         chmod +x build-android/host_tools/xenia-shader-cc
+
+         cmake -S . -B build-android \
+           -DCMAKE_SYSTEM_NAME=Android \
+           -DCMAKE_SYSTEM_VERSION=24 \
+           -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+           -DCMAKE_ANDROID_NDK=${{ steps.setup_ndk.outputs.ndk-path }} \
+           -DCMAKE_ANDROID_PLATFORM=android-24 \
+           -G "Ninja" \
+           -DXENIA_ENABLE_LTO=OFF
+
+         cmake --build build-android --config Release -j$(getconf _NPROCESSORS_ONLN)
 
       - name: Build Android APK
         working-directory: android/android_studio_project
