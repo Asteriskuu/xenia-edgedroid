@@ -416,7 +416,7 @@ bool ImGuiDrawer::LoadWindowsFont(ImGuiIO& io, ImFontConfig& font_config,
   return true;
 #endif
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID
   // On Linux, use fontconfig to find the system's default sans-serif font
   FcConfig* config = FcInitLoadConfigAndFonts();
   if (!config) {
@@ -496,7 +496,7 @@ bool ImGuiDrawer::LoadJapaneseFont(ImGuiIO& io, float font_size) {
   return true;
 #endif
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID
   // On Linux, find and merge CJK font using fontconfig
   FcConfig* config = FcInitLoadConfigAndFonts();
   if (!config) {
