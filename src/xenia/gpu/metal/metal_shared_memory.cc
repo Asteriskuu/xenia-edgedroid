@@ -97,22 +97,6 @@ bool MetalSharedMemory::UploadRanges(
     uint32_t num_upload_ranges) {
   // Copy modified ranges from Xbox memory to Metal buffer when not using
   // bytes-no-copy shared memory.
-
-  static bool first_upload = true;
-  if (first_upload) {
-    first_upload = false;
-    const uint32_t page_size = 1u << page_size_log2();
-    XELOGD("MetalSharedMemory::UploadRanges: page_size={}, {} ranges to upload",
-           page_size, num_upload_ranges);
-    for (uint32_t i = 0; i < std::min(5u, num_upload_ranges); i++) {
-      uint32_t start_byte = upload_page_ranges[i].first * page_size;
-      uint32_t length_bytes = upload_page_ranges[i].second * page_size;
-      XELOGD("  Range[{}]: page={} count={} -> byte offset=0x{:08X} length={}",
-             i, upload_page_ranges[i].first, upload_page_ranges[i].second,
-             start_byte, length_bytes);
-    }
-  }
-
   if (!buffer_ || num_upload_ranges == 0) {
     return true;
   }
@@ -179,9 +163,6 @@ bool MetalSharedMemory::UploadRanges(
   if (have_merged) {
     flush_merged_range(merged_start, merged_end);
   }
-
-  XELOGD("MetalSharedMemory::UploadRanges: Copied {} ranges to Metal buffer",
-         num_upload_ranges);
 
   return true;
 }
