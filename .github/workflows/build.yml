@@ -84,6 +84,11 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+      - name: inspect shader compiler
+        if: failure()
+        run: |
+         file build-android/host_tools/xenia-shader-cc
+
       - name: Prepare artifacts
         id: prepare_artifacts
         run: |
