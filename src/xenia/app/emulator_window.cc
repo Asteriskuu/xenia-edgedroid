@@ -3506,13 +3506,10 @@ void EmulatorWindow::CycleReadbackResolve() {
   gpu::ReadbackResolveMode next;
   switch (current) {
     case gpu::ReadbackResolveMode::kDisabled:
-      next = gpu::ReadbackResolveMode::kSome;
-      break;
-    case gpu::ReadbackResolveMode::kSome:
       next = gpu::ReadbackResolveMode::kFast;
       break;
     case gpu::ReadbackResolveMode::kFast:
-      next = gpu::ReadbackResolveMode::kFull;
+      next = gpu::ReadbackResolveMode::kAll;
       break;
     default:
       next = gpu::ReadbackResolveMode::kDisabled;

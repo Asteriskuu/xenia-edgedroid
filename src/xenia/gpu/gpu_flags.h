@@ -70,6 +70,7 @@ DECLARE_bool(async_shader_skip_draws);
 DECLARE_bool(shader_profiling);
 
 DECLARE_bool(readback_resolve_half_pixel_offset);
+DECLARE_bool(readback_resolve_sync);
 
 DECLARE_bool(gpu_3d_to_2d_texture);
 

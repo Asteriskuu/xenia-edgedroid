@@ -61,17 +61,16 @@ void ImGuiPerformanceDialog::LoadCurrentSettings() {
     occlusion_query_mode_ = 0;  // Default to "fake"
   }
 
-  // Load Readback Resolve setting (0=none, 1=some, 2=fast, 3=full)
+  // Load Readback Resolve setting (0=none, 1=fast, 2=all)
   const std::string& resolve_mode = cvars::readback_resolve;
   if (resolve_mode == "none") {
     readback_resolve_mode_ = 0;
-  } else if (resolve_mode == "some") {
-    readback_resolve_mode_ = 1;
-  } else if (resolve_mode == "full") {
-    readback_resolve_mode_ = 3;
+  } else if (resolve_mode == "all") {
+    readback_resolve_mode_ = 2;
   } else {
-    readback_resolve_mode_ = 2;  // Default to "fast"
+    readback_resolve_mode_ = 1;  // Default to "fast"
   }
+  readback_resolve_sync_ = cvars::readback_resolve_sync;
 
   // Load Clear Memory Page State setting
   clear_memory_page_state_ = cvars::clear_memory_page_state;
@@ -107,11 +106,8 @@ void ImGuiPerformanceDialog::OnReadbackResolveChanged(int value) {
     case 0:
       mode = gpu::ReadbackResolveMode::kDisabled;
       break;
-    case 1:
-      mode = gpu::ReadbackResolveMode::kSome;
-      break;
-    case 3:
-      mode = gpu::ReadbackResolveMode::kFull;
+    case 2:
+      mode = gpu::ReadbackResolveMode::kAll;
       break;
     default:
       mode = gpu::ReadbackResolveMode::kFast;
@@ -120,8 +116,15 @@ void ImGuiPerformanceDialog::OnReadbackResolveChanged(int value) {
 
   command_processor->SetReadbackResolveMode(mode);
 
-  const char* mode_names[] = {"None", "Some", "Fast", "Full"};
+  const char* mode_names[] = {"None", "Fast", "All"};
   ShowNotification("Readback Resolve", mode_names[value]);
+}
+
+void ImGuiPerformanceDialog::OnReadbackResolveSyncChanged(bool enabled) {
+  cvars::readback_resolve_sync = enabled;
+  config::SaveGameConfigSetting(emulator_window_->emulator(), "GPU",
+                                "readback_resolve_sync", enabled);
+  ShowNotification("Readback Resolve Sync", enabled ? "Enabled" : "Disabled");
 }
 
 void ImGuiPerformanceDialog::OnEmulatedDisplayUncappedChanged(bool uncapped) {
@@ -231,8 +234,8 @@ void ImGuiPerformanceDialog::OnDraw(ImGuiIO& io) {
 
     ImGui::Indent(10);
     ImGui::PushID("resolve");
-    const char* resolve_labels[] = {"None", "Some", "Fast", "Full"};
-    for (int i = 0; i < 4; i++) {
+    const char* resolve_labels[] = {"None", "Fast", "All"};
+    for (int i = 0; i < 3; i++) {
       bool is_selected = (readback_resolve_mode_ == i);
       bool is_highlighted = (resolve_highlight_ == i);
 
@@ -252,9 +255,13 @@ void ImGuiPerformanceDialog::OnDraw(ImGuiIO& io) {
         ImGui::PopStyleColor();
       }
 
-      if (i < 3) {
+      if (i < 2) {
         ImGui::SameLine();
       }
+    }
+    if (ImGui::Checkbox("Synchronous copies (stall GPU)",
+                        &readback_resolve_sync_)) {
+      OnReadbackResolveSyncChanged(readback_resolve_sync_);
     }
     ImGui::PopID();
     ImGui::Unindent(10);

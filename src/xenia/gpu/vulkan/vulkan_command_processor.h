@@ -10,7 +10,9 @@
 #ifndef XENIA_GPU_VULKAN_VULKAN_COMMAND_PROCESSOR_H_
 #define XENIA_GPU_VULKAN_VULKAN_COMMAND_PROCESSOR_H_
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <climits>
 #include <cstdint>
 #include <deque>
@@ -18,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -146,7 +149,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   void ClearCaches() override;
   void InvalidateGpuMemory() override;
-  void ClearReadbackBuffers() override;
 
   void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
 
@@ -581,8 +583,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
   VkDeviceSize zpd_fsi_counter_descriptor_range_ = 0;
 
   ui::vulkan::VulkanGPUCompletionTimeline completion_timeline_;
-  // Completion of resolve readback copies on the dedicated transfer queue.
-  ui::vulkan::VulkanGPUCompletionTimeline transfer_completion_timeline_;
   bool submission_open_ = false;
   // In case vkQueueSubmit fails after something like a successful
   // vkQueueBindSparse, to wait correctly on the next attempt.
@@ -781,16 +781,6 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // Resolve downscale compute shader for scaled resolution readback.
   // Downscales scaled resolve buffer data back to 1x resolution on the GPU,
   // avoiding expensive CPU-side downscaling and reducing transfer bandwidth.
-  struct ResolveDownscaleConstants {
-    uint32_t scale_x;              // 1 to kMaxDrawResolutionScaleAlongAxis
-    uint32_t scale_y;              // 1 to kMaxDrawResolutionScaleAlongAxis
-    uint32_t pixel_size_log2;      // 0=8bit, 1=16bit, 2=32bit, 3=64bit
-    uint32_t tile_count;           // Number of 32x32 tiles to process
-    uint32_t source_offset_bytes;  // Byte offset into source buffer
-    // When non-zero, apply half-pixel offset correction by sampling from
-    // (scale/2, scale/2) within each scaled block instead of (0, 0).
-    uint32_t half_pixel_offset;
-  };
   VkDescriptorSetLayout resolve_downscale_descriptor_set_layout_ =
       VK_NULL_HANDLE;
   VkPipelineLayout resolve_downscale_pipeline_layout_ = VK_NULL_HANDLE;
@@ -952,80 +942,13 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // Temporary storage for memexport stream constants used in the draw.
   std::vector<draw_util::MemExportRange> memexport_ranges_;
 
-  // Per-resolve double-buffered readback for delayed sync
-  struct ReadbackBuffer {
-    VkBuffer buffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkDeviceMemory memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    uint32_t sizes[2] = {0, 0};
-    void* mapped_data[2] = {nullptr, nullptr};  // Persistent mappings
-    // Host memory type of buffers[i], to invalidate the CPU cache before
-    // reading when the readback memory is not host-coherent.
-    uint32_t memory_type_indices[2] = {0, 0};
-    // Device-local snapshot of the resolved region, filled by the graphics
-    // queue so the transfer copy reads it instead of shared memory a later
-    // resolve would overwrite. One per slot, paired with buffers[].
-    VkBuffer snapshot_buffers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkDeviceMemory snapshot_memories[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    uint32_t snapshot_sizes[2] = {0, 0};
-    // Transfer submission that filled buffers[i]. The CPU read of buffers[i]
-    // and the graphics reuse of snapshot_buffers[i] wait on it. 0 = none in
-    // flight.
-    uint64_t transfer_submission[2] = {0, 0};
-    uint32_t current_index = 0;
-    uint64_t last_used_frame = 0;
-  };
-
-  // A resolve readback copy deferred to the transfer queue (DMA engine),
-  // flushed as a batch after the graphics submission that produced its source
-  // data. Copies snapshot_buffers[buffer_index] -> buffers[buffer_index].
-  struct PendingReadbackCopy {
-    ReadbackBuffer* readback_buffer;
-    uint32_t buffer_index;
-    uint32_t size;
-  };
-
-  // Records the pending readback copies into a transfer command buffer and
-  // submits them to the dedicated transfer queue, waiting on the just-submitted
-  // graphics work via graphics_signal_semaphore. Stamps the transfer submission
-  // onto each target buffer and clears the pending list.
-  bool SubmitReadbackCopiesToTransferQueue(
-      VkSemaphore graphics_signal_semaphore);
-  // Reclaims transfer command buffers and graphics->transfer semaphores whose
-  // transfer submission has completed.
-  void ReclaimCompletedTransferResources();
-
-  // Helper to evict old readback buffers from a cache map
-  void EvictOldReadbackBuffers(
-      std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map);
-
-  // Allocates a device-local buffer shared concurrently with the transfer
-  // queue, used as the private snapshot the graphics queue copies resolved data
-  // into. Returns false on failure (handles left VK_NULL_HANDLE).
-  bool CreateReadbackSnapshotBuffer(uint32_t size, VkBuffer& buffer_out,
-                                    VkDeviceMemory& memory_out);
-
-  // Destroys a readback buffer's host buffers, snapshots and mappings. The GPU
-  // must no longer be using them.
-  void DestroyReadbackBuffer(ReadbackBuffer& rb);
-
-  // Invalidates the CPU cache for the finished slot then copies it to guest
-  // memory. The GPU copy that filled the slot must have completed.
-  void CopyReadbackBufferToGuest(const ReadbackBuffer& rb, uint32_t index,
-                                 uint32_t written_address,
-                                 uint32_t written_length);
-
-  // Map: (written_address << 32 | written_length) -> ReadbackBuffer
-  std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
-
-  // Dedicated transfer (DMA) queue resources for resolve readback copies, used
-  // only when the device has a transfer-only queue family.
-  std::vector<PendingReadbackCopy> pending_readback_copies_;
-  std::vector<CommandBuffer> transfer_command_buffers_writable_;
-  std::deque<std::pair<uint64_t, CommandBuffer>>
-      transfer_command_buffers_submitted_;
-  std::vector<VkSemaphore> transfer_wait_semaphores_free_;
-  std::deque<std::pair<uint64_t, VkSemaphore>>
-      transfer_wait_semaphores_in_flight_;
+  // Backend-agnostic resolve-to-guest-RAM copy decisions and read-watch
+  // consumption tracking, shared with the D3D12 backend.
+#include "../command_processor_resolve_readwatch.inc"
+  // Per-backend trampoline from the memory read callback into the shared
+  // MarkResolvePagesRead.
+  static void ResolveReadCallbackThunk(void* context, uint32_t physical_address,
+                                       uint32_t length);
 
   // Debug marker support for RenderDoc/debug tools.
   bool debug_markers_enabled_ = false;
