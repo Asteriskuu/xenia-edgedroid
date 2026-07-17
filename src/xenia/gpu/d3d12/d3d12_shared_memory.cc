@@ -20,6 +20,7 @@
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
 DECLARE_bool(tiled_shared_memory);
+DECLARE_bool(shared_memory_zero_copy);
 
 namespace xe {
 namespace gpu {
@@ -42,50 +43,58 @@ bool D3D12SharedMemory::Initialize() {
       command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
 
-  D3D12_RESOURCE_DESC buffer_desc;
-  ui::d3d12::util::FillBufferResourceDesc(
-      buffer_desc, kBufferSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-  buffer_state_ = D3D12_RESOURCE_STATE_COPY_DEST;
-  if (cvars::tiled_shared_memory &&
-      provider.GetTiledResourcesTier() !=
-          D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED &&
-      !provider.GetGraphicsAnalysis()) {
-    if (FAILED(device->CreateReservedResource(
-            &buffer_desc, buffer_state_, nullptr, IID_PPV_ARGS(&buffer_)))) {
-      XELOGE("Shared memory: Failed to create the {} MB tiled buffer",
-             kBufferSize >> 20);
-      Shutdown();
-      return false;
-    }
-    static_assert(D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES == (1 << 16));
-    InitializeSparseHostGpuMemory(
-        std::max(kHostGpuMemoryOptimalSparseAllocationLog2, uint32_t(16)));
-  } else {
-    XELOGGPU(
-        "Direct3D 12 tiled resources are not used for shared memory "
-        "emulation - video memory usage may increase significantly "
-        "because a full {} MB buffer will be created",
-        kBufferSize >> 20);
-    if (provider.GetGraphicsAnalysis()) {
-      // As of October 8th, 2018, PIX doesn't support tiled buffers.
-      // FIXME(Triang3l): Re-enable tiled resources with PIX once fixed.
+  // Zero-copy: place buffer_ directly on a heap imported from guest RAM. On
+  // success buffer_ aliases guest RAM, so the device-local buffer, its uploads
+  // and the separate host_buffer_ are all unnecessary and skipped below.
+  const bool zero_copy =
+      cvars::shared_memory_zero_copy && TryInitializeZeroCopy();
+
+  if (!zero_copy) {
+    D3D12_RESOURCE_DESC buffer_desc;
+    ui::d3d12::util::FillBufferResourceDesc(
+        buffer_desc, kBufferSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    buffer_state_ = D3D12_RESOURCE_STATE_COPY_DEST;
+    if (cvars::tiled_shared_memory &&
+        provider.GetTiledResourcesTier() !=
+            D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED &&
+        !provider.GetGraphicsAnalysis()) {
+      if (FAILED(device->CreateReservedResource(
+              &buffer_desc, buffer_state_, nullptr, IID_PPV_ARGS(&buffer_)))) {
+        XELOGE("Shared memory: Failed to create the {} MB tiled buffer",
+               kBufferSize >> 20);
+        Shutdown();
+        return false;
+      }
+      static_assert(D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES == (1 << 16));
+      InitializeSparseHostGpuMemory(
+          std::max(kHostGpuMemoryOptimalSparseAllocationLog2, uint32_t(16)));
+    } else {
       XELOGGPU(
-          "This is caused by PIX being attached, which doesn't support tiled "
-          "resources yet.");
+          "Direct3D 12 tiled resources are not used for shared memory "
+          "emulation - video memory usage may increase significantly "
+          "because a full {} MB buffer will be created",
+          kBufferSize >> 20);
+      if (provider.GetGraphicsAnalysis()) {
+        // As of October 8th, 2018, PIX doesn't support tiled buffers.
+        // FIXME(Triang3l): Re-enable tiled resources with PIX once fixed.
+        XELOGGPU(
+            "This is caused by PIX being attached, which doesn't support tiled "
+            "resources yet.");
+      }
+      if (FAILED(device->CreateCommittedResource(
+              &ui::d3d12::util::kHeapPropertiesDefault,
+              provider.GetHeapFlagCreateNotZeroed(), &buffer_desc,
+              buffer_state_, nullptr, IID_PPV_ARGS(&buffer_)))) {
+        XELOGE("Shared memory: Failed to create the {} MB buffer",
+               kBufferSize >> 20);
+        Shutdown();
+        return false;
+      }
     }
-    if (FAILED(device->CreateCommittedResource(
-            &ui::d3d12::util::kHeapPropertiesDefault,
-            provider.GetHeapFlagCreateNotZeroed(), &buffer_desc, buffer_state_,
-            nullptr, IID_PPV_ARGS(&buffer_)))) {
-      XELOGE("Shared memory: Failed to create the {} MB buffer",
-             kBufferSize >> 20);
-      Shutdown();
-      return false;
-    }
+    buffer_->SetName(L"Shared Memory Buffer");
+    buffer_gpu_address_ = buffer_->GetGPUVirtualAddress();
+    buffer_uav_writes_commit_needed_ = false;
   }
-  buffer_->SetName(L"Shared Memory Buffer");
-  buffer_gpu_address_ = buffer_->GetGPUVirtualAddress();
-  buffer_uav_writes_commit_needed_ = false;
 
   D3D12_DESCRIPTOR_HEAP_DESC buffer_descriptor_heap_desc;
   buffer_descriptor_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -118,12 +127,15 @@ bool D3D12SharedMemory::Initialize() {
       provider, xe::align(ui::d3d12::D3D12UploadBufferPool::kDefaultPageSize,
                           size_t(1) << page_size_log2()));
 
-  TryInitializeHostBuffer();
+  if (!zero_copy) {
+    TryInitializeHostBuffer();
+  }
 
   return true;
 }
 
-void D3D12SharedMemory::TryInitializeHostBuffer() {
+bool D3D12SharedMemory::ImportGuestRamHeap(void*& out_view,
+                                           ID3D12Heap*& out_heap) {
   const ui::d3d12::D3D12Provider& provider =
       command_processor_.GetD3D12Provider();
   ID3D12Device* device = provider.GetDevice();
@@ -132,7 +144,7 @@ void D3D12SharedMemory::TryInitializeHostBuffer() {
   ID3D12Device3* device3 = nullptr;
   if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device3)))) {
     XELOGI("Shared memory host import: ID3D12Device3 not available");
-    return;
+    return false;
   }
 
   D3D12_FEATURE_DATA_EXISTING_HEAPS existing_heaps = {};
@@ -142,7 +154,7 @@ void D3D12SharedMemory::TryInitializeHostBuffer() {
       !existing_heaps.Supported) {
     XELOGI("Shared memory host import: existing heaps not supported");
     device3->Release();
-    return;
+    return false;
   }
 
   // Map a dedicated view of guest physical RAM for the heap import. Importing
@@ -152,33 +164,57 @@ void D3D12SharedMemory::TryInitializeHostBuffer() {
   // backing) while isolating protection (per-view PTEs).
   const size_t physical_offset =
       size_t(memory().physical_membase() - memory().virtual_membase());
-  host_buffer_view_ = xe::memory::MapFileView(
+  void* view = xe::memory::MapFileView(
       memory().mapping_handle(), nullptr, kBufferSize,
       xe::memory::PageAccess::kReadWrite, physical_offset);
-  if (host_buffer_view_ == nullptr) {
+  if (view == nullptr) {
     XELOGI(
         "Shared memory host import: failed to map a dedicated guest RAM view");
     device3->Release();
-    return;
+    return false;
   }
 
   // Import the 512 MB view as a heap. Its size comes from the enclosing OS
   // allocation (this fresh view is exactly the buffer), so the buffer is placed
   // at offset 0.
   ID3D12Heap* heap = nullptr;
-  HRESULT hr = device3->OpenExistingHeapFromAddress(host_buffer_view_,
-                                                    IID_PPV_ARGS(&heap));
+  HRESULT hr = device3->OpenExistingHeapFromAddress(view, IID_PPV_ARGS(&heap));
   device3->Release();
   if (FAILED(hr)) {
     XELOGI(
         "Shared memory host import: OpenExistingHeapFromAddress failed "
         "(0x{:08X})",
         static_cast<uint32_t>(hr));
-    xe::memory::UnmapFileView(memory().mapping_handle(), host_buffer_view_,
-                              kBufferSize);
-    host_buffer_view_ = nullptr;
+    xe::memory::UnmapFileView(memory().mapping_handle(), view, kBufferSize);
+    return false;
+  }
+
+  // Log the imported heap's coherency properties. CPUPageProperty WRITE_BACK
+  // (3) is cache-coherent, WRITE_COMBINE (2) is not for GPU-write readback.
+  // This is driver-chosen for the diagnostic heap, not app-selectable.
+  const D3D12_HEAP_DESC heap_desc = heap->GetDesc();
+  XELOGI(
+      "Shared memory host import: heap CPUPageProperty={} MemoryPool={} "
+      "flags=0x{:X}",
+      uint32_t(heap_desc.Properties.CPUPageProperty),
+      uint32_t(heap_desc.Properties.MemoryPoolPreference),
+      uint32_t(heap_desc.Flags));
+
+  out_view = view;
+  out_heap = heap;
+  return true;
+}
+
+void D3D12SharedMemory::TryInitializeHostBuffer() {
+  void* view = nullptr;
+  ID3D12Heap* heap = nullptr;
+  if (!ImportGuestRamHeap(view, heap)) {
     return;
   }
+
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
 
   // OpenExistingHeapFromAddress returns a SHARED_CROSS_ADAPTER heap, so the
   // buffer needs ALLOW_CROSS_ADAPTER. Memexport writes to it as a UAV.
@@ -188,22 +224,62 @@ void D3D12SharedMemory::TryInitializeHostBuffer() {
       D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER |
           D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
   host_buffer_state_ = D3D12_RESOURCE_STATE_COMMON;
-  hr = device->CreatePlacedResource(heap, 0, &buffer_desc, host_buffer_state_,
-                                    nullptr, IID_PPV_ARGS(&host_buffer_));
+  HRESULT hr =
+      device->CreatePlacedResource(heap, 0, &buffer_desc, host_buffer_state_,
+                                   nullptr, IID_PPV_ARGS(&host_buffer_));
   if (FAILED(hr)) {
     XELOGI("Shared memory host import: UAV buffer placement failed (0x{:08X})",
            static_cast<uint32_t>(hr));
     host_buffer_ = nullptr;
     heap->Release();
-    xe::memory::UnmapFileView(memory().mapping_handle(), host_buffer_view_,
-                              kBufferSize);
-    host_buffer_view_ = nullptr;
+    xe::memory::UnmapFileView(memory().mapping_handle(), view, kBufferSize);
     return;
   }
   host_buffer_->SetName(L"Shared Memory Host Buffer");
   host_buffer_heap_ = heap;
+  host_buffer_view_ = view;
   host_buffer_gpu_address_ = host_buffer_->GetGPUVirtualAddress();
   XELOGI("Shared memory: host buffer for memexport ranges ready");
+}
+
+bool D3D12SharedMemory::TryInitializeZeroCopy() {
+  void* view = nullptr;
+  ID3D12Heap* heap = nullptr;
+  if (!ImportGuestRamHeap(view, heap)) {
+    return false;
+  }
+
+  const ui::d3d12::D3D12Provider& provider =
+      command_processor_.GetD3D12Provider();
+  ID3D12Device* device = provider.GetDevice();
+
+  // The imported heap is SHARED_CROSS_ADAPTER, so buffer_ needs
+  // ALLOW_CROSS_ADAPTER. As the primary buffer it is read as index, vertex and
+  // texture data and written by memexport as a UAV.
+  D3D12_RESOURCE_DESC buffer_desc;
+  ui::d3d12::util::FillBufferResourceDesc(
+      buffer_desc, kBufferSize,
+      D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER |
+          D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+  buffer_state_ = D3D12_RESOURCE_STATE_COMMON;
+  HRESULT hr = device->CreatePlacedResource(
+      heap, 0, &buffer_desc, buffer_state_, nullptr, IID_PPV_ARGS(&buffer_));
+  if (FAILED(hr)) {
+    XELOGI("Shared memory zero-copy: buffer placement failed (0x{:08X})",
+           static_cast<uint32_t>(hr));
+    buffer_ = nullptr;
+    heap->Release();
+    xe::memory::UnmapFileView(memory().mapping_handle(), view, kBufferSize);
+    return false;
+  }
+  buffer_->SetName(L"Shared Memory Buffer (zero-copy)");
+  host_buffer_heap_ = heap;
+  host_buffer_view_ = view;
+  buffer_gpu_address_ = buffer_->GetGPUVirtualAddress();
+  buffer_uav_writes_commit_needed_ = false;
+  zero_copy_ = true;
+  XELOGI("Shared memory: using zero-copy guest RAM aliasing");
+  return true;
 }
 
 void D3D12SharedMemory::Shutdown(bool from_destructor) {
@@ -213,19 +289,20 @@ void D3D12SharedMemory::Shutdown(bool from_destructor) {
 
   ui::d3d12::util::ReleaseAndNull(buffer_descriptor_heap_);
 
-  // Free the host buffer before its imported heap, and unmap the view backing
-  // the heap only after the heap is gone.
+  // Free both buffers before the imported heap that backs them, and unmap the
+  // view backing that heap only after every resource on it is gone. In
+  // zero-copy mode buffer_ is placed on host_buffer_heap_ too, so it must be
+  // released first.
+  ui::d3d12::util::ReleaseAndNull(buffer_);
   ui::d3d12::util::ReleaseAndNull(host_buffer_);
   ui::d3d12::util::ReleaseAndNull(host_buffer_heap_);
   host_buffer_gpu_address_ = 0;
+  zero_copy_ = false;
   if (host_buffer_view_ != nullptr) {
     xe::memory::UnmapFileView(memory().mapping_handle(), host_buffer_view_,
                               kBufferSize);
     host_buffer_view_ = nullptr;
   }
-
-  // First free the buffer to detach it from the heaps.
-  ui::d3d12::util::ReleaseAndNull(buffer_);
 
   for (ID3D12Heap* heap : buffer_tiled_heaps_) {
     heap->Release();
@@ -441,6 +518,18 @@ bool D3D12SharedMemory::UploadRanges(
     const std::pair<uint32_t, uint32_t>* upload_page_ranges,
     uint32_t num_upload_page_ranges) {
   if (!num_upload_page_ranges) {
+    return true;
+  }
+  if (zero_copy_) {
+    // buffer_ aliases guest RAM - nothing to copy, just mark the pages valid so
+    // RequestRange stops asking to upload them.
+    for (uint32_t i = 0; i < num_upload_page_ranges; ++i) {
+      trace_writer_.WriteMemoryRead(
+          upload_page_ranges[i].first << page_size_log2(),
+          upload_page_ranges[i].second << page_size_log2());
+      MakeRangeValid(upload_page_ranges[i].first << page_size_log2(),
+                     upload_page_ranges[i].second << page_size_log2(), false);
+    }
     return true;
   }
   CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);

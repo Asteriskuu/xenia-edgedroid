@@ -3852,7 +3852,11 @@ bool VulkanCommandProcessor::IssueCopy() {
   ClearMemexportPages(written_address, written_length);
 
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
-  VkBuffer resolve_host_buffer = shared_memory_->host_buffer();
+  const bool zero_copy = shared_memory_->is_zero_copy();
+  // Readback lands in guest RAM: the host buffer in two-buffer mode, or buffer_
+  // itself in zero-copy mode, since it already aliases guest RAM.
+  VkBuffer resolve_host_buffer =
+      zero_copy ? shared_memory_->buffer() : shared_memory_->host_buffer();
   if (readback_mode != ReadbackResolveMode::kDisabled && written_length > 0 &&
       resolve_host_buffer != VK_NULL_HANDLE &&
       IsResolveDestinationResident(written_address, written_length)) {
@@ -3866,6 +3870,12 @@ bool VulkanCommandProcessor::IssueCopy() {
     }
 
     if (!texture_cache_->IsDrawResolutionScaled()) {
+      if (zero_copy) {
+        // The non-scaled resolve already wrote buffer_ (guest RAM) in place, so
+        // it is coherent with the CPU - nothing to read back.
+        PopDebugMarker();
+        return true;
+      }
       // Non-scaled: copy the resolved range straight from the device buffer
       // into host_buffer_ (guest RAM).
       VkBuffer resolve_device_buffer = shared_memory_->buffer();

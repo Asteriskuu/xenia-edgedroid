@@ -25,6 +25,8 @@ void SetFramerateLimit(uint32_t value);
 
 DECLARE_bool(gpu_allow_invalid_fetch_constants);
 
+DECLARE_bool(shared_memory_zero_copy);
+
 DECLARE_bool(non_seamless_cube_map);
 
 DECLARE_bool(half_pixel_offset);

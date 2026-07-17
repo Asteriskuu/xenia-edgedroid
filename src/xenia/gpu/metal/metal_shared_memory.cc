@@ -14,11 +14,6 @@
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
 
-DEFINE_bool(metal_shared_memory_zero_copy, true,
-            "Use MTLBuffer bytes-no-copy for guest memory on unified memory "
-            "devices when possible.",
-            "Metal");
-
 namespace xe {
 namespace gpu {
 namespace metal {
@@ -52,7 +47,7 @@ bool MetalSharedMemory::Initialize() {
     return false;
   }
 
-  if (cvars::metal_shared_memory_zero_copy && device->hasUnifiedMemory()) {
+  if (cvars::shared_memory_zero_copy) {
     size_t system_page_size = xe::memory::page_size();
     if (reinterpret_cast<uintptr_t>(xbox_ram) % system_page_size == 0) {
       buffer_ = device->newBuffer(xbox_ram, kBufferSize,

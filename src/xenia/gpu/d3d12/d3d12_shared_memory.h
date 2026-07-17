@@ -52,6 +52,11 @@ class D3D12SharedMemory : public SharedMemory {
     return host_buffer_gpu_address_;
   }
 
+  // True when buffer_ aliases guest RAM directly (zero-copy import). Uploads
+  // are then unnecessary and host_buffer_ is null, since buffer_ already is
+  // guest RAM.
+  bool is_zero_copy() const { return zero_copy_; }
+
   void CompletedSubmissionUpdated();
   void BeginSubmission();
 
@@ -139,9 +144,15 @@ class D3D12SharedMemory : public SharedMemory {
   bool buffer_uav_writes_commit_needed_ = false;
   void CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATES new_state);
 
+  // True when buffer_ is placed directly on a heap imported from guest RAM, so
+  // it aliases guest RAM and needs no per-frame uploads. host_buffer_ is then
+  // not created. The import is tracked by host_buffer_view_/host_buffer_heap_.
+  bool zero_copy_ = false;
+
   // A dedicated file-mapping view of guest RAM backing the imported heap, kept
   // separate from the memory-managed views so the write-watch VirtualProtect
-  // never touches D3D12-owned pages. Unmapped after the heap is released.
+  // never touches D3D12-owned pages. Unmapped after the heap is released. Backs
+  // buffer_ in zero-copy mode, host_buffer_ otherwise.
   void* host_buffer_view_ = nullptr;
   ID3D12Heap* host_buffer_heap_ = nullptr;
   // Second buffer aliasing guest RAM, bound for memexport-touching draws. Null
@@ -155,6 +166,14 @@ class D3D12SharedMemory : public SharedMemory {
   // Imports guest RAM as host_buffer_. No-op on failure (host_buffer_ stays
   // null and the device-local path is used unchanged).
   void TryInitializeHostBuffer();
+  // Maps a dedicated guest RAM view and opens it as a D3D12 heap
+  // (OpenExistingHeapFromAddress). Returns true with out_view/out_heap set;
+  // false with nothing to clean up.
+  bool ImportGuestRamHeap(void*& out_view, ID3D12Heap*& out_heap);
+  // Places buffer_ directly on a heap imported from guest RAM (full zero-copy).
+  // Returns true (buffer_/zero_copy_ set) or false to use the device-local
+  // path.
+  bool TryInitializeZeroCopy();
 
   // Non-shader-visible buffer descriptor heap for faster binding (via copying
   // rather than creation).
