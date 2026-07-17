@@ -69,14 +69,11 @@ jobs:
         run: |
          cmake -S . -B build-host \
           -G "Ninja" \
-          -DCMAKE_SYSTEM_NAME=Linux \
-          -DCMAKE_C_COMPILER=gcc \
-          -DCMAKE_CXX_COMPILER=g++ \
+          -DCMAKE_BUILD_TYPE=Release \
           -DXENIA_ENABLE_LTO=OFF
 
          cmake --build build-host \
            --target xenia-shader-cc \
-           --config Release \
            -j$(getconf _NPROCESSORS_ONLN)
       
       - name: Build Android NDK libraries
@@ -87,7 +84,8 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
         run: |
          mkdir -p build-android/host_tools
-         cp build-host/host_tools/xenia-shader-cc build-android/host_tools/
+         
+         find build-host -name xenia-shader-cc -type f -exec cp {} build-android/host_tools/ \;
          chmod +x build-android/host_tools/xenia-shader-cc
 
          cmake -S . -B build-android \
