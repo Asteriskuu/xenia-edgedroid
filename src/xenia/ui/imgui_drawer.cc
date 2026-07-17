@@ -32,7 +32,7 @@
 #include <ShlObj_core.h>
 #endif
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID
 #include <fontconfig/fontconfig.h>
 #endif
 
