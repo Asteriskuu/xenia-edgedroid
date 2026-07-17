@@ -1,0 +1,34 @@
+name: Clear All Cache
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  clear-cache:
+    name: Delete All Caches
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Delete all caches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Fetching cache list..."
+          caches=$(gh cache list --limit 100 --json id --jq '.[].id')
+          
+          if [ -z "$caches" ]; then
+            echo "No caches found to delete."
+            exit 0
+          fi
+
+          echo "Deleting caches..."
+          for cache_id in $caches; do
+            echo "Deleting cache ID: $cache_id"
+            gh cache delete "$cache_id"
+          done
+          echo "All caches deleted successfully."
