@@ -39,6 +39,10 @@ jobs:
           ndk-version: r29
           add-to-path: false
 
+      - name: Install CMake via sdkmanager
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "cmake;3.22.1"
+
       - name: Cache Slang
         id: cache-slang
         uses: actions/cache@v5
@@ -52,7 +56,6 @@ jobs:
 
       - name: Setup
         run: |
-         sdkmanager "cmake;3.22.1"
          sudo apt-get update
          sudo apt-get install -y \
            libgtk-3-dev \
