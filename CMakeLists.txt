@@ -442,4 +442,6 @@ add_subdirectory(third_party)
 
 add_subdirectory(src/xenia)
 
+target_include_directories(xenia-gpu PRIVATE ${CMAKE_BINARY_DIR})
+
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT xenia-app)
