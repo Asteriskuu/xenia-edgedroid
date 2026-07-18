@@ -6,6 +6,14 @@ set(XE_PLATFORM_SUFFIXES
   _win _linux _posix _gnulinux _x11 _gtk _android _mac _amd64 _x64 _arm64
 )
 
+# If cross-compiling, use the host-built shader compiler passed in from the
+# build workflow. Otherwise use the in-tree target.
+if(CMAKE_CROSSCOMPILING AND DEFINED XENIA_HOST_TOOLS_DIR AND NOT "${XENIA_HOST_TOOLS_DIR}" STREQUAL "")
+  set(XE_SHADER_CC_EXE "${XENIA_HOST_TOOLS_DIR}/xenia-shader-cc")
+else()
+  set(XE_SHADER_CC_EXE $<TARGET_FILE:xenia-shader-cc>)
+endif()
+
 # xe_platform_sources(target base_path [RECURSIVE])
 #
 # Globs source files from base_path and adds them to target. Excludes
@@ -224,6 +232,15 @@ function(xe_shader_rules_spirv target shader_dir)
   set(_valid_stages vs hs ds gs ps cs)
   set(_outputs)
   file(MAKE_DIRECTORY "${_bytecode_dir}")
+
+  if(CMAKE_CROSSCOMPILING AND DEFINED XENIA_HOST_TOOLS_DIR AND NOT "${XENIA_HOST_TOOLS_DIR}" STREQUAL "")
+    set(_shader_cc "${XENIA_HOST_TOOLS_DIR}/xenia-shader-cc")
+    set(_shader_cc_dep "")
+  else()
+    set(_shader_cc "${XE_SHADER_CC_EXE}")
+    set(_shader_cc_dep xenia-shader-cc)
+  endif()
+
   foreach(src ${_sources})
     get_filename_component(_name ${src} NAME)
     string(REGEX REPLACE "\\.[^.]+$" "" _basename "${_name}")
@@ -242,9 +259,9 @@ function(xe_shader_rules_spirv target shader_dir)
     list(APPEND _outputs "${_out}")
     add_custom_command(
       OUTPUT "${_out}"
-      COMMAND $<TARGET_FILE:xenia-shader-cc> --depfile "${_dep}"
+      COMMAND ${_shader_cc} --depfile "${_dep}"
               "${src}" "${_out}"
-      DEPENDS "${src}" xenia-shader-cc
+      DEPENDS "${src}" ${_shader_cc_dep}
       DEPFILE "${_dep}"
       COMMENT "SPIR-V: ${_name}"
       VERBATIM
@@ -279,6 +296,15 @@ function(xe_shader_rules_metal target shader_dir)
   set(_valid_stages vs ps cs)
   set(_outputs)
   file(MAKE_DIRECTORY "${_bytecode_dir}")
+
+  if(CMAKE_CROSSCOMPILING AND DEFINED XENIA_HOST_TOOLS_DIR AND NOT "${XENIA_HOST_TOOLS_DIR}" STREQUAL "")
+    set(_shader_cc "${XENIA_HOST_TOOLS_DIR}/xenia-shader-cc")
+    set(_shader_cc_dep "")
+  else()
+    set(_shader_cc "${XE_SHADER_CC_EXE}")
+    set(_shader_cc_dep xenia-shader-cc)
+  endif()
+
   foreach(src ${_sources})
     get_filename_component(_name ${src} NAME)
     if(_name MATCHES "^fxaa" OR _name MATCHES "ffx_")
@@ -300,9 +326,9 @@ function(xe_shader_rules_metal target shader_dir)
     list(APPEND _outputs "${_out}")
     add_custom_command(
       OUTPUT "${_out}"
-      COMMAND $<TARGET_FILE:xenia-shader-cc> --msl --depfile "${_dep}"
+      COMMAND ${_shader_cc} --msl --depfile "${_dep}"
               "${src}" "${_out}"
-      DEPENDS "${src}" xenia-shader-cc
+      DEPENDS "${src}" ${_shader_cc_dep}
       DEPFILE "${_dep}"
       COMMENT "Metal: ${_name}"
       VERBATIM
@@ -373,6 +399,14 @@ function(xe_shader_rules_slang target shader_dir)
     endif()
   endif()
 
+  if(CMAKE_CROSSCOMPILING AND DEFINED XENIA_HOST_TOOLS_DIR AND NOT "${XENIA_HOST_TOOLS_DIR}" STREQUAL "")
+    set(_shader_cc "${XENIA_HOST_TOOLS_DIR}/xenia-shader-cc")
+    set(_shader_cc_dep "")
+  else()
+    set(_shader_cc "${XE_SHADER_CC_EXE}")
+    set(_shader_cc_dep xenia-shader-cc)
+  endif()
+
   foreach(src ${_sources})
     get_filename_component(_name ${src} NAME)
     string(REGEX REPLACE "\\.[^.]+$" "" _basename "${_name}")
@@ -422,9 +456,9 @@ function(xe_shader_rules_slang target shader_dir)
     add_custom_command(
       OUTPUT "${_out}"
       COMMAND ${CMAKE_COMMAND} -E env "SLANGC_PATH=${_slangc}"
-              $<TARGET_FILE:xenia-shader-cc> ${_flag} --depfile "${_dep}"
+              ${_shader_cc} ${_flag} --depfile "${_dep}"
               "${src}" "${_out}"
-      DEPENDS "${src}" xenia-shader-cc
+      DEPENDS "${src}" ${_shader_cc_dep}
       DEPFILE "${_dep}"
       COMMENT "Slang/${_label}: ${_name}"
       VERBATIM
