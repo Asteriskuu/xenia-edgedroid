@@ -54,8 +54,8 @@ inline void AtomicSetInfoCacheFlags(InfoCacheFlags* slot, InfoCacheFlags bits) {
   std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(slot))
       .fetch_or(mask, std::memory_order_relaxed);
 #else
-  __atomic_fetch_or(reinterpret_cast<uint32_t*>(slot), mask,
-                    __ATOMIC_RELAXED);
+  __atomic_fetch_or(reinterpret_cast<uint32_t*>(slot), mask, __ATOMIC_RELAXED);
+#endif
 #endif
 }
 
