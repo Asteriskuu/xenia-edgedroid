@@ -88,7 +88,7 @@ jobs:
         run: |
          mkdir -p build-android/host_tools
     
-         python3 xenia-build.py generate_version_h build-android
+         python3 xenia-build.py build
     
          find build-host -name xenia-shader-cc -type f -executable -exec cp {} build-android/host_tools/ \;
          chmod +x build-android/host_tools/xenia-shader-cc
