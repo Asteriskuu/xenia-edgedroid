@@ -4,19 +4,28 @@ xe_platform_sources(xenia-ui ${CMAKE_CURRENT_SOURCE_DIR})
 # Demo files are standalone executables in XENIA_BUILD_MISC; windowed_app_main_*
 # files are added explicitly per-target. wx files are excluded on Android
 # (no xe-wxWidgets target there).
+file(GLOB _ui_exclude
+  "${CMAKE_CURRENT_SOURCE_DIR}/*_demo.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/windowed_app_main_*.cc"
+)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+  file(GLOB _wx_exclude
+    "${CMAKE_CURRENT_SOURCE_DIR}/*_wx.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*_wx.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/wx_locale.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/wx_locale.h"
+  )
+  list(APPEND _ui_exclude
+    ${_wx_exclude}
+    "${CMAKE_CURRENT_SOURCE_DIR}/icon_decode.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/icon_decode.h"
+  )
+endif()
+
 get_target_property(_ui_srcs xenia-ui SOURCES)
-if(_ui_srcs)
-  # Exclude demo and main files (matches any path format)
-  list(FILTER _ui_srcs EXCLUDE REGEX ".*_demo\\.cc$")
-  list(FILTER _ui_srcs EXCLUDE REGEX ".*windowed_app_main_.*\\.cc$")
-
-  if(CMAKE_SYSTEM_NAME STREQUAL "Android")
-    # Exclude wxWidgets and specific Android-unsupported files
-    list(FILTER _ui_srcs EXCLUDE REGEX ".*_wx\\.(cc|h)$")
-    list(FILTER _ui_srcs EXCLUDE REGEX ".*wx_locale\\.(cc|h)$")
-    list(FILTER _ui_srcs EXCLUDE REGEX ".*icon_decode\\.(cc|h)$")
-  endif()
-
+if(_ui_exclude AND _ui_srcs)
+  list(REMOVE_ITEM _ui_srcs ${_ui_exclude})
   set_target_properties(xenia-ui PROPERTIES SOURCES "${_ui_srcs}")
 endif()
 
