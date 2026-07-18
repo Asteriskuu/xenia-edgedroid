@@ -39,9 +39,13 @@ if(APPLE)
   add_subdirectory(ui/metal)
 endif()
 add_subdirectory(vfs)
-add_subdirectory(debug/ui)
-add_subdirectory(app/discord)
-add_subdirectory(app)
+
+# Desktop-only targets
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
+  add_subdirectory(debug/ui)
+  add_subdirectory(app/discord)
+  add_subdirectory(app)
+endif()
 
 if(WIN32)
   add_subdirectory(apu/xaudio2)
@@ -49,4 +53,5 @@ if(WIN32)
   add_subdirectory(gpu/d3d12)
   add_subdirectory(ui/d3d12)
 endif()
+
 add_subdirectory(hid/keyboard)
