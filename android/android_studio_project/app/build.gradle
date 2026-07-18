@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace 'jp.xenia.emulator'
-    compileSdk 33
+    compileSdk 34
 
     ndkVersion '28.2.13676358'
 
@@ -12,7 +12,7 @@ android {
         applicationId 'jp.xenia.emulator'
         // 24 (7.0) - Vulkan.
         minSdk 24
-        targetSdk 33
+        targetSdk 34
         versionCode 1
         versionName 'Prototype'
 
