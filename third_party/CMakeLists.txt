@@ -711,6 +711,27 @@ set(SDL_RENDER OFF CACHE INTERNAL "")
 set(SDL_SENSOR OFF CACHE INTERNAL "")
 set(SDL_HIDAPI_LIBUSB OFF CACHE INTERNAL "")
 
+# We never create an SDL window, so the video backends are dead weight.
+# SDL_VIDEO and SDL_X11 must stay on: system_gnulinux.cc dlopens
+# SDL_ShowSimpleMessageBox(), which dispatches through the video bootstrap list.
+set(SDL_WAYLAND OFF CACHE INTERNAL "")
+set(SDL_KMSDRM OFF CACHE INTERNAL "")
+set(SDL_VULKAN OFF CACHE INTERNAL "")
+set(SDL_OPENGL OFF CACHE INTERNAL "")
+set(SDL_OPENGLES OFF CACHE INTERNAL "")
+
+# Of the X11 extensions only Xdbe and Xrandr are reachable from the messagebox
+# toolkit; the rest guard windowing and input code we never enter.
+set(SDL_X11_XCURSOR OFF CACHE INTERNAL "")
+set(SDL_X11_XFIXES OFF CACHE INTERNAL "")
+set(SDL_X11_XINPUT OFF CACHE INTERNAL "")
+set(SDL_X11_XSCRNSAVER OFF CACHE INTERNAL "")
+set(SDL_X11_XSHAPE OFF CACHE INTERNAL "")
+set(SDL_X11_XSYNC OFF CACHE INTERNAL "")
+set(SDL_X11_XTEST OFF CACHE INTERNAL "")
+set(SDL_FRIBIDI OFF CACHE INTERNAL "")
+set(SDL_LIBTHAI OFF CACHE INTERNAL "")
+
 # SDL3's sdlcommands.cmake uses file(GLOB CONFIGURE_DEPENDS ...) for its
 # source lists. CMake honours that by emitting a "Re-checking globbed
 # directories" probe on every build — slow and pointless for a submodule
