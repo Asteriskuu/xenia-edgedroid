@@ -1,4 +1,6 @@
-if(WIN32)
+if(ANDROID)
+  add_library(xenia-app SHARED)
+elseif(WIN32)
   add_executable(xenia-app WIN32)
 elseif(APPLE)
   add_executable(xenia-app MACOSX_BUNDLE)
@@ -9,6 +11,8 @@ endif()
 if(APPLE)
   # Drives the .app bundle directory name and the binary in Contents/MacOS/.
   set_target_properties(xenia-app PROPERTIES OUTPUT_NAME "Xenia-edge")
+elseif(ANDROID)
+  set_target_properties(xenia-app PROPERTIES OUTPUT_NAME "xenia-app")
 else()
   set_target_properties(xenia-app PROPERTIES OUTPUT_NAME "xenia_edge")
 endif()
@@ -46,7 +50,7 @@ elseif(APPLE)
   target_sources(xenia-app PRIVATE
     ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_mac.cc
   )
-else()
+elseif(NOT ANDROID)
   target_sources(xenia-app PRIVATE
     ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_linux.cc
   )
@@ -57,44 +61,75 @@ target_compile_definitions(xenia-app PRIVATE
   XBYAK_ENABLE_OMITTED_OPERAND
 )
 
-target_link_libraries(xenia-app PRIVATE
-  xenia-apu
-  xenia-apu-nop
-  xenia-base
-  xenia-core
-  xenia-cpu
-  xenia-gpu
-  xenia-gpu-null
-  xenia-hid
-  xenia-hid-nop
-  xenia-kernel
-  xenia-patcher
-  xenia-ui
-  xenia-vfs
-  aes_128
-  capstone
-  fmt
-  dxbc
-  discord-rpc
-  imgui
-  libavcodec
-  libavutil
-  mspack
-  snappy
-  xxhash
-  xenia-app-discord
-  xenia-apu-sdl
-  xenia-debug-ui
-  xenia-helper-sdl
-  xenia-hid-sdl
-)
+if(ANDROID)
+  target_link_libraries(xenia-app PRIVATE
+    xenia-apu
+    xenia-apu-nop
+    xenia-base
+    xenia-core
+    xenia-cpu
+    xenia-gpu
+    xenia-gpu-null
+    xenia-hid
+    xenia-hid-nop
+    xenia-kernel
+    xenia-patcher
+    xenia-ui
+    xenia-vfs
+    aes_128
+    capstone
+    fmt
+    dxbc
+    imgui
+    libavcodec
+    libavutil
+    mspack
+    snappy
+    xxhash
+    xenia-gpu-vulkan
+    xenia-ui-vulkan
+    glslang-spirv
+  )
+else()
+  target_link_libraries(xenia-app PRIVATE
+    xenia-apu
+    xenia-apu-nop
+    xenia-base
+    xenia-core
+    xenia-cpu
+    xenia-gpu
+    xenia-gpu-null
+    xenia-hid
+    xenia-hid-nop
+    xenia-kernel
+    xenia-patcher
+    xenia-ui
+    xenia-vfs
+    aes_128
+    capstone
+    fmt
+    dxbc
+    discord-rpc
+    imgui
+    libavcodec
+    libavutil
+    mspack
+    snappy
+    xxhash
+    xenia-app-discord
+    xenia-apu-sdl
+    xenia-debug-ui
+    xenia-helper-sdl
+    xenia-hid-sdl
+  )
 
-# Vulkan/SPIR-V backends.
-target_link_libraries(xenia-app PRIVATE
-  xenia-gpu-vulkan
-  xenia-ui-vulkan
-  glslang-spirv
-)
+  # Vulkan/SPIR-V backends.
+  target_link_libraries(xenia-app PRIVATE
+    xenia-gpu-vulkan
+    xenia-ui-vulkan
+    glslang-spirv
+  )
+endif()
 
 # Architecture-specific backend
 if(XE_TARGET_X86_64)
