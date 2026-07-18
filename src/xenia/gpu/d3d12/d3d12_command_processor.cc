@@ -3279,8 +3279,12 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   // resolved page is no longer memexport output either way.
   ClearMemexportPages(written_address, written_length);
 
-  ID3D12Resource* host_buffer = shared_memory_->GetHostBuffer();
-  if (host_buffer == nullptr ||
+  const bool zero_copy = shared_memory_->is_zero_copy();
+  // Readback lands in guest RAM: the host buffer in two-buffer mode, or buffer_
+  // itself in zero-copy mode, since it already aliases guest RAM.
+  ID3D12Resource* guest_ram_buffer =
+      zero_copy ? shared_memory_->GetBuffer() : shared_memory_->GetHostBuffer();
+  if (guest_ram_buffer == nullptr ||
       !IsResolveDestinationResident(written_address, written_length)) {
     return true;
   }
@@ -3294,10 +3298,15 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   }
 
   bool is_scaled = texture_cache_->IsDrawResolutionScaled();
-  ID3D12Resource* dest_buffer = host_buffer;
+  if (!is_scaled && zero_copy) {
+    // The non-scaled resolve already wrote buffer_ (guest RAM) in place, so it
+    // is coherent with the CPU - nothing to read back.
+    return true;
+  }
+  ID3D12Resource* dest_buffer = guest_ram_buffer;
   uint32_t dest_offset = written_address;
 
-  // Copy the resolved data into host_buffer_ (downscaling first if scaled).
+  // Copy the resolved data into guest RAM (downscaling first if scaled).
   if (is_scaled) {
     // Scaled path: GPU compute shader downscaling
 
@@ -3463,16 +3472,20 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     // Dispatch compute shader - one thread group per 32x32 tile
     deferred_command_list_.D3DDispatch(tile_count, 1, 1);
 
-    // Transition the downscale buffer to copy source and host_buffer_ to copy
-    // dest.
+    // Transition the downscale buffer to copy source and the guest RAM buffer
+    // to copy dest.
     PushUAVBarrier(resolve_downscale_buffer_.Get());
     PushTransitionBarrier(resolve_downscale_buffer_.Get(),
                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                           D3D12_RESOURCE_STATE_COPY_SOURCE);
-    shared_memory_->UseHostAsCopyDestination();
+    if (zero_copy) {
+      shared_memory_->UseAsCopyDestination();
+    } else {
+      shared_memory_->UseHostAsCopyDestination();
+    }
     SubmitBarriers();
 
-    // Copy the downscaled data into host_buffer_ (guest RAM).
+    // Copy the downscaled data into guest RAM.
     deferred_command_list_.D3DCopyBufferRegion(dest_buffer, dest_offset,
                                                resolve_downscale_buffer_.Get(),
                                                0, written_length);
