@@ -40,8 +40,10 @@ if(APPLE)
 endif()
 add_subdirectory(vfs)
 
-# Desktop-only targets
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+  add_subdirectory(app)
+else()
+  # Desktop-only targets
   add_subdirectory(debug/ui)
   add_subdirectory(app/discord)
   add_subdirectory(app)
