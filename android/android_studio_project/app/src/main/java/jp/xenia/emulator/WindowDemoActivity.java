@@ -20,7 +20,7 @@ public class WindowDemoActivity extends AppCompatActivity implements SurfaceHold
 
         gamePath = getIntent().getStringExtra("game_path");
 
-        SurfaceView surfaceView = findViewById(R.id.surface);
+        SurfaceView surfaceView = findViewById(R.id.window_demo_surface_view);
         surfaceView.getHolder().addCallback(this);
     }
 
