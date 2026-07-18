@@ -121,6 +121,7 @@ jobs:
         working-directory: android/android_studio_project
         run: |
           ./gradlew assembleGithubDebug
+          find . -name "libxenia-app.so"
 
       - name: sccache stats
         if: always()
