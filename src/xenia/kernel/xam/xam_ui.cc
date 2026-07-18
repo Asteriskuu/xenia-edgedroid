@@ -83,7 +83,7 @@ X_RESULT xeXamDispatchDialog(T* dialog,
     return result;
   };
   auto post = []() {
-    std::jthread t([] {
+    std::thread t([] {
       xe::threading::Sleep(kUIDelayMillis);
       kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
     });
@@ -151,7 +151,7 @@ X_RESULT xeXamDispatchHeadless(std::function<X_RESULT()> run_callback,
     xe::threading::Sleep(std::chrono::milliseconds(25));
   };
   auto post = []() {
-    std::jthread t([]() {
+    std::thread t([]() {
       xe::threading::Sleep(kUIDelayMillis);
       kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
     });
