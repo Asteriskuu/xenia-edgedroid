@@ -120,7 +120,7 @@ jobs:
       - name: Build Android APK
         working-directory: android/android_studio_project
         run: |
-          ./gradlew assembleRelease
+          ./gradlew assembleGithubDebug
 
       - name: sccache stats
         if: always()
