@@ -4,7 +4,7 @@
     </a>
 </p>
 
-<h1 align="center">Xenia Edge - Xbox 360 Emulator</h1>
+<h1 align="center">Xenia Edgedroid - Xbox 360 Emulator</h1>
 
 Xenia Edge is yet another experimental fork of the Xenia emulator, originally based on [Xenia Canary](https://github.com/xenia-canary/xenia-canary). The focus is
 on faster iteration, higher default game compatibility, usability and platform support.
