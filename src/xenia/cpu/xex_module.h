@@ -49,8 +49,14 @@ static_assert(sizeof(InfoCacheFlags) == 4,
 inline void AtomicSetInfoCacheFlags(InfoCacheFlags* slot, InfoCacheFlags bits) {
   uint32_t mask;
   std::memcpy(&mask, &bits, sizeof(mask));
+
+#if defined(__cpp_lib_atomic_ref)
   std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(slot))
       .fetch_or(mask, std::memory_order_relaxed);
+#else
+  __atomic_fetch_or(reinterpret_cast<uint32_t*>(slot), mask,
+                    __ATOMIC_RELAXED);
+#endif
 }
 
 struct XexInfoCache {
