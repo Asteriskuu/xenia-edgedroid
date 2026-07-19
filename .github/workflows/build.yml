@@ -117,11 +117,14 @@ jobs:
     
          cmake --build build-android --config Release -j$(getconf _NPROCESSORS_ONLN)
 
+      - name: Find Android libraries
+        run: |
+         find build-android -name "*.so" -type f
+
       - name: Build Android APK
         working-directory: android/android_studio_project
         run: |
           ./gradlew assembleGithubDebug
-          find . -name "libxenia-app.so"
 
       - name: sccache stats
         if: always()
