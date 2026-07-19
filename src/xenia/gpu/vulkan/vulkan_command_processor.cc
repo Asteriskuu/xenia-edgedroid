@@ -3033,8 +3033,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // vertexPipelineStoresAndAtomics is not supported, convert the vertex shader
   // to a compute shader and dispatch it after the draw if the draw doesn't use
   // tessellation.
-  if (vertex_shader->memexport_eM_written() != 0 &&
-      device_properties.vertexPipelineStoresAndAtomics) {
+  const bool memexport_used_vertex =
+      vertex_shader->memexport_eM_written() != 0 &&
+      device_properties.vertexPipelineStoresAndAtomics;
+  if (memexport_used_vertex) {
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges_);
   }
 
@@ -3059,13 +3061,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   } else {
     // Disabling pixel shader for this case is also required by the pipeline
     // cache.
-    if (memexport_ranges_.empty()) {
+    if (!memexport_used_vertex) {
       // This draw has no effect.
       return true;
     }
   }
-  if (pixel_shader && pixel_shader->memexport_eM_written() != 0 &&
-      device_properties.fragmentStoresAndAtomics) {
+  const bool memexport_used_pixel = pixel_shader &&
+                                    pixel_shader->memexport_eM_written() != 0 &&
+                                    device_properties.fragmentStoresAndAtomics;
+  if (memexport_used_pixel) {
     draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
   }
 
@@ -3523,16 +3527,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // (EnsureMemexportRangeInDeviceBuffer). Inert without the host buffer.
   bool route_to_host = false;
   if (shared_memory_host_and_edram_descriptor_set_ != VK_NULL_HANDLE) {
-    // Keyed on the shader, not on memexport_ranges_ - AddMemExportRanges drops
-    // streams the shader's own weaker guard still stores to, leaving those
-    // writes to hit sparse pages nothing ever committed.
-    const bool memexport_used =
-        (vertex_shader->memexport_eM_written() != 0 &&
-         device_properties.vertexPipelineStoresAndAtomics) ||
-        (pixel_shader && pixel_shader->memexport_eM_written() != 0 &&
-         device_properties.fragmentStoresAndAtomics);
     route_to_host =
-        memexport_used ||
+        memexport_used_vertex || memexport_used_pixel ||
         (any_memexport_pages_written_ &&
          ((primitive_processing_result.index_buffer_type ==
                PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
