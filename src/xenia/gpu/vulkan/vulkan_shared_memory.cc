@@ -339,24 +339,28 @@ bool VulkanSharedMemory::CreateImportedGuestRamBuffer(
   memory_allocate_info.allocationSize = kBufferSize;
   memory_allocate_info.memoryTypeIndex = memory_type;
 
-  VkDeviceMemory memory;
-  if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr, &memory) !=
-      VK_SUCCESS) {
+  VkDeviceMemory imported_memory;
+  if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr,
+                           &imported_memory) != VK_SUCCESS) {
     XELOGE("Shared memory host import: failed to import {} MB of guest RAM",
            kBufferSize >> 20);
     dfn.vkDestroyBuffer(device, buffer, nullptr);
     return false;
   }
 
-  if (dfn.vkBindBufferMemory(device, buffer, memory, 0) != VK_SUCCESS) {
+  if (dfn.vkBindBufferMemory(device, buffer, imported_memory, 0) !=
+      VK_SUCCESS) {
     XELOGE("Shared memory host import: failed to bind imported memory");
-    dfn.vkFreeMemory(device, memory, nullptr);
+    dfn.vkFreeMemory(device, imported_memory, nullptr);
     dfn.vkDestroyBuffer(device, buffer, nullptr);
     return false;
   }
 
   out_buffer = buffer;
-  out_memory = memory;
+  out_memory = imported_memory;
+  // The import pins guest RAM - a later mprotect on the alias would fail the
+  // next submit with EFAULT.
+  memory().SetPhysicalAliasSkipHostProtect(true);
   return true;
 }
 
@@ -404,6 +408,8 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
                                          host_buffer_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
                                          host_buffer_memory_);
+  // No import left to pin the alias.
+  memory().SetPhysicalAliasSkipHostProtect(false);
 
   // If calling from the destructor, the SharedMemory destructor will call
   // ShutdownCommon.

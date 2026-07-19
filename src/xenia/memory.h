@@ -135,6 +135,10 @@ class BaseHeap {
   // Type of specified heap
   HeapType heap_type() const { return heap_type_; }
 
+  // Set only via Memory::SetPhysicalAliasSkipHostProtect.
+  bool skip_host_protect() const { return skip_host_protect_; }
+  void set_skip_host_protect(bool value) { skip_host_protect_ = value; }
+
   // Offset added to the virtual addresses to convert them to host addresses
   // (not including membase).
   uint32_t host_address_offset() const { return host_address_offset_; }
@@ -226,6 +230,10 @@ class BaseHeap {
 
   // Inserts a free block and coalesces with adjacent free blocks.
   void InsertFreeBlock(uint32_t start_page, uint32_t page_count);
+
+  // Guest protection updates page_table_ but not the host mapping. Set on the
+  // physical alias while a GPU import holds a page pin over it.
+  bool skip_host_protect_ = false;
 
   Memory* memory_;
   uint8_t* membase_;
@@ -549,6 +557,11 @@ class Memory {
   // any), or kReadWrite (writable in at least one, so a write watch can catch
   // it).
   xe::memory::PageAccess GetPhysicalPageWindowAccess(uint32_t physical_address);
+
+  // Keeps physical_membase_ writable while a GPU import pins it - any mprotect
+  // there fails the next submit. Guest protection still applies to the physical
+  // windows, and the alias never triggers access callbacks.
+  void SetPhysicalAliasSkipHostProtect(bool skip);
 
   // Forces triggering of watch callbacks for a virtual address range if pages
   // are watched there and unwatching them. Returns whether any page was
