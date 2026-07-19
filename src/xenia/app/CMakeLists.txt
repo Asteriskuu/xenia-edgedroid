@@ -126,14 +126,6 @@ else()
   )
 endif()
 
-  # Vulkan/SPIR-V backends.
-  target_link_libraries(xenia-app PRIVATE
-    xenia-gpu-vulkan
-    xenia-ui-vulkan
-    glslang-spirv
-  )
-endif()
-
 # Architecture-specific backend
 if(XE_TARGET_X86_64)
   target_link_libraries(xenia-app PRIVATE xenia-cpu-backend-x64)
