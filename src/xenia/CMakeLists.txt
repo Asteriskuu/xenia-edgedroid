@@ -40,13 +40,16 @@ if(APPLE)
 endif()
 add_subdirectory(vfs)
 
-# Desktop targets
+# Desktop-only targets
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
   add_subdirectory(debug/ui)
   add_subdirectory(app/discord)
+  add_subdirectory(app)
 endif()
 
-add_subdirectory(app)
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+  add_subdirectory(app)
+endif()
 
 if(WIN32)
   add_subdirectory(apu/xaudio2)
