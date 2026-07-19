@@ -1,5 +1,13 @@
-add_library(xenia-ui STATIC)
-xe_platform_sources(xenia-ui ${CMAKE_CURRENT_SOURCE_DIR})
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
+  add_library(xenia-ui STATIC)
+  xe_platform_sources(xenia-ui ${CMAKE_CURRENT_SOURCE_DIR})
+
+  target_sources(xenia-ui PRIVATE
+    advanced_settings_dialog_wx.cc
+    game_list_panel_wx.cc
+    game_scan_progress_dialog_wx.cc
+  )
+endif()
 
 # Demo files are standalone executables in XENIA_BUILD_MISC; windowed_app_main_*
 # files are added explicitly per-target. wx files are excluded on Android
@@ -23,42 +31,44 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   )
 endif()
 
-get_target_property(_ui_srcs xenia-ui SOURCES)
-if(_ui_exclude AND _ui_srcs)
-  list(REMOVE_ITEM _ui_srcs ${_ui_exclude})
-  set_target_properties(xenia-ui PROPERTIES SOURCES "${_ui_srcs}")
+if(TARGET xenia-ui)
+  get_target_property(_ui_srcs xenia-ui SOURCES)
+  if(_ui_exclude AND _ui_srcs)
+    list(REMOVE_ITEM _ui_srcs ${_ui_exclude})
+    set_target_properties(xenia-ui PROPERTIES SOURCES "${_ui_srcs}")
+  endif()
+
+  target_link_libraries(xenia-ui PUBLIC xenia-base)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
+    target_link_libraries(xenia-ui PUBLIC xe-wxWidgets)
+  endif()
+
+  if(WIN32)
+    target_link_libraries(xenia-ui PRIVATE dxgi)
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # xcb / X11 / X11-xcb: Vulkan surface creation in window_wx.cc.
+    # fontconfig: imgui_drawer.cc font lookup.
+    # GTK3: XCB handle extraction in window_wx.cc (gtk_widget_realize, etc.).
+    target_link_libraries(xenia-ui PRIVATE xcb X11 X11-xcb fontconfig ${GTK3_LIBRARIES})
+  elseif(APPLE)
+    # xe_platform_sources globs *.cc only; .mm sources need explicit listing.
+    target_sources(xenia-ui PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/surface_mac.mm
+      ${CMAKE_CURRENT_SOURCE_DIR}/windowed_app_wx_mac.mm
+    )
+    target_link_libraries(xenia-ui PRIVATE
+      "-framework Cocoa"
+      "-framework QuartzCore"
+    )
+  endif()
+
+  xe_target_defaults(xenia-ui)
+
+  xe_embed_binary_assets(xenia-ui
+      "${PROJECT_SOURCE_DIR}/assets/font" font)
+  xe_embed_binary_assets(xenia-ui
+      "${PROJECT_SOURCE_DIR}/assets/icon" app_icon)
 endif()
-
-target_link_libraries(xenia-ui PUBLIC xenia-base)
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
-  target_link_libraries(xenia-ui PUBLIC xe-wxWidgets)
-endif()
-
-if(WIN32)
-  target_link_libraries(xenia-ui PRIVATE dxgi)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  # xcb / X11 / X11-xcb: Vulkan surface creation in window_wx.cc.
-  # fontconfig: imgui_drawer.cc font lookup.
-  # GTK3: XCB handle extraction in window_wx.cc (gtk_widget_realize, etc.).
-  target_link_libraries(xenia-ui PRIVATE xcb X11 X11-xcb fontconfig ${GTK3_LIBRARIES})
-elseif(APPLE)
-  # xe_platform_sources globs *.cc only; .mm sources need explicit listing.
-  target_sources(xenia-ui PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/surface_mac.mm
-    ${CMAKE_CURRENT_SOURCE_DIR}/windowed_app_wx_mac.mm
-  )
-  target_link_libraries(xenia-ui PRIVATE
-    "-framework Cocoa"
-    "-framework QuartzCore"
-  )
-endif()
-
-xe_target_defaults(xenia-ui)
-
-xe_embed_binary_assets(xenia-ui
-    "${PROJECT_SOURCE_DIR}/assets/font" font)
-xe_embed_binary_assets(xenia-ui
-    "${PROJECT_SOURCE_DIR}/assets/icon" app_icon)
 
 # Compile assets/locale/<lang>/xenia.po -> <lang>/xenia.mo at configure
 # time, then bundle the staging tree into the binary. wx_locale.cc decodes
@@ -82,5 +92,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
       message(FATAL_ERROR "compile_po.py failed for ${_xe_po}")
     endif()
   endforeach()
-  xe_embed_compressed_bundle(xenia-ui "${_xe_locale_stage}" locale)
+  if(TARGET xenia-ui)
+    xe_embed_compressed_bundle(xenia-ui "${_xe_locale_stage}" locale)
+  endif()
 endif()
