@@ -15,6 +15,16 @@ target_link_libraries(xenia-gpu-vulkan PUBLIC
 )
 xe_target_defaults(xenia-gpu-vulkan)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+  target_link_libraries(xenia-gpu-vulkan PUBLIC
+    fmt glslang-spirv xxhash xenia-base xenia-gpu
+  )
+else()
+  target_link_libraries(xenia-gpu-vulkan PUBLIC
+    fmt glslang-spirv xxhash xenia-base xenia-gpu xenia-ui xenia-ui-vulkan
+  )
+endif()
+
 if(XENIA_BUILD_MISC)
   add_executable(xenia-gpu-vulkan-trace-viewer
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_trace_viewer_main.cc
