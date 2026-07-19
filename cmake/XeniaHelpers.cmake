@@ -112,6 +112,13 @@ function(xe_target_defaults target)
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/third_party
   )
+  
+  if(ANDROID)
+    set_target_properties(${target} PROPERTIES
+      POSITION_INDEPENDENT_CODE ON
+    )
+  endif()
+  
   if(MSVC)
     target_compile_options(${target} PRIVATE /WX)
   elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
