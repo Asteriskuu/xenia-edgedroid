@@ -10,10 +10,6 @@ target_include_directories(xenia-gpu-vulkan PRIVATE
 if(WIN32 AND DEFINED ENV{VULKAN_SDK})
   target_include_directories(xenia-gpu-vulkan PRIVATE "$ENV{VULKAN_SDK}/Include")
 endif()
-target_link_libraries(xenia-gpu-vulkan PUBLIC
-  fmt glslang-spirv xxhash xenia-base xenia-gpu xenia-ui xenia-ui-vulkan
-)
-xe_target_defaults(xenia-gpu-vulkan)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   target_link_libraries(xenia-gpu-vulkan PUBLIC
@@ -24,6 +20,8 @@ else()
     fmt glslang-spirv xxhash xenia-base xenia-gpu xenia-ui xenia-ui-vulkan
   )
 endif()
+
+xe_target_defaults(xenia-gpu-vulkan)
 
 if(XENIA_BUILD_MISC)
   add_executable(xenia-gpu-vulkan-trace-viewer
