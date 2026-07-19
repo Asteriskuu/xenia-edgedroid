@@ -3748,7 +3748,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // Invalidate textures in memexported memory and watch for changes.
   for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
     shared_memory_->RangeWrittenByGpu(memexport_range.base_address_dwords << 2,
-                                      memexport_range.size_bytes);
+                                      memexport_range.size_bytes,
+                                      !route_to_host);
   }
 
   if (route_to_host && !memexport_ranges_.empty()) {
@@ -3791,15 +3792,18 @@ void VulkanCommandProcessor::EnsureMemexportRangeInDeviceBuffer(
                                     VK_ACCESS_SHADER_READ_BIT |
                                     VK_ACCESS_TRANSFER_READ_BIT;
 
-  // Order the memexport writes on host_buffer_ before the transfer read (the
-  // producers may have run several draws ago, so barrier host_buffer_
-  // explicitly rather than relying on Use's last-usage tracking), and prior
-  // device-buffer reads before the transfer write into it.
+  // Order the writes on host_buffer_ before the transfer read (the producers
+  // may have run several draws ago, so barrier host_buffer_ explicitly rather
+  // than relying on Use's last-usage tracking), and prior device-buffer reads
+  // before the transfer write into it. Resolves write host_buffer_ by transfer,
+  // not just memexport shaders, so both source masks are needed.
   shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
   PushBufferMemoryBarrier(
       host_buffer, VkDeviceSize(base_bytes), VkDeviceSize(size_bytes),
-      guest_shader_pipeline_stages_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-      VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+      guest_shader_pipeline_stages_ | VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_ACCESS_TRANSFER_READ_BIT);
   PushBufferMemoryBarrier(device_buffer, VkDeviceSize(base_bytes),
                           VkDeviceSize(size_bytes), read_stages,
                           VK_PIPELINE_STAGE_TRANSFER_BIT, read_access,
@@ -3903,16 +3907,18 @@ bool VulkanCommandProcessor::IssueCopy() {
       deferred_command_buffer_.CmdVkCopyBuffer(
           resolve_device_buffer, resolve_host_buffer, 1, &copy_region);
       // Make the copy visible to within-frame consumers reading host_buffer_
-      // (route_to_host draws sampling guest RAM as index, vertex or texture).
-      // Use()'s mirror barrier is keyed on the device buffer, so it does not
-      // cover this transfer write.
+      // (route_to_host draws sampling guest RAM as index, vertex or texture,
+      // and EnsureMemexportRangeInDeviceBuffer copying out of it). Use()'s
+      // mirror barrier is keyed on the device buffer, so it does not cover this
+      // transfer write.
       PushBufferMemoryBarrier(
           resolve_host_buffer, VkDeviceSize(written_address),
           VkDeviceSize(written_length), VK_PIPELINE_STAGE_TRANSFER_BIT,
-          VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | guest_shader_pipeline_stages_,
+          VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | guest_shader_pipeline_stages_ |
+              VK_PIPELINE_STAGE_TRANSFER_BIT,
           VK_ACCESS_TRANSFER_WRITE_BIT,
           VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-              VK_ACCESS_SHADER_READ_BIT);
+              VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
       if (stall_after_copy) {
         // host_buffer_ is HOST_COHERENT, so waiting makes the copy visible to
         // the guest CPU before a later read races it.
@@ -4249,14 +4255,16 @@ bool VulkanCommandProcessor::IssueCopy() {
     deferred_command_buffer_.CmdVkCopyBuffer(resolve_downscale_buffer_,
                                              dest_buffer, 1, &copy_region);
     // Make the copy visible to within-frame consumers reading host_buffer_
-    // (route_to_host draws sampling guest RAM as index, vertex or texture).
+    // (route_to_host draws sampling guest RAM as index, vertex or texture, and
+    // EnsureMemexportRangeInDeviceBuffer copying out of it).
     PushBufferMemoryBarrier(
         dest_buffer, dest_offset, VkDeviceSize(written_length),
         VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | guest_shader_pipeline_stages_,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | guest_shader_pipeline_stages_ |
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-            VK_ACCESS_SHADER_READ_BIT);
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
 
     PopDebugMarker();
 

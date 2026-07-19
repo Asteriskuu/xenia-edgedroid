@@ -105,7 +105,11 @@ class SharedMemory {
   // be called, to make sure, if the GPU writes don't overwrite *everything* in
   // the pages they touch, the CPU data is properly loaded to the unmodified
   // regions in those pages.
-  void RangeWrittenByGpu(uint32_t start, uint32_t length);
+  // written_to_buffer false means the GPU wrote guest RAM directly (memexport
+  // routed to the host-imported buffer), leaving the shared memory buffer stale
+  // for this range rather than up to date.
+  void RangeWrittenByGpu(uint32_t start, uint32_t length,
+                         bool written_to_buffer = true);
 
  protected:
   SharedMemory(Memory& memory);

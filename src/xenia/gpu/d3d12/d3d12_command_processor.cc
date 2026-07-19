@@ -3182,7 +3182,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     // Invalidate textures in memexported memory and watch for changes.
     for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
       shared_memory_->RangeWrittenByGpu(
-          memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
+          memexport_range.base_address_dwords << 2, memexport_range.size_bytes,
+          !route_to_host);
     }
     if (route_to_host) {
       // Output landed in host_buffer_ (guest RAM), already CPU coherent, so no

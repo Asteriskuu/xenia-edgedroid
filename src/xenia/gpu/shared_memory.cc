@@ -340,7 +340,8 @@ void SharedMemory::FireWatches(uint32_t page_first, uint32_t page_last,
   }
 }
 
-void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
+void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length,
+                                     bool written_to_buffer) {
   if (length == 0 || start >= kBufferSize) {
     return;
   }
@@ -355,7 +356,10 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length) {
 
   // Mark the range as valid (so pages are not reuploaded until modified by the
   // CPU) and watch it so the CPU can reuse it and this will be caught.
-  MakeRangeValid(start, length, true);
+  // written_to_buffer also marks it GPU-authoritative, which must not happen
+  // when the write went to guest RAM instead - that would keep the buffer's
+  // stale copy across cache clears and skip the watch-blind refresh.
+  MakeRangeValid(start, length, written_to_buffer);
 }
 
 bool SharedMemory::AllocateSparseHostGpuMemoryRange(
