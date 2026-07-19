@@ -3,8 +3,8 @@ set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
 
 if(ANDROID)
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
   add_compile_options(-fPIC)
+  set(CMAKE_SHARED_LIBRARY_POSITION_INDEPENDENT_CODE ON)
 endif()
 
 # Must be set before project() so the toolchain bakes -mmacosx-version-min
