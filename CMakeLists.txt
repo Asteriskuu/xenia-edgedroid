@@ -5,6 +5,9 @@ if(ANDROID)
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
   add_compile_options(-fPIC)
   set(CMAKE_SHARED_LIBRARY_POSITION_INDEPENDENT_CODE ON)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fPIC")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
 endif()
 
 # Must be set before project() so the toolchain bakes -mmacosx-version-min
