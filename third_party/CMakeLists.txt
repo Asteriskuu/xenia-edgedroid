@@ -833,6 +833,7 @@ function(xe_add_gas_sources target)
       add_custom_command(
         OUTPUT "${obj}"
         COMMAND "${XE_CLANG_ASM}" --target=aarch64-pc-windows-msvc
+                -fPIC
                 -I "${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg"
                 -I "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-xenia"
                 -c "${src_abs}" -o "${obj}"
@@ -881,6 +882,10 @@ function(ffmpeg_common target)
       _POSIX_C_SOURCE=200809L
       _XOPEN_SOURCE=700
     )
+  endif()
+
+  if(NOT WIN32)
+    target_compile_options(${target} PRIVATE -fPIC)
   endif()
 
   if(MSVC)
