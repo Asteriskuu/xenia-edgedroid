@@ -74,7 +74,6 @@ if(ANDROID)
     xenia-hid-nop
     xenia-kernel
     xenia-patcher
-    xenia-ui
     xenia-vfs
     aes_128
     capstone
@@ -87,10 +86,10 @@ if(ANDROID)
     snappy
     xxhash
     xenia-gpu-vulkan
-    xenia-ui-vulkan
     glslang-spirv
   )
 else()
+  # Desktop builds (Windows, macOS, Linux)
   target_link_libraries(xenia-app PRIVATE
     xenia-apu
     xenia-apu-nop
@@ -121,7 +120,11 @@ else()
     xenia-debug-ui
     xenia-helper-sdl
     xenia-hid-sdl
+    xenia-gpu-vulkan
+    xenia-ui-vulkan
+    glslang-spirv
   )
+endif()
 
   # Vulkan/SPIR-V backends.
   target_link_libraries(xenia-app PRIVATE
