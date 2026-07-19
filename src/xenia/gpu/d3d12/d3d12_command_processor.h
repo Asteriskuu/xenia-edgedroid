@@ -233,7 +233,8 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // a following texture load reading the device buffer sees it. No-op for
   // normal ranges and when the host buffer is unavailable. Called by the
   // texture cache before loading.
-  void EnsureMemexportRangeInDeviceBuffer(uint32_t base_bytes,
+  // Returns whether it copied, so an upload of the same range can be skipped.
+  bool EnsureMemexportRangeInDeviceBuffer(uint32_t base_bytes,
                                           uint32_t size_bytes);
 
   // Returns a pipeline with deferred creation by its handle. May return nullptr

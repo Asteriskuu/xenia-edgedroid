@@ -3766,23 +3766,24 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   return true;
 }
 
-void VulkanCommandProcessor::EnsureMemexportRangeInDeviceBuffer(
+bool VulkanCommandProcessor::EnsureMemexportRangeInDeviceBuffer(
     uint32_t base_bytes, uint32_t size_bytes) {
-  // The texture cache reads from the device buffer, but memexport output lives
-  // in host_buffer_ (guest RAM). If this range holds memexport output, copy
-  // just it across so the load sees it. Only texture-sampled ranges are copied.
+  // Readers of the device buffer need memexport output copied across from
+  // host_buffer_ (guest RAM), where it actually lives. Doing it on the GPU
+  // keeps it ordered against the writes that produced it, which a CPU read
+  // cannot be.
   if (shared_memory_host_and_edram_descriptor_set_ == VK_NULL_HANDLE ||
       !size_bytes || base_bytes >= SharedMemory::kBufferSize) {
-    return;
+    return false;
   }
   size_bytes = std::min(size_bytes, SharedMemory::kBufferSize - base_bytes);
   if (!IsMemexportRange(base_bytes, size_bytes)) {
-    return;
+    return false;
   }
   VkBuffer host_buffer = shared_memory_->host_buffer();
   VkBuffer device_buffer = shared_memory_->buffer();
   if (host_buffer == VK_NULL_HANDLE) {
-    return;
+    return false;
   }
 
   const VkPipelineStageFlags read_stages =
@@ -3817,11 +3818,12 @@ void VulkanCommandProcessor::EnsureMemexportRangeInDeviceBuffer(
   deferred_command_buffer_.CmdVkCopyBuffer(host_buffer, device_buffer, 1,
                                            &copy_region);
 
-  // Make the copied data visible to the following texture-load read.
+  // Make the copied data visible to the following read.
   PushBufferMemoryBarrier(device_buffer, VkDeviceSize(base_bytes),
                           VkDeviceSize(size_bytes),
                           VK_PIPELINE_STAGE_TRANSFER_BIT, read_stages,
                           VK_ACCESS_TRANSFER_WRITE_BIT, read_access);
+  return true;
 }
 
 void VulkanCommandProcessor::ResolveReadCallbackThunk(void* context,

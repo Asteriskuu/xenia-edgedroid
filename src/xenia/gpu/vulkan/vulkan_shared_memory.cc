@@ -628,6 +628,26 @@ bool VulkanSharedMemory::UploadRanges(
     return true;
   }
 
+  // Ranges holding memexport output live in host_buffer_ (guest RAM) and may
+  // still be being written by the GPU, so reading them with the CPU below races
+  // those writes. Refresh those on the GPU and upload only what is left.
+  cpu_upload_ranges_.clear();
+  for (uint32_t i = 0; i < num_upload_ranges; ++i) {
+    uint32_t range_base = upload_page_ranges[i].first << page_size_log2();
+    uint32_t range_size = upload_page_ranges[i].second << page_size_log2();
+    if (command_processor_.EnsureMemexportRangeInDeviceBuffer(range_base,
+                                                              range_size)) {
+      MakeRangeValid(range_base, range_size, false);
+      continue;
+    }
+    cpu_upload_ranges_.push_back(upload_page_ranges[i]);
+  }
+  if (cpu_upload_ranges_.empty()) {
+    return true;
+  }
+  upload_page_ranges = cpu_upload_ranges_.data();
+  num_upload_ranges = uint32_t(cpu_upload_ranges_.size());
+
   auto& range_front = upload_page_ranges[0];
   auto& range_back = upload_page_ranges[num_upload_ranges - 1];
 
