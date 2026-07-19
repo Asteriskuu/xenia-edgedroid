@@ -119,9 +119,11 @@ jobs:
     
          cmake --build build-android --config Release -j$(getconf _NPROCESSORS_ONLN)
 
-      - name: Find Android libraries
+      - name: Copy native libraries
         run: |
-         find build-android -name "*.so" -type f
+          mkdir -p android/android_studio_project/app/src/main/jniLibs/arm64-v8a
+          find build-android -name "libxenia*.so" -type f -exec cp {} android/android_studio_project/app/src/main/jniLibs/arm64-v8a/ \;
+          ls -la android/android_studio_project/app/src/main/jniLibs/arm64-v8a/
 
       - name: Build Android APK
         working-directory: android/android_studio_project
@@ -129,6 +131,10 @@ jobs:
           ANDROID_NDK_ROOT: ${{ steps.setup_ndk.outputs.ndk-path }}
         run: |
           ./gradlew assembleGithubDebug
+
+      - name: Find Android libraries
+        run: |
+         find build-android -name "*.so" -type f
 
       - name: sccache stats
         if: always()
