@@ -1,4 +1,8 @@
 if(ANDROID)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
+if(ANDROID)
   add_library(xenia-app SHARED)
 elseif(WIN32)
   add_executable(xenia-app WIN32)
