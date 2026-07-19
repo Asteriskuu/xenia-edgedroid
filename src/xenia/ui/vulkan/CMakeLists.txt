@@ -8,7 +8,13 @@ target_include_directories(xenia-ui-vulkan PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
   ${PROJECT_SOURCE_DIR}/third_party/glslang
 )
-target_link_libraries(xenia-ui-vulkan PUBLIC xenia-base xenia-ui)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+  target_link_libraries(xenia-ui-vulkan PUBLIC xenia-base)
+else()
+  target_link_libraries(xenia-ui-vulkan PUBLIC xenia-base xenia-ui)
+endif()
+
 if(APPLE)
   target_link_libraries(xenia-ui-vulkan PUBLIC MoltenVK)
 endif()
