@@ -3523,8 +3523,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // (EnsureMemexportRangeInDeviceBuffer). Inert without the host buffer.
   bool route_to_host = false;
   if (shared_memory_host_and_edram_descriptor_set_ != VK_NULL_HANDLE) {
+    // Keyed on the shader, not on memexport_ranges_ - AddMemExportRanges drops
+    // streams the shader's own weaker guard still stores to, leaving those
+    // writes to hit sparse pages nothing ever committed.
+    const bool memexport_used =
+        (vertex_shader->memexport_eM_written() != 0 &&
+         device_properties.vertexPipelineStoresAndAtomics) ||
+        (pixel_shader && pixel_shader->memexport_eM_written() != 0 &&
+         device_properties.fragmentStoresAndAtomics);
     route_to_host =
-        !memexport_ranges_.empty() ||
+        memexport_used ||
         (any_memexport_pages_written_ &&
          ((primitive_processing_result.index_buffer_type ==
                PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
