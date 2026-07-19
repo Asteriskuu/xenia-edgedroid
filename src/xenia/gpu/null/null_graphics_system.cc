@@ -10,7 +10,7 @@
 #include "xenia/gpu/null/null_graphics_system.h"
 
 #include "xenia/gpu/null//null_command_processor.h"
-#if !XE_PLATFORM_MAC
+#if !XE_PLATFORM_MAC && !XE_PLATFORM_ANDROID
 #include "xenia/ui/vulkan/vulkan_provider.h"
 #endif
 #include "xenia/xbox.h"
@@ -27,7 +27,7 @@ X_STATUS NullGraphicsSystem::Setup(cpu::Processor* processor,
                                    kernel::KernelState* kernel_state,
                                    ui::WindowedAppContext* app_context,
                                    bool with_presentation) {
-#if XE_PLATFORM_MAC
+#if XE_PLATFORM_MAC || XE_PLATFORM_ANDROID
   provider_ = nullptr;
 #else
   // This is a null graphics system, but we still setup vulkan because UI needs
