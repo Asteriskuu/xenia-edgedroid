@@ -39,6 +39,7 @@ namespace gpu {
 
 enum class GPUSetting {
   ClearMemoryPageState,
+  MemexportAwaitFences,
 };
 
 enum class ReadbackResolveMode {
@@ -197,6 +198,12 @@ class CommandProcessor {
   virtual void EndTracing();
 
   virtual void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) = 0;
+
+  // Shadowed by backends that route memory export through guest RAM (see
+  // command_processor_memexport.inc). No-ops where export output never reaches
+  // the CPU, so there is nothing to wait for.
+  void AwaitMemexportForFence() {}
+  void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {}
 
   void RestoreRegisters(uint32_t first_register,
                         const uint32_t* register_values,

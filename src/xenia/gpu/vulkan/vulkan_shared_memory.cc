@@ -20,6 +20,7 @@
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
+DECLARE_bool(memexport_enable);
 DECLARE_bool(shared_memory_zero_copy);
 
 DEFINE_bool(vulkan_sparse_shared_memory, true,
@@ -377,10 +378,18 @@ bool VulkanSharedMemory::TryInitializeZeroCopy() {
 }
 
 void VulkanSharedMemory::TryInitializeHostBuffer() {
+  if (!cvars::memexport_enable) {
+    return;
+  }
   // A second, host-imported (guest RAM) buffer used only for memexport-touching
   // draws while the main buffer stays fast device-local. Non-sparse, so it can
   // accept host memory where the sparse buffer can't.
   if (!CreateImportedGuestRamBuffer(host_buffer_, host_buffer_memory_)) {
+    // Without it memexport output stays device-local and the CPU never sees it.
+    XELOGW(
+        "Shared memory: no host buffer for memexport - memexport_enable is set "
+        "but the import failed, games reading exported data on the CPU will "
+        "misbehave");
     host_buffer_ = VK_NULL_HANDLE;
     host_buffer_memory_ = VK_NULL_HANDLE;
     return;

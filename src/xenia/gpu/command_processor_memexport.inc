@@ -28,10 +28,37 @@ void MarkMemexportPagesWritten(uint32_t base_bytes, uint32_t size_bytes) {
     memexport_written_pages_[page >> 6] |= uint64_t(1) << (page & 63);
   }
   any_memexport_pages_written_ = true;
+  memexport_await_pending_ = true;
   memexport_written_page_min_ =
       std::min(memexport_written_page_min_, first_page);
   memexport_written_page_max_ =
       std::max(memexport_written_page_max_, last_page);
+}
+
+// Waits for export output recorded since the last wait to reach guest RAM, so a
+// fence or interrupt the guest is about to observe means the data is there.
+// Ring buffer read-pointer writeback is deliberately not covered: it reports
+// parse progress rather than execution, but fires per batch, so stalling there
+// would serialize the command processor against the GPU.
+void AwaitMemexportForFence() {
+  if (!memexport_await_pending_) {
+    return;
+  }
+  memexport_await_pending_ = false;
+  // Flushes the open submission before waiting, so a draw that is still only
+  // recorded gets submitted rather than skipped.
+  AwaitAllQueueOperationsCompletion();
+}
+
+// Same, for the guest asking the GPU to flush a range it is about to read
+// (COHER_BASE_HOST/COHER_SIZE_HOST). Gated on the range actually holding export
+// output, unlike the fence path which cannot know what the fence refers to.
+void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {
+  if (!memexport_await_pending_ || !IsMemexportRange(base_bytes, size_bytes)) {
+    return;
+  }
+  memexport_await_pending_ = false;
+  AwaitAllQueueOperationsCompletion();
 }
 
 // Clears memexport marks for a range a resolve just wrote, so its device-buffer
@@ -98,6 +125,7 @@ bool VertexFetchInMemexportRange(const RegisterFile& regs,
 void ResetMemexportPages() {
   memexport_written_pages_.fill(0);
   any_memexport_pages_written_ = false;
+  memexport_await_pending_ = false;
   memexport_written_page_min_ = kMemexportPageCount;
   memexport_written_page_max_ = 0;
 }
@@ -108,6 +136,8 @@ std::array<uint64_t, kMemexportPageCount / 64> memexport_written_pages_{};
 // Cleared until the first memexport draw, so consumer-side routing is skipped
 // entirely for titles that never memexport.
 bool any_memexport_pages_written_ = false;
+// Export output has been recorded but not yet awaited for the guest to read.
+bool memexport_await_pending_ = false;
 // Inclusive min/max written page, so IsMemexportRange rejects a range outside
 // the memexport region in O(1). Empty (min > max) until the first memexport.
 uint32_t memexport_written_page_min_ = kMemexportPageCount;
