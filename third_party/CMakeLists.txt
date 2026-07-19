@@ -859,7 +859,6 @@ function(ffmpeg_common target)
     ${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-xenia
     ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg
   )
-
   if(WIN32)
     target_include_directories(${target} PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg/compat/atomics/win32
@@ -883,6 +882,8 @@ function(ffmpeg_common target)
       _XOPEN_SOURCE=700
     )
   endif()
+
+  set_target_properties(${target} PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
   if(NOT WIN32)
     target_compile_options(${target} PRIVATE -fPIC)
