@@ -1208,7 +1208,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   // Name accessible via name() on Android before API 26 which added
   // pthread_getname_np.
   mutable std::mutex android_pre_api_26_name_mutex_;
-  char android_pre_api_26_name_[16];
+  mutable char android_pre_api_26_name_[16];
 #endif
 };
 
