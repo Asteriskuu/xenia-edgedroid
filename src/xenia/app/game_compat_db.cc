@@ -53,9 +53,11 @@ const std::unordered_map<uint32_t, CompatState>& GetCompatIndex() {
       XELOGE("CompatDb: bundle decompress failed");
       return map;
     }
-    // Merge canary and stable: most-optimistic state across all sources wins.
+    // When multiple files are present (fallback) merge with most-optimistic
+    // state across all sources winning.
     bundle.ForEach([&](std::string_view name, std::string_view data) {
-      if (name != "canary.json" && name != "stable.json") {
+      if (name != "compatibility_data.json" && name != "canary.json" &&
+          name != "stable.json") {
         return;
       }
       rapidjson::Document doc;

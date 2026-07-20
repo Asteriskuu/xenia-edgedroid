@@ -13,11 +13,12 @@ from glob import glob
 from json import loads as jsonloads
 import os
 import platform
-from shutil import rmtree, which as shutil_which
+from shutil import rmtree, copy2, which as shutil_which
 import subprocess
 import sys
 import stat
 import tarfile
+import time
 import urllib.request
 import zipfile
 import enum
@@ -524,6 +525,45 @@ def fetch_data_repos():
                 repo["url"],
                 repo_path,
             ])
+
+    # Download compatibility data from xenia-canary/game-compatibility release.
+    # Falls back to xenia-manager/database if the download fails.
+    compat_dir = os.path.join(data_dir, "game-compatibility")
+    os.makedirs(compat_dir, exist_ok=True)
+    compat_url = "https://github.com/xenia-canary/game-compatibility/releases/download/game-compatibility/compatibility_data.json"
+    compat_path = os.path.join(compat_dir, "compatibility_data.json")
+    print(f"  - downloading compatibility_data.json...")
+    max_attempts = 3
+    downloaded = False
+    for attempt in range(1, max_attempts + 1):
+        tmp_path = compat_path + ".tmp"
+        try:
+            urllib.request.urlretrieve(compat_url, tmp_path)
+            os.replace(tmp_path, compat_path)
+            downloaded = True
+            break
+        except (urllib.error.URLError, OSError) as e:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            if attempt < max_attempts:
+                print(f"  - attempt {attempt}/{max_attempts} failed: {e}, retrying...")
+                time.sleep(2 * attempt)
+            else:
+                print_warning(f"compatibility_data.json download failed after "
+                              f"{max_attempts} attempts: {e}")
+    if not downloaded:
+        # Fall back to xenia-manager/database compatibility data.
+        fallback_src = os.path.join(data_dir, "xenia-manager-database",
+                                    "data", "game-compatibility")
+        if os.path.isdir(fallback_src):
+            for f in os.listdir(fallback_src):
+                copy2(os.path.join(fallback_src, f),
+                       os.path.join(compat_dir, f))
+            print(f"  - using xenia-manager/database compatibility data as fallback")
+        else:
+            print_error("no compatibility data available (download failed and "
+                        "xenia-manager/database fallback not found)")
+            sys.exit(1)
 
 
 def get_cc(cc=None):
