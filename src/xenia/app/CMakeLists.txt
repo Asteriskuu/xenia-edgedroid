@@ -33,9 +33,8 @@ else()
   target_sources(xenia-app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/emulator_window.cc
   )
+  xe_platform_sources(xenia-app ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
-
-xe_platform_sources(xenia-app ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Per-platform windowed entry point.
 if(WIN32)
