@@ -273,6 +273,7 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
   return std::move(result);
 }
 
+#if !XE_PLATFORM_ANDROID
 bool SetAttributes(const std::filesystem::path& path, uint64_t attributes) {
   struct stat st;
   if (stat(path.c_str(), &st) != 0) {
@@ -286,6 +287,7 @@ bool SetAttributes(const std::filesystem::path& path, uint64_t attributes) {
   }
   return chmod(path.c_str(), mode) == 0;
 }
+#endif
 
 }  // namespace filesystem
 }  // namespace xe
