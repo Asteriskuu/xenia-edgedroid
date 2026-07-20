@@ -11,9 +11,9 @@
 namespace xe {
 namespace app {
 
-EmulatorWindow::EmulatorWindow(
-    Emulator* emulator, ui::WindowedAppContext& app_context, uint32_t width,
-    uint32_t height)
+EmulatorWindow::EmulatorWindow(Emulator* emulator,
+                               ui::WindowedAppContext& app_context,
+                               uint32_t width, uint32_t height)
     : emulator_(emulator), app_context_(app_context), window_listener_(*this) {}
 
 EmulatorWindow::~EmulatorWindow() = default;
@@ -25,9 +25,7 @@ std::unique_ptr<EmulatorWindow> EmulatorWindow::Create(
       new EmulatorWindow(emulator, app_context, width, height));
 }
 
-bool EmulatorWindow::Initialize() {
-  return true;
-}
+bool EmulatorWindow::Initialize() { return true; }
 
 ui::Presenter* EmulatorWindow::GetGraphicsSystemPresenter() const {
   return nullptr;
@@ -83,8 +81,7 @@ const char* EmulatorWindow::GetCvarValueForSwapPostEffect(
 }
 
 gpu::CommandProcessor::SwapPostEffect
-EmulatorWindow::GetSwapPostEffectForCvarValue(
-    const std::string& cvar_value) {
+EmulatorWindow::GetSwapPostEffectForCvarValue(const std::string& cvar_value) {
   return gpu::CommandProcessor::SwapPostEffect::kNone;
 }
 
@@ -107,9 +104,7 @@ EmulatorWindow::GetGuestOutputPaintConfigForCvars() {
 void EmulatorWindow::ApplyDisplayConfigForCvars() {}
 void EmulatorWindow::ApplyContentVisibility() {}
 
-bool EmulatorWindow::StopTitleAndReturnToList() {
-  return false;
-}
+bool EmulatorWindow::StopTitleAndReturnToList() { return false; }
 
 void EmulatorWindow::InitializeGameLibrary() {}
 void EmulatorWindow::AddLaunchedTitleToLibrary(uint32_t title_id,
