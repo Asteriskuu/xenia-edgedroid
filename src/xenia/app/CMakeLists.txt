@@ -28,18 +28,6 @@ target_sources(xenia-app PRIVATE
 
 xe_platform_sources(xenia-app ${CMAKE_CURRENT_SOURCE_DIR})
 
-# emulator_window.cc is the desktop/wxWidgets implementation and should not be
-# compiled on Android, where wxWidgets is unavailable.
-if(ANDROID)
-  get_target_property(_xenia_app_sources xenia-app SOURCES)
-  if(_xenia_app_sources)
-    list(REMOVE_ITEM _xenia_app_sources
-      "${CMAKE_CURRENT_SOURCE_DIR}/emulator_window.cc"
-    )
-    set_target_properties(xenia-app PROPERTIES SOURCES "${_xenia_app_sources}")
-  endif()
-endif()
-
 # Per-platform windowed entry point.
 if(WIN32)
   target_sources(xenia-app PRIVATE
