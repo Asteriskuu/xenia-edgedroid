@@ -532,7 +532,7 @@ def fetch_data_repos():
     os.makedirs(compat_dir, exist_ok=True)
     compat_url = "https://github.com/xenia-canary/game-compatibility/releases/download/game-compatibility/compatibility_data.json"
     compat_path = os.path.join(compat_dir, "compatibility_data.json")
-    print(f"  - downloading compatibility_data.json...")
+    print("  - downloading compatibility_data.json...")
     max_attempts = 3
     downloaded = False
     for attempt in range(1, max_attempts + 1):
@@ -559,7 +559,7 @@ def fetch_data_repos():
             for f in os.listdir(fallback_src):
                 copy2(os.path.join(fallback_src, f),
                        os.path.join(compat_dir, f))
-            print(f"  - using xenia-manager/database compatibility data as fallback")
+            print("  - using xenia-manager/database compatibility data as fallback")
         else:
             print_error("no compatibility data available (download failed and "
                         "xenia-manager/database fallback not found)")
