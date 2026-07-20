@@ -1018,6 +1018,9 @@ if(XE_TARGET_AARCH64)
     )
   endif()
 endif()
+set_target_properties(libavutil PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_options(libavutil PRIVATE -fPIC)
+
 ffmpeg_common(libavutil)
 
 # --- libavcodec ---
