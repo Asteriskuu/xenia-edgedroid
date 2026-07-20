@@ -8,12 +8,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: edge
       - run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@://github.com"
-          git remote add upstream https://github.com
-          git fetch upstream
-          git checkout main
-          git merge --squash -X ours upstream/main
+          
+          UPSTREAM_URL=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://github.com{{ github.repository }}" \
+            | jq -r '.parent.clone_url')
+          
+          if [ "$UPSTREAM_URL" = "null" ] || [ -z "$UPSTREAM_URL" ]; then
+            echo "Error: This repository is not a fork or cannot access upstream metadata."
+            exit 1
+          fi
+
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream edge
+          git checkout edge
+          git merge --squash -X ours upstream/edge
           git commit -m "Squash and merge upstream changes"
-          git push origin main
+          git push origin edge
