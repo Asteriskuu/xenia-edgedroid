@@ -843,6 +843,10 @@ function(xe_add_gas_sources target)
       target_sources(${target} PRIVATE "${obj}")
     else()
       # GCC/Clang: native ASM support
+      set_source_files_properties("${src}" PROPERTIES
+        LANGUAGE ASM
+        COMPILE_FLAGS "-fPIC"
+      )
       target_sources(${target} PRIVATE "${src}")
     endif()
   endforeach()
