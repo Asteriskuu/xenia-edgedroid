@@ -172,7 +172,7 @@ class EmulatorWindow {
   void FileDrop(const std::filesystem::path& filename);
   void OnMouseUp(const ui::MouseEvent& e);
   void FileClose();
-  
+
   void ToggleContextMenu(bool use_cursor_position = true);
   EmulatorWindow::ControllerHotKey ProcessControllerHotkey(int buttons);
   void VibrateController(xe::hid::InputSystem* input_sys, uint32_t user_index,
