@@ -18,6 +18,8 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
     "${CMAKE_CURRENT_SOURCE_DIR}/*_wx.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/wx_locale.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/wx_locale.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/icon_decode.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/icon_decode.h"
   )
 
   get_target_property(_ui_srcs xenia-ui SOURCES)
