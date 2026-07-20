@@ -11,12 +11,10 @@
 namespace xe {
 namespace app {
 
-EmulatorWindow::EmulatorWindow(Emulator* emulator,
-                               ui::WindowedAppContext& app_context,
-                               uint32_t width, uint32_t height)
-    : emulator_(emulator),
-      app_context_(app_context),
-      window_listener_(*this) {}
+EmulatorWindow::EmulatorWindow(
+    Emulator* emulator, ui::WindowedAppContext& app_context, uint32_t width,
+    uint32_t height)
+    : emulator_(emulator), app_context_(app_context), window_listener_(*this) {}
 
 EmulatorWindow::~EmulatorWindow() = default;
 
@@ -27,6 +25,10 @@ std::unique_ptr<EmulatorWindow> EmulatorWindow::Create(
       new EmulatorWindow(emulator, app_context, width, height));
 }
 
+bool EmulatorWindow::Initialize() {
+  return true;
+}
+
 ui::Presenter* EmulatorWindow::GetGraphicsSystemPresenter() const {
   return nullptr;
 }
@@ -35,6 +37,7 @@ void EmulatorWindow::SetupGraphicsSystemPresenterPainting() {}
 void EmulatorWindow::ShutdownGraphicsSystemPresenterPainting() {}
 void EmulatorWindow::OnEmulatorInitialized() {}
 void EmulatorWindow::UpdateTitle() {}
+
 void EmulatorWindow::SetInitializingShaderStorage(bool initializing) {
   initializing_shader_storage_ = initializing;
 }
@@ -49,9 +52,9 @@ xe::X_STATUS EmulatorWindow::RunTitle(
 
 void EmulatorWindow::SetFullscreen(bool fullscreen) {}
 void EmulatorWindow::ToggleFullscreen() {}
-
 void EmulatorWindow::TakeScreenshot() {}
 void EmulatorWindow::ExportScreenshot(const xe::ui::RawImage& image) {}
+
 void EmulatorWindow::SaveImage(const std::filesystem::path& path,
                                const xe::ui::RawImage& image) {}
 
@@ -103,7 +106,10 @@ EmulatorWindow::GetGuestOutputPaintConfigForCvars() {
 
 void EmulatorWindow::ApplyDisplayConfigForCvars() {}
 void EmulatorWindow::ApplyContentVisibility() {}
-bool EmulatorWindow::StopTitleAndReturnToList() { return false; }
+
+bool EmulatorWindow::StopTitleAndReturnToList() {
+  return false;
+}
 
 void EmulatorWindow::InitializeGameLibrary() {}
 void EmulatorWindow::AddLaunchedTitleToLibrary(uint32_t title_id,
