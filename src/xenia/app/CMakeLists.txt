@@ -23,6 +23,7 @@ endif()
 
 target_sources(xenia-app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/xenia_main.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/emulator_window.cc
 )
 
 xe_platform_sources(xenia-app ${CMAKE_CURRENT_SOURCE_DIR})
@@ -54,12 +55,13 @@ if(WIN32)
       PROPERTIES COMPILE_OPTIONS "/arch:SSE2"
     )
   endif()
+
   # WIN32 executable defaults to /SUBSYSTEM:WINDOWS; override to CONSOLE
   # in Debug so stdout/stderr reach an attached terminal. Pin the entry
   # explicitly: wxIMPLEMENT_APP_NO_MAIN only emits wWinMain, so without
   # /ENTRY the CONSOLE subsystem looks for a missing main().
   target_link_options(xenia-app PRIVATE
-    $<$<CONFIG:Debug>:/SUBSYSTEM:CONSOLE>
+    $<$CONFIG:Debug:/SUBSYSTEM:CONSOLE>
     /ENTRY:wWinMainCRTStartup
   )
 elseif(APPLE)
@@ -196,30 +198,38 @@ elseif(APPLE)
     256  icon_256x256.png
     512  icon_256x256@2x.png
     512  icon_512x512.png
-    1024 icon_512x512@2x.png)
+    1024 icon_512x512@2x.png
+  )
   set(_xe_app_iconset_copy_cmds
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_xe_app_iconset_dir}")
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_xe_app_iconset_dir}"
+  )
   set(_xe_app_iconset_deps "")
+  
   while(_xe_app_iconset_pairs)
     list(POP_FRONT _xe_app_iconset_pairs _xe_size _xe_dst)
     list(APPEND _xe_app_iconset_copy_cmds
       COMMAND "${CMAKE_COMMAND}" -E copy
-              "${_xe_app_icon_src}/${_xe_size}.png"
-              "${_xe_app_iconset_dir}/${_xe_dst}")
+      "${_xe_app_icon_src}/${_xe_size}.png"
+      "${_xe_app_iconset_dir}/${_xe_dst}"
+    )
     list(APPEND _xe_app_iconset_deps "${_xe_app_icon_src}/${_xe_size}.png")
   endwhile()
+  
   add_custom_command(
     OUTPUT "${_xe_app_icns}"
     ${_xe_app_iconset_copy_cmds}
     COMMAND iconutil --convert icns
-            --output "${_xe_app_icns}"
-            "${_xe_app_iconset_dir}"
+      --output "${_xe_app_icns}"
+      "${_xe_app_iconset_dir}"
     DEPENDS ${_xe_app_iconset_deps}
-    VERBATIM)
+    VERBATIM
+  )
+  
   target_sources(xenia-app PRIVATE "${_xe_app_icns}")
   set_source_files_properties("${_xe_app_icns}" PROPERTIES
     GENERATED TRUE
-    MACOSX_PACKAGE_LOCATION Resources)
+    MACOSX_PACKAGE_LOCATION Resources
+  )
 
   set_target_properties(xenia-app PROPERTIES
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
@@ -227,11 +237,13 @@ elseif(APPLE)
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.xenia.edge"
     MACOSX_BUNDLE_BUNDLE_VERSION "1"
     MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
-    MACOSX_BUNDLE_ICON_FILE "AppIcon.icns")
+    MACOSX_BUNDLE_ICON_FILE "AppIcon.icns"
+  )
 
   target_link_options(xenia-app PRIVATE
     "-Wl,-rpath,@executable_path/../Frameworks"
-    "-Wl,-rpath,@loader_path/../Frameworks")
+    "-Wl,-rpath,@loader_path/../Frameworks"
+  )
 endif()
 
 xe_target_defaults(xenia-app)
@@ -242,26 +254,31 @@ xe_target_defaults(xenia-app)
 if(APPLE)
   add_custom_command(TARGET xenia-app POST_BUILD
     COMMAND codesign --force --deep --sign -
-            --entitlements "${PROJECT_SOURCE_DIR}/xenia.entitlements"
-            "$<TARGET_BUNDLE_DIR:xenia-app>"
+      --entitlements "${PROJECT_SOURCE_DIR}/xenia.entitlements"
+      "$<TARGET_BUNDLE_DIR:xenia-app>"
     # Strip macos-26 provenance/macl xattrs so AMFI on macOS 15 accepts the seal.
     COMMAND xattr -cr "$<TARGET_BUNDLE_DIR:xenia-app>"
-    VERBATIM)
+    VERBATIM
+  )
 endif()
 
 # Bake icons into the app binary (font lives with xenia-ui).
 xe_embed_binary_assets(xenia-app
-    "${PROJECT_SOURCE_DIR}/assets/icons" icons)
+  "${PROJECT_SOURCE_DIR}/assets/icons" icons
+)
 
 # Bake game-compat data (canary.json from xenia-manager/database).
 xe_embed_compressed_bundle(xenia-app
-    "${PROJECT_SOURCE_DIR}/build/data_repos/xenia-manager-database/data/game-compatibility"
-    game_compat)
+  "${PROJECT_SOURCE_DIR}/build/data_repos/xenia-manager-database/data/game-compatibility"
+  game_compat
+)
 
 # Bake the x360db title database (games.json from xenia-manager/x360db).
 xe_embed_compressed_bundle(xenia-app
-    "${PROJECT_SOURCE_DIR}/build/data_repos/x360db/games.json"
-    game_db)
+  "${PROJECT_SOURCE_DIR}/build/data_repos/x360db/games.json"
+  game_db
+)
 
 target_include_directories(xenia-app PRIVATE
-    "${PROJECT_SOURCE_DIR}/third_party/rapidjson/include")
+  "${PROJECT_SOURCE_DIR}/third_party/rapidjson/include"
+)
