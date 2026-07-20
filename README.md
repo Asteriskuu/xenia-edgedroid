@@ -6,6 +6,10 @@
 
 <h1 align="center">Xenia Edgedroid - Xbox 360 Emulator</h1>
 
+> [!WARNING]
+> I wouldn't recommend downloading any actions build yet. most of them dont work well.
+> If this message disappears. it means theres a working version
+
 Xenia Edge is yet another experimental fork of the Xenia emulator, originally based on [Xenia Canary](https://github.com/xenia-canary/xenia-canary). The focus is
 on faster iteration, higher default game compatibility, usability and platform support.
 
