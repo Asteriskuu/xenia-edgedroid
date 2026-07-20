@@ -102,6 +102,7 @@ if(ANDROID)
     snappy
     xxhash
     xenia-gpu-vulkan
+    xenia-ui-vulkan
     glslang-spirv
   )
 else()
