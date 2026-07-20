@@ -23,8 +23,17 @@ endif()
 
 target_sources(xenia-app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/xenia_main.cc
-  ${CMAKE_CURRENT_SOURCE_DIR}/emulator_window.cc
 )
+
+if(ANDROID)
+  target_sources(xenia-app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/emulator_window_android.cc
+  )
+else()
+  target_sources(xenia-app PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/emulator_window.cc
+  )
+endif()
 
 xe_platform_sources(xenia-app ${CMAKE_CURRENT_SOURCE_DIR})
 
