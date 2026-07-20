@@ -410,7 +410,8 @@ void EmulatorApp::DebugWindowClosedListener::OnClosing(xe::ui::UIEvent& e) {
 EmulatorApp::EmulatorApp(xe::ui::WindowedAppContext& app_context)
     : xe::ui::WindowedApp(app_context, "xenia", "[Path to .iso/.xex]")
 #if !XE_PLATFORM_ANDROID
-      , debug_window_closed_listener_(*this)
+      ,
+      debug_window_closed_listener_(*this)
 #endif  // !XE_PLATFORM_ANDROID
 {
   AddPositionalOption("target");
