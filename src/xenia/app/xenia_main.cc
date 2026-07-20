@@ -14,7 +14,9 @@
 #include <string>
 #include <thread>
 
+#if !XE_PLATFORM_ANDROID
 #include "xenia/app/discord/discord_presence.h"
+#endif  // !XE_PLATFORM_ANDROID
 #include "xenia/app/emulator_window.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
@@ -25,16 +27,22 @@
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
 #include "xenia/debug/gdb/gdbstub.h"
+#if !XE_PLATFORM_ANDROID
 #include "xenia/debug/ui/debug_window.h"
+#endif  // !XE_PLATFORM_ANDROID
 #include "xenia/emulator.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/ui/file_picker.h"
+#if XE_PLATFORM_WIN32
 #include "xenia/ui/redist_installer_wx.h"
+#endif  // XE_PLATFORM_WIN32
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_listener.h"
 #include "xenia/ui/windowed_app.h"
 #include "xenia/ui/windowed_app_context.h"
+#if !XE_PLATFORM_ANDROID
 #include "xenia/ui/wx_locale.h"
+#endif  // !XE_PLATFORM_ANDROID
 
 // Available audio systems:
 #include "xenia/apu/nop/nop_audio_system.h"
@@ -83,6 +91,13 @@ DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
 DEFINE_string(gpu, "metal", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
+#elif XE_PLATFORM_ANDROID
+#define APU_OPTIONS "[nop]"
+#define GPU_OPTIONS "[vulkan, null]"
+#define HID_OPTIONS "[nop]"
+DEFINE_string(apu, "nop", "Audio system. Use: " APU_OPTIONS, "APU");
+DEFINE_string(gpu, "vulkan", "Graphics system. Use: " GPU_OPTIONS, "GPU");
+DEFINE_string(hid, "nop", "Input system. Use: " HID_OPTIONS, "HID");
 #else
 #define APU_OPTIONS "[sdl, nop]"
 #define GPU_OPTIONS "[vulkan, null]"
@@ -136,7 +151,9 @@ DEFINE_int32(
     "Port for GDBStub debugger to listen on, requires --debug (0 = disable)",
     "General");
 
+#if !XE_PLATFORM_ANDROID
 DEFINE_bool(discord, true, "Enable Discord rich presence", "General");
+#endif  // !XE_PLATFORM_ANDROID
 
 DECLARE_bool(widescreen);
 
@@ -337,6 +354,7 @@ class EmulatorApp final : public xe::ui::WindowedApp {
     }
   };
 
+#if !XE_PLATFORM_ANDROID
   class DebugWindowClosedListener final : public xe::ui::WindowListener {
    public:
     explicit DebugWindowClosedListener(EmulatorApp& emulator_app)
@@ -347,6 +365,7 @@ class EmulatorApp final : public xe::ui::WindowedApp {
    private:
     EmulatorApp& emulator_app_;
   };
+#endif  // !XE_PLATFORM_ANDROID
 
   explicit EmulatorApp(xe::ui::WindowedAppContext& app_context);
 
@@ -359,13 +378,17 @@ class EmulatorApp final : public xe::ui::WindowedApp {
   void EmulatorThread();
   void ShutdownEmulatorThreadFromUIThread();
 
+#if !XE_PLATFORM_ANDROID
   DebugWindowClosedListener debug_window_closed_listener_;
+#endif  // !XE_PLATFORM_ANDROID
 
   std::unique_ptr<Emulator> emulator_;
   std::unique_ptr<EmulatorWindow> emulator_window_;
 
   // Created on demand, used by the emulator.
+#if !XE_PLATFORM_ANDROID
   std::unique_ptr<xe::debug::ui::DebugWindow> debug_window_;
+#endif  // !XE_PLATFORM_ANDROID
 #if XE_PLATFORM_WIN32
   std::unique_ptr<xe::debug::gdb::GDBStub> debug_gdbstub_;
 #endif
@@ -376,15 +399,20 @@ class EmulatorApp final : public xe::ui::WindowedApp {
   std::thread emulator_thread_;
 };
 
+#if !XE_PLATFORM_ANDROID
 void EmulatorApp::DebugWindowClosedListener::OnClosing(xe::ui::UIEvent& e) {
   EmulatorApp* emulator_app = &emulator_app_;
   emulator_app->emulator_->processor()->set_debug_listener(nullptr);
   emulator_app->debug_window_.reset();
 }
+#endif  // !XE_PLATFORM_ANDROID
 
 EmulatorApp::EmulatorApp(xe::ui::WindowedAppContext& app_context)
-    : xe::ui::WindowedApp(app_context, "xenia", "[Path to .iso/.xex]"),
-      debug_window_closed_listener_(*this) {
+    : xe::ui::WindowedApp(app_context, "xenia", "[Path to .iso/.xex]")
+#if !XE_PLATFORM_ANDROID
+      , debug_window_closed_listener_(*this)
+#endif  // !XE_PLATFORM_ANDROID
+{
   AddPositionalOption("target");
 }
 
@@ -407,9 +435,7 @@ std::unique_ptr<apu::AudioSystem> EmulatorApp::CreateAudioSystem(
   factory.Add<apu::nop::NopAudioSystem>("nop");
   return factory.Create(cvars::apu, processor);
 }
-
-std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
-  // While Vulkan is supported by a large variety of operating systems (Windows,
+// While Vulkan is supported by a large variety of operating systems (Windows,
   // GNU/Linux, Android, also via the MoltenVK translation layer on top of Metal
   // on macOS and iOS), please don't remove platform-specific GPU backends from
   // Xenia.
@@ -480,6 +506,7 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
   // For maintainability, as much implementation code as possible should be
   // placed in `xe::gpu` and shared between the backends rather than duplicated
   // between them.
+std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
   const std::string gpu_implementation_name = cvars::gpu;
   if (gpu_implementation_name == "null") {
     return std::make_unique<gpu::null::NullGraphicsSystem>();
@@ -572,14 +599,18 @@ bool EmulatorApp::OnInitialize() {
 
   config::SetupConfig(storage_root);
 
+#if !XE_PLATFORM_ANDROID
   // Must follow SetupConfig so cvars::ui_locale from the TOML is visible.
   xe::ui::InitializeWxLocale();
+#endif  // !XE_PLATFORM_ANDROID
 
+#if XE_PLATFORM_WIN32
   // A missing/outdated Visual C++ runtime faults deep in the CRT during
   // startup. Check after config (so the decline cvar is honored) and locale
   // (for a localized prompt), but before the emulator/network init that trips
   // it. On a successful install this relaunches and doesn't return.
   xe::ui::EnsureVCRuntime();
+#endif  // XE_PLATFORM_WIN32
 
   // Load game-specific config if a target is specified.
   if (!cvars::target.empty()) {
@@ -649,9 +680,11 @@ bool EmulatorApp::OnInitialize() {
 void EmulatorApp::OnDestroy() {
   ShutdownEmulatorThreadFromUIThread();
 
+#if !XE_PLATFORM_ANDROID
   if (cvars::discord) {
     discord::DiscordPresence::Shutdown();
   }
+#endif  // !XE_PLATFORM_ANDROID
 
   // The profiler needs to shut down before the graphics context.
   Profiler::Shutdown();
@@ -699,6 +732,7 @@ void EmulatorApp::EmulatorThread() {
       emulator_->processor()->ShowDebugger();
 #endif
     } else {
+#if !XE_PLATFORM_ANDROID
       emulator_->processor()->set_debug_listener_request_handler(
           [this](xe::cpu::Processor* processor) {
             if (debug_window_) {
@@ -713,15 +747,18 @@ void EmulatorApp::EmulatorThread() {
             // If failed to enqueue the UI thread call, this will just be null.
             return debug_window_.get();
           });
+#endif  // !XE_PLATFORM_ANDROID
     }
   }
 
   emulator_->on_launch.AddListener([&](auto title_id, const auto& game_title) {
+#if !XE_PLATFORM_ANDROID
     if (cvars::discord) {
       discord::DiscordPresence::Initialize();
       discord::DiscordPresence::PlayingTitle(
           game_title.empty() ? "Unknown Title" : std::string(game_title));
     }
+#endif  // !XE_PLATFORM_ANDROID
     // Re-setup presenter painting — needed after in-process relaunch
     // creates a new graphics system.
     if (app_context().IsInUIThread()) {
