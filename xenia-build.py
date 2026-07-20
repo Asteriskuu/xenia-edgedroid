@@ -19,6 +19,7 @@ import sys
 import stat
 import tarfile
 import time
+from urllib.parse import urlparse
 import urllib.request
 import zipfile
 import enum
@@ -530,27 +531,34 @@ def fetch_data_repos():
     # Falls back to xenia-manager/database if the download fails.
     compat_dir = os.path.join(data_dir, "game-compatibility")
     os.makedirs(compat_dir, exist_ok=True)
-    compat_url = "https://github.com/xenia-canary/game-compatibility/releases/download/game-compatibility/compatibility_data.json"
+    compat_url = (
+        "https://github.com/xenia-canary/game-compatibility/releases/download/"
+        "game-compatibility/compatibility_data.json"
+    )
+    compat_url_parsed = urlparse(compat_url)
     compat_path = os.path.join(compat_dir, "compatibility_data.json")
     print("  - downloading compatibility_data.json...")
     max_attempts = 3
     downloaded = False
-    for attempt in range(1, max_attempts + 1):
-        tmp_path = compat_path + ".tmp"
-        try:
-            urllib.request.urlretrieve(compat_url, tmp_path)
-            os.replace(tmp_path, compat_path)
-            downloaded = True
-            break
-        except (urllib.error.URLError, OSError) as e:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            if attempt < max_attempts:
-                print(f"  - attempt {attempt}/{max_attempts} failed: {e}, retrying...")
-                time.sleep(2 * attempt)
-            else:
-                print_warning(f"compatibility_data.json download failed after "
-                              f"{max_attempts} attempts: {e}")
+    if compat_url_parsed.scheme != "https":
+        print_warning("compatibility_data URL is not valid, skipping download")
+    else:
+        for attempt in range(1, max_attempts + 1):
+            tmp_path = compat_path + ".tmp"
+            try:
+                urllib.request.urlretrieve(compat_url, tmp_path)
+                os.replace(tmp_path, compat_path)
+                downloaded = True
+                break
+            except (urllib.error.URLError, OSError) as e:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                if attempt < max_attempts:
+                    print(f"  - attempt {attempt}/{max_attempts} failed: {e}, retrying...")
+                    time.sleep(2 * attempt)
+                else:
+                    print_warning(f"compatibility_data.json download failed after "
+                                f"{max_attempts} attempts: {e}")
     if not downloaded:
         # Fall back to xenia-manager/database compatibility data.
         fallback_src = os.path.join(data_dir, "xenia-manager-database",
