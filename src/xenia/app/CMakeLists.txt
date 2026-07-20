@@ -88,6 +88,7 @@ if(ANDROID)
     xenia-gpu-null
     xenia-hid
     xenia-hid-nop
+    xenia-hid-keyboard
     xenia-kernel
     xenia-patcher
     xenia-vfs
@@ -104,6 +105,7 @@ if(ANDROID)
     xenia-gpu-vulkan
     xenia-ui-vulkan
     glslang-spirv
+    log
   )
 else()
   # Desktop builds (Windows, macOS, Linux)
