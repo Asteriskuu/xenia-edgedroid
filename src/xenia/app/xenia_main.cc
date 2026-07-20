@@ -435,7 +435,7 @@ std::unique_ptr<apu::AudioSystem> EmulatorApp::CreateAudioSystem(
   factory.Add<apu::nop::NopAudioSystem>("nop");
   return factory.Create(cvars::apu, processor);
 }
-// While Vulkan is supported by a large variety of operating systems (Windows,
+  // While Vulkan is supported by a large variety of operating systems (Windows,
   // GNU/Linux, Android, also via the MoltenVK translation layer on top of Metal
   // on macOS and iOS), please don't remove platform-specific GPU backends from
   // Xenia.
