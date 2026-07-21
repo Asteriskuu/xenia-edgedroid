@@ -1062,16 +1062,21 @@ void GameListPanel::OnItemContextMenu(wxDataViewEvent& event) {
     auto* compat = new wxMenu;
     auto* canary = compat->Append(wxID_ANY, _("Canary"));
     auto* master = compat->Append(wxID_ANY, _("Master"));
-    // Search every title id the game is known by, so a release tracked under a
-    // sibling id is still found.
+    // Use the issue URL from the compat database when available; fall back to
+    // a GitHub issue-search query for titles not yet tracked.
+    std::string compat_url = GetCompatUrl(entry.title_id);
     std::string compat_query = CompatSearchQuery(entry.title_id);
     menu.Bind(
         wxEVT_MENU,
-        [compat_query](wxCommandEvent&) {
-          xe::LaunchWebBrowser(fmt::format(
-              "https://github.com/xenia-canary/game-compatibility/issues"
-              "?q=is%3Aissue+is%3Aopen+{}",
-              compat_query));
+        [compat_url, compat_query](wxCommandEvent&) {
+          if (!compat_url.empty()) {
+            xe::LaunchWebBrowser(compat_url);
+          } else {
+            xe::LaunchWebBrowser(fmt::format(
+                "https://github.com/xenia-canary/game-compatibility/issues"
+                "?q=is%3Aissue+is%3Aopen+{}",
+                compat_query));
+          }
         },
         canary->GetId());
     menu.Bind(
