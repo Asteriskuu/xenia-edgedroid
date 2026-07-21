@@ -1000,6 +1000,8 @@ if(XE_TARGET_X86_64)
     FFmpeg/libavutil/x86/tx_float_init.c
   )
 endif()
+
+endif()
 # aarch64 platform files
 if(XE_TARGET_AARCH64)
   target_sources(libavutil PRIVATE
@@ -1010,11 +1012,11 @@ if(XE_TARGET_AARCH64)
     # be included together. Requires a GAS-compatible assembler (gcc/clang).
     target_sources(libavutil PRIVATE
       FFmpeg/libavutil/aarch64/float_dsp_init.c
-      #FFmpeg/libavutil/aarch64/tx_float_init.c
+      FFmpeg/libavutil/aarch64/tx_float_init.c
     )
     xe_add_gas_sources(libavutil
       FFmpeg/libavutil/aarch64/float_dsp_neon.S
-      #FFmpeg/libavutil/aarch64/tx_float_neon.S
+      FFmpeg/libavutil/aarch64/tx_float_neon.S
     )
   endif()
 endif()
