@@ -6,7 +6,7 @@
  ******************************************************************************
  */
 
-#include "xenia/app/emulator_window.h"
+#include "xenia/app/emulator_window_android.h"
 
 namespace xe {
 namespace app {
