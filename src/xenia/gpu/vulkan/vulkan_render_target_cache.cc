@@ -1042,11 +1042,10 @@ void VulkanRenderTargetCache::EndSubmission() {
   }
 }
 
-bool VulkanRenderTargetCache::Resolve(const Memory& memory,
-                                      VulkanSharedMemory& shared_memory,
-                                      VulkanTextureCache& texture_cache,
-                                      uint32_t& written_address_out,
-                                      uint32_t& written_length_out) {
+bool VulkanRenderTargetCache::Resolve(
+    const Memory& memory, VulkanSharedMemory& shared_memory,
+    VulkanTextureCache& texture_cache, uint32_t& written_address_out,
+    uint32_t& written_length_out, reg::RB_COPY_DEST_INFO* copy_dest_info_out) {
   SCOPE_profile_cpu_f("gpu");
   written_address_out = 0;
   written_length_out = 0;
@@ -1330,6 +1329,11 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
               resolve_info.copy_dest_extent_length);
           written_address_out = resolve_info.copy_dest_extent_start;
           written_length_out = resolve_info.copy_dest_extent_length;
+          if (copy_dest_info_out) {
+            // Normalized copy format (depth format for depth resolves) - the
+            // texel size the readback downscale expects for the extent.
+            *copy_dest_info_out = resolve_info.copy_dest_info;
+          }
           copied = true;
         }
       }

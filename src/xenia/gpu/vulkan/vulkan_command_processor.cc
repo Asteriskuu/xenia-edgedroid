@@ -3850,8 +3850,10 @@ bool VulkanCommandProcessor::IssueCopy() {
   }
 
   uint32_t written_address, written_length;
+  reg::RB_COPY_DEST_INFO copy_dest_info;
   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
-                                     written_address, written_length)) {
+                                     written_address, written_length,
+                                     &copy_dest_info)) {
     if (debug_markers_enabled_) {
       PopDebugMarker();
     }
@@ -3946,11 +3948,76 @@ bool VulkanCommandProcessor::IssueCopy() {
       return true;
     }
 
-    // Get the current scaled resolve range (not the buffer's total range)
-    uint32_t scaled_length = static_cast<uint32_t>(
-        texture_cache_->GetCurrentScaledResolveRangeLengthScaled());
-    uint64_t scaled_address =
+    uint32_t scale_x = texture_cache_->draw_resolution_scale_x();
+    uint32_t scale_y = texture_cache_->draw_resolution_scale_y();
+    uint32_t scale_area = scale_x * scale_y;
+
+    assert_true(scale_x >= 1 &&
+                scale_x <= TextureCache::kMaxDrawResolutionScaleAlongAxis);
+    assert_true(scale_y >= 1 &&
+                scale_y <= TextureCache::kMaxDrawResolutionScaleAlongAxis);
+    assert_true(scale_x > 1 || scale_y > 1);
+
+    // Texel size from the normalized copy_dest_info, not a re-read of
+    // RB_COPY_DEST_INFO - for depth the register can hold a different size.
+    uint32_t pixel_size_log2 =
+        draw_util::GetResolveDownscalePixelSizeLog2(copy_dest_info);
+    if (pixel_size_log2 > 3) {
+      // 128bpp - the tiled scaled addressing reversal in the downscale shader
+      // does not handle it.
+      XELOGGPU(
+          "Skipping readback of a resolution-scaled resolve to a 128bpp "
+          "destination - not supported by the downscale shader");
+      if (debug_markers_enabled_) {
+        PopDebugMarker();
+      }
+      return true;
+    }
+    // The scaled addressing is periodic per guest group, so the written extent
+    // must be group-aligned for the per-tile reversal to be valid.
+    uint32_t group_bytes_log2 = pixel_size_log2 <= 2 ? 7 : 6;
+    if (written_address & ((uint32_t(1) << group_bytes_log2) - 1)) {
+      XELOGGPU(
+          "Skipping readback of a resolution-scaled resolve to 0x{:08X} - the "
+          "destination is not aligned to the scaled addressing group size",
+          written_address);
+      if (debug_markers_enabled_) {
+        PopDebugMarker();
+      }
+      return true;
+    }
+    uint32_t tile_size_1x = (32u * 32u) << pixel_size_log2;
+    uint32_t tile_count = written_length / tile_size_1x;
+    if (tile_count == 0) {
+      if (debug_markers_enabled_) {
+        PopDebugMarker();
+      }
+      return true;
+    }
+    // Only whole 32x32 tiles are downscaled - truncate a partial tail so stale
+    // data is not copied to the guest.
+    uint32_t readback_length = tile_count * tile_size_1x;
+
+    // Bind the source at the written extent (the range starts earlier, at the
+    // destination base) and skip if the extent isn't fully inside the range.
+    uint64_t scaled_start = uint64_t(written_address) * scale_area;
+    uint64_t scaled_readback_length = uint64_t(readback_length) * scale_area;
+    uint64_t range_start_scaled =
         texture_cache_->GetCurrentScaledResolveRangeStartScaled();
+    uint64_t range_length_scaled =
+        texture_cache_->GetCurrentScaledResolveRangeLengthScaled();
+    if (!range_length_scaled || scaled_start < range_start_scaled ||
+        scaled_start + scaled_readback_length >
+            range_start_scaled + range_length_scaled) {
+      XELOGGPU(
+          "Skipping readback of a resolution-scaled resolve to 0x{:08X} - the "
+          "written extent is not within the current scaled resolve range",
+          written_address);
+      if (debug_markers_enabled_) {
+        PopDebugMarker();
+      }
+      return true;
+    }
 
     // Calculate offset within the buffer using the buffer's base address.
     // GetCurrentScaledResolveBufferBaseOffset() returns:
@@ -3958,33 +4025,16 @@ bool VulkanCommandProcessor::IssueCopy() {
     // - For simple buffers: the buffer's range_start_scaled
     uint64_t buffer_base =
         texture_cache_->GetCurrentScaledResolveBufferBaseOffset();
-    if (scaled_address < buffer_base) {
+    if (scaled_start < buffer_base) {
       XELOGE(
           "VulkanCommandProcessor: Scaled address {} is before buffer start {}",
-          scaled_address, buffer_base);
+          scaled_start, buffer_base);
       if (debug_markers_enabled_) {
         PopDebugMarker();
       }
       return true;
     }
-    uint64_t source_offset = scaled_address - buffer_base;
-
-    // Get format info for downscaling
-    auto copy_dest_info = register_file_->Get<reg::RB_COPY_DEST_INFO>();
-    const FormatInfo* format_info =
-        FormatInfo::Get(static_cast<uint32_t>(copy_dest_info.copy_dest_format));
-    uint32_t bits_per_pixel = format_info->bits_per_pixel;
-
-    uint32_t scale_x = texture_cache_->draw_resolution_scale_x();
-    uint32_t scale_y = texture_cache_->draw_resolution_scale_y();
-
-    assert_true(scale_x >= 1 &&
-                scale_x <= TextureCache::kMaxDrawResolutionScaleAlongAxis);
-    assert_true(scale_y >= 1 &&
-                scale_y <= TextureCache::kMaxDrawResolutionScaleAlongAxis);
-    assert_true(scale_x > 1 || scale_y > 1);
-    assert_true(bits_per_pixel == 8 || bits_per_pixel == 16 ||
-                bits_per_pixel == 32 || bits_per_pixel == 64);
+    uint64_t source_offset = scaled_start - buffer_base;
 
     // The downscale compute writes 1x data straight into host_buffer_ (guest
     // RAM) at the resolved range.
@@ -3996,7 +4046,7 @@ bool VulkanCommandProcessor::IssueCopy() {
     const VkDevice device = vulkan_device->device();
 
     // Ensure intermediate buffer for GPU downscaling is large enough
-    uint32_t downscale_buffer_size = AlignReadbackBufferSize(written_length);
+    uint32_t downscale_buffer_size = AlignReadbackBufferSize(readback_length);
     if (downscale_buffer_size > resolve_downscale_buffer_size_) {
       // Clean up old buffer
       if (resolve_downscale_buffer_ != VK_NULL_HANDLE) {
@@ -4127,7 +4177,7 @@ bool VulkanCommandProcessor::IssueCopy() {
     // Destination buffer (intermediate device-local buffer)
     buffer_infos[1].buffer = resolve_downscale_buffer_;
     buffer_infos[1].offset = 0;
-    buffer_infos[1].range = written_length;
+    buffer_infos[1].range = readback_length;
 
     std::array<VkWriteDescriptorSet, 2> descriptor_writes;
     descriptor_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -4175,31 +4225,13 @@ bool VulkanCommandProcessor::IssueCopy() {
         0, nullptr);
 
     PushDebugMarker("Resolve Downscale: 0x%08X, %u bytes -> %u bytes",
-                    written_address, scaled_length, written_length);
+                    written_address, uint32_t(scaled_readback_length),
+                    readback_length);
 
     // Bind compute pipeline
     BindExternalComputePipeline(resolve_downscale_pipeline_);
 
     // Push constants
-    uint32_t pixel_size_log2;
-    xe::bit_scan_forward(bits_per_pixel >> 3, &pixel_size_log2);
-    uint32_t bytes_per_pixel = 1u << pixel_size_log2;
-    uint32_t tile_size_1x = 32 * 32 * bytes_per_pixel;
-    uint32_t tile_count = written_length / tile_size_1x;
-
-    // Skip if no complete tiles to process
-    if (tile_count == 0) {
-      XELOGW(
-          "VulkanCommandProcessor: Scaled resolve has no complete tiles "
-          "(written_length=%u, tile_size=%u)",
-          written_length, tile_size_1x);
-      if (debug_markers_enabled_) {
-        PopDebugMarker();  // Pop "Resolve Downscale"
-        PopDebugMarker();  // Pop "IssueCopy (Resolve)"
-      }
-      return true;
-    }
-
     ResolveDownscaleConstants constants;
     constants.scale_x = scale_x;
     constants.scale_y = scale_y;
@@ -4235,7 +4267,7 @@ bool VulkanCommandProcessor::IssueCopy() {
     pre_copy_barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     pre_copy_barriers[0].buffer = resolve_downscale_buffer_;
     pre_copy_barriers[0].offset = 0;
-    pre_copy_barriers[0].size = written_length;
+    pre_copy_barriers[0].size = readback_length;
     pre_copy_barriers[1].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
     pre_copy_barriers[1].srcAccessMask =
         VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -4244,7 +4276,7 @@ bool VulkanCommandProcessor::IssueCopy() {
     pre_copy_barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     pre_copy_barriers[1].buffer = dest_buffer;
     pre_copy_barriers[1].offset = dest_offset;
-    pre_copy_barriers[1].size = written_length;
+    pre_copy_barriers[1].size = readback_length;
     deferred_command_buffer_.CmdVkPipelineBarrier(
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
             guest_shader_pipeline_stages_,
@@ -4255,14 +4287,14 @@ bool VulkanCommandProcessor::IssueCopy() {
     VkBufferCopy copy_region = {};
     copy_region.srcOffset = 0;
     copy_region.dstOffset = dest_offset;
-    copy_region.size = written_length;
+    copy_region.size = readback_length;
     deferred_command_buffer_.CmdVkCopyBuffer(resolve_downscale_buffer_,
                                              dest_buffer, 1, &copy_region);
     // Make the copy visible to within-frame consumers reading host_buffer_
     // (route_to_host draws sampling guest RAM as index, vertex or texture, and
     // EnsureMemexportRangeInDeviceBuffer copying out of it).
     PushBufferMemoryBarrier(
-        dest_buffer, dest_offset, VkDeviceSize(written_length),
+        dest_buffer, dest_offset, VkDeviceSize(readback_length),
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | guest_shader_pipeline_stages_ |
             VK_PIPELINE_STAGE_TRANSFER_BIT,

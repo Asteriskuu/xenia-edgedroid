@@ -782,6 +782,12 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
                     bool fixed_rgba16_truncated_to_minus_1_to_1,
                     ResolveInfo& info_out);
 
+// Returns log2 of the copy destination texel size in bytes from a Resolve's
+// copy_dest_info (format already normalized) - the derivation GetResolveInfo
+// used for the destination extent.
+uint32_t GetResolveDownscalePixelSizeLog2(
+    reg::RB_COPY_DEST_INFO copy_dest_info);
+
 // Maximum length for debug marker labels.
 static constexpr size_t kDebugMarkerLabelMaxLength = 256;
 
