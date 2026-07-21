@@ -45,7 +45,7 @@ void EmulatorWindow::LaunchTitleInNewProcess(
 
 xe::X_STATUS EmulatorWindow::RunTitle(
     const std::filesystem::path& path_to_file) {
-  return xe::X_STATUS_UNSUCCESSFUL;
+  return X_STATUS_UNSUCCESSFUL;
 }
 
 void EmulatorWindow::SetFullscreen(bool fullscreen) {}
