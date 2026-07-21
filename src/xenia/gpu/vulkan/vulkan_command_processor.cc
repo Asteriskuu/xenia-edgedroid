@@ -2432,6 +2432,7 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
 void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     VkRenderPass render_pass,
     const VulkanRenderTargetCache::Framebuffer* framebuffer) {
+  SCOPE_profile_cpu_f("gpu");
   SubmitBarriers(false);
 
   const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
@@ -2523,6 +2524,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     VkRenderPass render_pass,
     const VulkanRenderTargetCache::Framebuffer* framebuffer,
     VkImageView transfer_dest_view, bool transfer_dest_is_depth) {
+  SCOPE_profile_cpu_f("gpu");
   SubmitBarriers(false);
 
   const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
