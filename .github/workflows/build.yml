@@ -169,9 +169,9 @@ jobs:
             -G "Ninja" \
             -DXENIA_ENABLE_LTO=OFF \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -DCMAKE_C_FLAGS="-fPIC -D__ANDROID_API__=24 -march=armv8-a" \
-            -DCMAKE_CXX_FLAGS="-fPIC -D__ANDROID_API__=24 -march=armv8-a" \
-            -DCMAKE_ASM_FLAGS="-fPIC -D__ANDROID_API__=24 -march=armv8-a" \
+            -DCMAKE_C_FLAGS="-fPIC -march=armv8-a" \
+            -DCMAKE_CXX_FLAGS="-fPIC -march=armv8-a" \
+            -DCMAKE_ASM_FLAGS="-fPIC -march=armv8-a" \
             -DCMAKE_ASM_COMPILER="${NDK_CLANG}" \
             -DXENIA_BUILD_TESTS=OFF \
             -DXENIA_UI=OFF \
