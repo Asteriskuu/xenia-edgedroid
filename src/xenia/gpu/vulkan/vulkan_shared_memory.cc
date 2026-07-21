@@ -20,6 +20,7 @@
 #include "xenia/ui/vulkan/vulkan_util.h"
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
+DECLARE_bool(memexport_enable);
 DECLARE_bool(shared_memory_zero_copy);
 
 DEFINE_bool(vulkan_sparse_shared_memory, true,
@@ -339,24 +340,28 @@ bool VulkanSharedMemory::CreateImportedGuestRamBuffer(
   memory_allocate_info.allocationSize = kBufferSize;
   memory_allocate_info.memoryTypeIndex = memory_type;
 
-  VkDeviceMemory memory;
-  if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr, &memory) !=
-      VK_SUCCESS) {
+  VkDeviceMemory imported_memory;
+  if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr,
+                           &imported_memory) != VK_SUCCESS) {
     XELOGE("Shared memory host import: failed to import {} MB of guest RAM",
            kBufferSize >> 20);
     dfn.vkDestroyBuffer(device, buffer, nullptr);
     return false;
   }
 
-  if (dfn.vkBindBufferMemory(device, buffer, memory, 0) != VK_SUCCESS) {
+  if (dfn.vkBindBufferMemory(device, buffer, imported_memory, 0) !=
+      VK_SUCCESS) {
     XELOGE("Shared memory host import: failed to bind imported memory");
-    dfn.vkFreeMemory(device, memory, nullptr);
+    dfn.vkFreeMemory(device, imported_memory, nullptr);
     dfn.vkDestroyBuffer(device, buffer, nullptr);
     return false;
   }
 
   out_buffer = buffer;
-  out_memory = memory;
+  out_memory = imported_memory;
+  // The import pins guest RAM - a later mprotect on the alias would fail the
+  // next submit with EFAULT.
+  memory().SetPhysicalAliasSkipHostProtect(true);
   return true;
 }
 
@@ -373,10 +378,18 @@ bool VulkanSharedMemory::TryInitializeZeroCopy() {
 }
 
 void VulkanSharedMemory::TryInitializeHostBuffer() {
+  if (!cvars::memexport_enable) {
+    return;
+  }
   // A second, host-imported (guest RAM) buffer used only for memexport-touching
   // draws while the main buffer stays fast device-local. Non-sparse, so it can
   // accept host memory where the sparse buffer can't.
   if (!CreateImportedGuestRamBuffer(host_buffer_, host_buffer_memory_)) {
+    // Without it memexport output stays device-local and the CPU never sees it.
+    XELOGW(
+        "Shared memory: no host buffer for memexport - memexport_enable is set "
+        "but the import failed, games reading exported data on the CPU will "
+        "misbehave");
     host_buffer_ = VK_NULL_HANDLE;
     host_buffer_memory_ = VK_NULL_HANDLE;
     return;
@@ -404,6 +417,8 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
                                          host_buffer_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
                                          host_buffer_memory_);
+  // No import left to pin the alias.
+  memory().SetPhysicalAliasSkipHostProtect(false);
 
   // If calling from the destructor, the SharedMemory destructor will call
   // ShutdownCommon.
@@ -612,6 +627,26 @@ bool VulkanSharedMemory::UploadRanges(
     }
     return true;
   }
+
+  // Ranges holding memexport output live in host_buffer_ (guest RAM) and may
+  // still be being written by the GPU, so reading them with the CPU below races
+  // those writes. Refresh those on the GPU and upload only what is left.
+  cpu_upload_ranges_.clear();
+  for (uint32_t i = 0; i < num_upload_ranges; ++i) {
+    uint32_t range_base = upload_page_ranges[i].first << page_size_log2();
+    uint32_t range_size = upload_page_ranges[i].second << page_size_log2();
+    if (command_processor_.EnsureMemexportRangeInDeviceBuffer(range_base,
+                                                              range_size)) {
+      MakeRangeValid(range_base, range_size, false);
+      continue;
+    }
+    cpu_upload_ranges_.push_back(upload_page_ranges[i]);
+  }
+  if (cpu_upload_ranges_.empty()) {
+    return true;
+  }
+  upload_page_ranges = cpu_upload_ranges_.data();
+  num_upload_ranges = uint32_t(cpu_upload_ranges_.size());
 
   auto& range_front = upload_page_ranges[0];
   auto& range_back = upload_page_ranges[num_upload_ranges - 1];

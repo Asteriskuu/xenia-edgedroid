@@ -223,7 +223,8 @@ class VulkanCommandProcessor final : public CommandProcessor {
   // read - a texture load - sees it. No-op for non-memexport ranges (already in
   // the device buffer) and when the host buffer is unavailable. Called by the
   // texture cache before loading a texture. Ends the render pass.
-  void EnsureMemexportRangeInDeviceBuffer(uint32_t base_bytes,
+  // Returns whether it copied, so an upload of the same range can be skipped.
+  bool EnsureMemexportRangeInDeviceBuffer(uint32_t base_bytes,
                                           uint32_t size_bytes);
 
   // If not started yet, begins a render pass from the render target cache.

@@ -72,6 +72,9 @@ void ImGuiPerformanceDialog::LoadCurrentSettings() {
   }
   readback_resolve_sync_ = cvars::readback_resolve_sync;
 
+  // Load Memexport Fence Wait setting
+  memexport_await_fences_ = cvars::memexport_await_fences;
+
   // Load Clear Memory Page State setting
   clear_memory_page_state_ = cvars::clear_memory_page_state;
 
@@ -125,6 +128,13 @@ void ImGuiPerformanceDialog::OnReadbackResolveSyncChanged(bool enabled) {
   config::SaveGameConfigSetting(emulator_window_->emulator(), "GPU",
                                 "readback_resolve_sync", enabled);
   ShowNotification("Readback Resolve Sync", enabled ? "Enabled" : "Disabled");
+}
+
+void ImGuiPerformanceDialog::OnMemexportAwaitFencesChanged(bool enabled) {
+  gpu::SaveGPUSetting(gpu::GPUSetting::MemexportAwaitFences, enabled);
+  config::SaveGameConfigSetting(emulator_window_->emulator(), "GPU",
+                                "memexport_await_fences", enabled);
+  ShowNotification("Memexport Fence Wait", enabled ? "Enabled" : "Disabled");
 }
 
 void ImGuiPerformanceDialog::OnEmulatedDisplayUncappedChanged(bool uncapped) {
@@ -262,6 +272,23 @@ void ImGuiPerformanceDialog::OnDraw(ImGuiIO& io) {
     if (ImGui::Checkbox("Synchronous copies (stall GPU)",
                         &readback_resolve_sync_)) {
       OnReadbackResolveSyncChanged(readback_resolve_sync_);
+    }
+    ImGui::PopID();
+    ImGui::Unindent(10);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, xbox_green);
+    ImGui::Text("Memory Export");
+    ImGui::PopStyleColor();
+
+    ImGui::Indent(10);
+    ImGui::PushID("memexport");
+    if (ImGui::Checkbox("Wait for exports before fences (stall GPU)",
+                        &memexport_await_fences_)) {
+      OnMemexportAwaitFencesChanged(memexport_await_fences_);
     }
     ImGui::PopID();
     ImGui::Unindent(10);

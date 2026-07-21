@@ -107,6 +107,11 @@ void CrashDump() {
 }
 
 static inline bool ShouldSkipHostCommit(const BaseHeap& heap) {
+  // Any mprotect over an imported range invalidates the GPU's page pin, and the
+  // mapping is already RW from MapViews, so the commit is a no-op regardless.
+  if (heap.skip_host_protect()) {
+    return true;
+  }
 #if XE_PLATFORM_MAC
   // On macOS ARM64 the host page size is 16 KB, and mprotect-based "commit"
   // creates fragmentation in the 0..512 MB parent physical heap.
@@ -776,6 +781,10 @@ void Memory::EnablePhysicalMemoryAccessCallbacks(
   heaps_.vE0000000.EnableAccessCallbacks(physical_address, length,
                                          enable_invalidation_notifications,
                                          enable_data_providers);
+}
+
+void Memory::SetPhysicalAliasSkipHostProtect(bool skip) {
+  heaps_.physical.set_skip_host_protect(skip);
 }
 
 xe::memory::PageAccess Memory::GetPhysicalPageWindowAccess(
@@ -1528,7 +1537,7 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
     // TODO(benvanik): figure out why games are using memory after releasing
     // it. It's possible this is some virtual/physical stuff where the GPU
     // still can access it.
-    if (cvars::protect_on_release) {
+    if (cvars::protect_on_release && !skip_host_protect_) {
       if (!xe::memory::Protect(TranslateRelative(base_page_number * page_size_),
                                base_page_entry.region_page_count * page_size_,
                                xe::memory::PageAccess::kNoAccess, nullptr)) {
@@ -1614,10 +1623,16 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
   // We can only do this if our size matches system page granularity.
   uint32_t page_count = end_page_number - start_page_number + 1;
   bool host_offset_aligned = (host_address_offset_ & page_size_mask) == 0;
-  if (page_size_ == xe_page_size ||
-      (host_offset_aligned &&
-       (((page_count << page_size_shift_) & page_size_mask) == 0) &&
-       (((start_page_number << page_size_shift_) & page_size_mask) == 0))) {
+  if (skip_host_protect_) {
+    // Host is pinned writable - report the tracked protection.
+    if (old_protect) {
+      *old_protect = page_table_[start_page_number].current_protect;
+    }
+  } else if (page_size_ == xe_page_size ||
+             (host_offset_aligned &&
+              (((page_count << page_size_shift_) & page_size_mask) == 0) &&
+              (((start_page_number << page_size_shift_) & page_size_mask) ==
+               0))) {
     memory::PageAccess old_protect_access;
     if (!xe::memory::Protect(
             TranslateRelative(start_page_number << page_size_shift_),

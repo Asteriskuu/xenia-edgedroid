@@ -18,6 +18,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/profiling.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/registers.h"
@@ -1041,11 +1042,11 @@ void VulkanRenderTargetCache::EndSubmission() {
   }
 }
 
-bool VulkanRenderTargetCache::Resolve(const Memory& memory,
-                                      VulkanSharedMemory& shared_memory,
-                                      VulkanTextureCache& texture_cache,
-                                      uint32_t& written_address_out,
-                                      uint32_t& written_length_out) {
+bool VulkanRenderTargetCache::Resolve(
+    const Memory& memory, VulkanSharedMemory& shared_memory,
+    VulkanTextureCache& texture_cache, uint32_t& written_address_out,
+    uint32_t& written_length_out, reg::RB_COPY_DEST_INFO* copy_dest_info_out) {
+  SCOPE_profile_cpu_f("gpu");
   written_address_out = 0;
   written_length_out = 0;
 
@@ -1328,6 +1329,11 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
               resolve_info.copy_dest_extent_length);
           written_address_out = resolve_info.copy_dest_extent_start;
           written_length_out = resolve_info.copy_dest_extent_length;
+          if (copy_dest_info_out) {
+            // Normalized copy format (depth format for depth resolves) - the
+            // texel size the readback downscale expects for the extent.
+            *copy_dest_info_out = resolve_info.copy_dest_info;
+          }
           copied = true;
         }
       }
@@ -1441,6 +1447,7 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
 bool VulkanRenderTargetCache::Update(
     bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask, const Shader& vertex_shader) {
+  SCOPE_profile_cpu_f("gpu");
   if (!RenderTargetCache::Update(is_rasterization_done,
                                  normalized_depth_control,
                                  normalized_color_mask, vertex_shader)) {
@@ -4885,6 +4892,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     const std::vector<Transfer>* render_target_transfers,
     const uint64_t* render_target_resolve_clear_values,
     const Transfer::Rectangle* resolve_clear_rectangle) {
+  SCOPE_profile_cpu_f("gpu");
   assert_true(GetPath() == Path::kHostRenderTargets);
 
   bool resolve_clear_needed =

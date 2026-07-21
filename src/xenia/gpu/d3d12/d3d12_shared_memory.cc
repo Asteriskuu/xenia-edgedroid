@@ -19,6 +19,7 @@
 #include "xenia/ui/d3d12/d3d12_util.h"
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
+DECLARE_bool(memexport_enable);
 DECLARE_bool(tiled_shared_memory);
 DECLARE_bool(shared_memory_zero_copy);
 
@@ -206,9 +207,17 @@ bool D3D12SharedMemory::ImportGuestRamHeap(void*& out_view,
 }
 
 void D3D12SharedMemory::TryInitializeHostBuffer() {
+  if (!cvars::memexport_enable) {
+    return;
+  }
   void* view = nullptr;
   ID3D12Heap* heap = nullptr;
   if (!ImportGuestRamHeap(view, heap)) {
+    // Without it memexport output stays device-local and the CPU never sees it.
+    XELOGW(
+        "Shared memory: no host buffer for memexport - memexport_enable is set "
+        "but the import failed, games reading exported data on the CPU will "
+        "misbehave");
     return;
   }
 
@@ -532,6 +541,26 @@ bool D3D12SharedMemory::UploadRanges(
     }
     return true;
   }
+  // Ranges holding memexport output live in the host buffer (guest RAM) and may
+  // still be being written by the GPU, so reading them with the CPU below races
+  // those writes. Refresh those on the GPU and upload only what is left.
+  cpu_upload_ranges_.clear();
+  for (uint32_t i = 0; i < num_upload_page_ranges; ++i) {
+    uint32_t range_base = upload_page_ranges[i].first << page_size_log2();
+    uint32_t range_size = upload_page_ranges[i].second << page_size_log2();
+    if (command_processor_.EnsureMemexportRangeInDeviceBuffer(range_base,
+                                                              range_size)) {
+      MakeRangeValid(range_base, range_size, false);
+      continue;
+    }
+    cpu_upload_ranges_.push_back(upload_page_ranges[i]);
+  }
+  if (cpu_upload_ranges_.empty()) {
+    return true;
+  }
+  upload_page_ranges = cpu_upload_ranges_.data();
+  num_upload_page_ranges = uint32_t(cpu_upload_ranges_.size());
+
   CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
   command_processor_.SubmitBarriers();
   auto& upload_range_front = upload_page_ranges[0];

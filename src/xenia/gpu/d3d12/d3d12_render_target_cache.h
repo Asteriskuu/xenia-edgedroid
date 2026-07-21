@@ -94,7 +94,8 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   // frame for calling.
   bool Resolve(const Memory& memory, D3D12SharedMemory& shared_memory,
                D3D12TextureCache& texture_cache, uint32_t& written_address_out,
-               uint32_t& written_length_out);
+               uint32_t& written_length_out,
+               reg::RB_COPY_DEST_INFO* copy_dest_info_out = nullptr);
 
   // Returns true if any downloads were submitted to the command processor.
   bool InitializeTraceSubmitDownloads();

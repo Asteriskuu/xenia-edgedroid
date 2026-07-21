@@ -82,6 +82,23 @@ DEFINE_string(
     "GPU");
 
 DEFINE_bool(
+    memexport_enable, true,
+    "Make memory export output visible to the CPU by routing the draws that "
+    "write it to a buffer aliasing guest RAM. Needed by games that read "
+    "exported data on the CPU. Disabling it keeps the output in device-local "
+    "memory, which is faster for the draws that consume it on the GPU. Applies "
+    "at title launch.",
+    "GPU");
+
+DEFINE_bool(
+    memexport_await_fences, true,
+    "Wait for the GPU to finish outstanding memory export before signalling a "
+    "fence the guest reads, so exported data is in guest RAM by the time the "
+    "guest looks at it. Disabling it avoids the stall but games reading "
+    "exported data on the CPU may see stale contents. Needs memexport_enable.",
+    "GPU");
+
+DEFINE_bool(
     precise_interpolation, true,
     "Manually interpolate pixel shader inputs with barycentric coordinates to "
     "exactly match the guest and avoid hardware interpolation precision "
@@ -103,6 +120,9 @@ void SaveGPUSetting(GPUSetting setting, uint64_t value) {
     case GPUSetting::ClearMemoryPageState:
       OVERRIDE_bool(clear_memory_page_state, static_cast<bool>(value));
       break;
+    case GPUSetting::MemexportAwaitFences:
+      OVERRIDE_bool(memexport_await_fences, static_cast<bool>(value));
+      break;
   }
 }
 
@@ -110,6 +130,8 @@ bool GetGPUSetting(GPUSetting setting) {
   switch (setting) {
     case GPUSetting::ClearMemoryPageState:
       return cvars::clear_memory_page_state;
+    case GPUSetting::MemexportAwaitFences:
+      return cvars::memexport_await_fences;
     default:
       return false;
   }

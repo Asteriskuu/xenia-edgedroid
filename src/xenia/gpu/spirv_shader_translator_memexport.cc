@@ -111,23 +111,25 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
   }
 
   // Check if the address with the correct sign and exponent was written, and
-  // that the index doesn't overflow the mantissa bits.
-  // all((eA_vector >> uvec4(30, 23, 23, 23)) == uvec4(0x1, 0x96, 0x96, 0x96))
+  // that the index doesn't overflow the mantissa bits. Z takes all 12 bits of
+  // const_0x4b0 rather than the top 9, so the constants the shader accepts
+  // match the ones draw_util::AddMemExportRanges derives ranges from.
+  // all((eA_vector >> uvec4(30, 23, 20, 23)) == uvec4(0x1, 0x96, 0x4B0, 0x96))
   spv::Id eA_vector = builder_->createUnaryOp(
       spv::OpBitcast, type_uint4_,
       builder_->createLoad(var_main_memexport_address_, spv::NoPrecision));
   id_vector_temp_.clear();
   id_vector_temp_.push_back(builder_->makeUintConstant(30));
   id_vector_temp_.push_back(builder_->makeUintConstant(23));
-  id_vector_temp_.push_back(id_vector_temp_.back());
-  id_vector_temp_.push_back(id_vector_temp_.back());
+  id_vector_temp_.push_back(builder_->makeUintConstant(20));
+  id_vector_temp_.push_back(builder_->makeUintConstant(23));
   spv::Id address_validation_shift =
       builder_->makeCompositeConstant(type_uint4_, id_vector_temp_);
   id_vector_temp_.clear();
   id_vector_temp_.push_back(builder_->makeUintConstant(0x1));
   id_vector_temp_.push_back(builder_->makeUintConstant(0x96));
-  id_vector_temp_.push_back(id_vector_temp_.back());
-  id_vector_temp_.push_back(id_vector_temp_.back());
+  id_vector_temp_.push_back(builder_->makeUintConstant(0x4B0));
+  id_vector_temp_.push_back(builder_->makeUintConstant(0x96));
   spv::Id address_validation_value =
       builder_->makeCompositeConstant(type_uint4_, id_vector_temp_);
   SpirvBuilder::IfBuilder if_address_valid(

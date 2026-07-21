@@ -113,6 +113,8 @@ class VulkanSharedMemory : public SharedMemory {
 
   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> upload_buffer_pool_;
   std::vector<VkBufferCopy> upload_regions_;
+  // Upload ranges left after the memexport ones are refreshed on the GPU.
+  std::vector<std::pair<uint32_t, uint32_t>> cpu_upload_ranges_;
 
   // Created temporarily, only for downloading.
   VkBuffer trace_download_buffer_ = VK_NULL_HANDLE;
