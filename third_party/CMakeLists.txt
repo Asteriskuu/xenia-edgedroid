@@ -1001,7 +1001,6 @@ if(XE_TARGET_X86_64)
   )
 endif()
 
-endif()
 # aarch64 platform files
 if(XE_TARGET_AARCH64)
   target_sources(libavutil PRIVATE
