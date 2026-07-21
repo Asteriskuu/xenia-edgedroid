@@ -27,32 +27,10 @@ jobs:
           git remote add upstream https://github.com/has207/xenia-edge.git
           git fetch upstream edge
 
-      - name: Squash and Co-Author Merge
+      - name: Merge upstream into edge
         run: |
           git checkout edge
-          
-          BASE_COMMIT=$(git merge-base edge upstream/edge)
-          
-          if [ "$BASE_COMMIT" = "$(git rev-parse upstream/edge)" ]; then
-            echo "No new commits to sync."
-            exit 0
-          fi
-          
-          AUTHORS=$(git log $BASE_COMMIT..upstream/edge --format="%an <%ae>" | grep -iv "bot" | grep -iv "github-actions" | sort -u || true)
-          
-          echo "Sync upstream/edge into edge" > commit_msg.txt
-          echo "" >> commit_msg.txt
-          
-          if [ ! -z "$AUTHORS" ]; then
-            while IFS= read -r author; do
-              if [ ! -z "$author" ]; then
-                echo "Co-authored-by: $author" >> commit_msg.txt
-              fi
-            done <<< "$AUTHORS"
-          fi
-          
-          git merge upstream/edge --squash -X ours
-          git commit -F commit_msg.txt
+          git merge upstream/edge -X ours --no-edit
 
       - name: Push updated branch
         run: |
