@@ -1,0 +1,59 @@
+name: Sync Fork
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/has207/xenia-edge.git
+          git fetch upstream edge
+
+      - name: Squash and Co-Author Merge
+        run: |
+          git checkout edge
+          
+          BASE_COMMIT=$(git merge-base edge upstream/edge)
+          
+          if [ "$BASE_COMMIT" = "$(git rev-parse upstream/edge)" ]; then
+            echo "No new commits to sync."
+            exit 0
+          fi
+          
+          AUTHORS=$(git log $BASE_COMMIT..upstream/edge --format="%an <%ae>" | grep -iv "bot" | grep -iv "github-actions" | sort -u || true)
+          
+          echo "Sync upstream/edge into edge" > commit_msg.txt
+          echo "" >> commit_msg.txt
+          
+          if [ ! -z "$AUTHORS" ]; then
+            while IFS= read -r author; do
+              if [ ! -z "$author" ]; then
+                echo "Co-authored-by: $author" >> commit_msg.txt
+              fi
+            done <<< "$AUTHORS"
+          fi
+          
+          git merge upstream/edge --squash -X ours
+          git commit -F commit_msg.txt
+
+      - name: Push updated branch
+        run: |
+          git push origin edge
