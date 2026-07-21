@@ -173,7 +173,6 @@ jobs:
             -DCMAKE_CXX_FLAGS="-fPIC -D__ANDROID_API__=24 -march=armv8-a" \
             -DCMAKE_ASM_FLAGS="-fPIC -D__ANDROID_API__=24 -march=armv8-a" \
             -DCMAKE_ASM_COMPILER="${NDK_CLANG}" \
-           #-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
             -DXENIA_BUILD_TESTS=OFF \
             -DXENIA_UI=OFF \
             -DFFMPEG_ENABLE_ASM=ON \
