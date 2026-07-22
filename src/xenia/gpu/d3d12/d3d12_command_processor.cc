@@ -1521,6 +1521,14 @@ bool D3D12CommandProcessor::SetupContext() {
     shared_memory_->WriteRawUAVDescriptor(provider.OffsetViewDescriptor(
         view_bindless_heap_cpu_start_,
         uint32_t(SystemBindlessView::kSharedMemoryRawUAV)));
+    // Device SRV + UAV pair for memexport draws that also read shared memory
+    // (guest vertex fetch via t0). Both address the device buffer.
+    shared_memory_->WriteRawSRVDescriptor(provider.OffsetViewDescriptor(
+        view_bindless_heap_cpu_start_,
+        uint32_t(SystemBindlessView::kSharedMemoryRawSRVForRW)));
+    shared_memory_->WriteRawUAVDescriptor(provider.OffsetViewDescriptor(
+        view_bindless_heap_cpu_start_,
+        uint32_t(SystemBindlessView::kSharedMemoryRawUAVForRW)));
     // Host buffer pairs for two-buffer memexport routing, only when it exists.
     // The read pair is [host SRV, null UAV], the write pair [null SRV, host
     // UAV], matching the device layout above.
@@ -1548,6 +1556,20 @@ bool D3D12CommandProcessor::SetupContext() {
           provider.OffsetViewDescriptor(
               view_bindless_heap_cpu_start_,
               uint32_t(SystemBindlessView::kSharedMemoryHostRawUAV)),
+          shared_memory_->GetHostBuffer(), SharedMemory::kBufferSize);
+      // Host SRV + UAV pair for memexport draws that also read shared memory
+      // (guest vertex fetch via t0). Both address the host buffer.
+      ui::d3d12::util::CreateBufferRawSRV(
+          device,
+          provider.OffsetViewDescriptor(
+              view_bindless_heap_cpu_start_,
+              uint32_t(SystemBindlessView::kSharedMemoryHostRawSRVForRW)),
+          shared_memory_->GetHostBuffer(), SharedMemory::kBufferSize);
+      ui::d3d12::util::CreateBufferRawUAV(
+          device,
+          provider.OffsetViewDescriptor(
+              view_bindless_heap_cpu_start_,
+              uint32_t(SystemBindlessView::kSharedMemoryHostRawUAVForRW)),
           shared_memory_->GetHostBuffer(), SharedMemory::kBufferSize);
     }
     // kEdramRawSRV.
@@ -4508,14 +4530,17 @@ bool D3D12CommandProcessor::UpdateBindingsMesa(
   // layout. Memexport-routed draws pick the host buffer's equivalent pairs.
   SystemBindlessView shared_memory_view;
   if (route_to_host) {
+    // A memexport draw also reads its vertices through the t0 SRV, so bind the
+    // host buffer as both SRV and UAV.
     shared_memory_view =
         memexport_used
-            ? SystemBindlessView::kNullRawSRVAndSharedMemoryHostRawUAVStart
+            ? SystemBindlessView::kSharedMemoryHostRawSRVAndHostRawUAVStart
             : SystemBindlessView::kSharedMemoryHostRawSRVAndNullRawUAVStart;
   } else {
+    // Same as the host path. Bind the device buffer as both SRV and UAV.
     shared_memory_view =
         memexport_used
-            ? SystemBindlessView::kNullRawSRVAndSharedMemoryRawUAVStart
+            ? SystemBindlessView::kSharedMemoryRawSRVAndRawUAVStart
             : SystemBindlessView::kSharedMemoryRawSRVAndNullRawUAVStart;
   }
   D3D12_GPU_DESCRIPTOR_HANDLE shared_memory_handle =

@@ -177,6 +177,12 @@ class D3D12CommandProcessor final : public CommandProcessor {
     kNullRawSRV = kNullRawSRVAndSharedMemoryRawUAVStart,
     kSharedMemoryRawUAV,
 
+    // Device SRV + UAV pair, the device-buffer version of the host RW pair
+    // below, for memexport draws on the device path.
+    kSharedMemoryRawSRVAndRawUAVStart,
+    kSharedMemoryRawSRVForRW = kSharedMemoryRawSRVAndRawUAVStart,
+    kSharedMemoryRawUAVForRW,
+
     // Host-imported (guest RAM) buffer pairs mirroring the device pairs above,
     // bound instead for memexport-touching draws. Written only when the host
     // buffer exists (two-buffer memexport routing). Unused otherwise.
@@ -187,6 +193,13 @@ class D3D12CommandProcessor final : public CommandProcessor {
     kNullRawSRVAndSharedMemoryHostRawUAVStart,
     kSharedMemoryHostNullRawSRV = kNullRawSRVAndSharedMemoryHostRawUAVStart,
     kSharedMemoryHostRawUAV,
+
+    // Host SRV + UAV as one adjacent pair for memexport draws that also read
+    // shared memory through the t0 SRV (guest vertex fetch). Mirrors Vulkan
+    // using one read + write buffer.
+    kSharedMemoryHostRawSRVAndHostRawUAVStart,
+    kSharedMemoryHostRawSRVForRW = kSharedMemoryHostRawSRVAndHostRawUAVStart,
+    kSharedMemoryHostRawUAVForRW,
 
     kEdramRawSRV,
     kEdramR32UintSRV,
