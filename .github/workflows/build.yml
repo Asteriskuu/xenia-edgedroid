@@ -176,7 +176,9 @@ jobs:
             -DXENIA_BUILD_TESTS=OFF \
             -DXENIA_UI=OFF \
             -DFFMPEG_ENABLE_ASM=ON \
-            -DFFMPEG_ENABLE_NEON=ON
+            -DFFMPEG_ENABLE_NEON=ON \
+            -DFFMPEG_EXTRA_CFLAGS="-fPIC" \
+            -DFFMPEG_EXTRA_CXXFLAGS="-fPIC"
   
           cmake --build build-android --config Release -j$(getconf _NPROCESSORS_ONLN)
 
