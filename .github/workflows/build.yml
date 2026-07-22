@@ -156,7 +156,11 @@ jobs:
 
           cp build/version.h build-android/version.h
           
-          file build-android/host_tools/xenia-shader-cc
+          echo "Patching FFmpeg config to disable ARM64 assembly..."
+          find third_party/FFmpeg -type f -name "config.h" -exec sed -i 's/#define HAVE_NEON 1/#define HAVE_NEON 0/g' {} +
+          find third_party/FFmpeg -type f -name "config.h" -exec sed -i 's/#define HAVE_ARMV8 1/#define HAVE_ARMV8 0/g' {} +
+          find third_party/FFmpeg -type f -name "config.h" -exec sed -i 's/#define HAVE_VFP 1/#define HAVE_VFP 0/g' {} +
+          find third_party/FFmpeg -type f -name "*.S" -exec truncate -s 0 {} +
 
           export ANDROID_NDK_ROOT=${{ steps.setup_ndk.outputs.ndk-path }}
           export NDK_CLANG=${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
@@ -177,9 +181,7 @@ jobs:
             -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-Bsymbolic" \
             -DCMAKE_ASM_COMPILER="${NDK_CLANG}" \
             -DXENIA_BUILD_TESTS=OFF \
-            -DXENIA_UI=OFF \
-            -DFFMPEG_ENABLE_ASM=OFF \
-            -DFFMPEG_ENABLE_NEON=OFF
+            -DXENIA_UI=OFF
             
           cmake --build build-android --config Release -j$(getconf _NPROCESSORS_ONLN)
 
