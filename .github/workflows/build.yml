@@ -155,13 +155,9 @@ jobs:
           chmod +x build-android/host_tools/xenia-shader-cc
 
           cp build/version.h build-android/version.h
-          
-          echo "Patching FFmpeg config to disable ARM64 assembly..."
-          find third_party/FFmpeg -type f -name "config.h" -exec sed -i 's/#define HAVE_NEON 1/#define HAVE_NEON 0/g' {} +
-          find third_party/FFmpeg -type f -name "config.h" -exec sed -i 's/#define HAVE_ARMV8 1/#define HAVE_ARMV8 0/g' {} +
-          find third_party/FFmpeg -type f -name "config.h" -exec sed -i 's/#define HAVE_VFP 1/#define HAVE_VFP 0/g' {} +
-          find third_party/FFmpeg -type f -name "*.S" -exec truncate -s 0 {} +
 
+          sed -i '1s/^/set(CMAKE_POSITION_INDEPENDENT_CODE ON)\nadd_link_options("-Wl,-Bsymbolic")\n/' CMakeLists.txt
+          
           export ANDROID_NDK_ROOT=${{ steps.setup_ndk.outputs.ndk-path }}
           export NDK_CLANG=${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
 
@@ -229,15 +225,4 @@ jobs:
         with:
           name: xenia_edge_android
           path: artifacts/android
-          if-no-files-found: error
-
-      - name: Upload FFmpeg files
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ffmpeg-tx-float-debug
-          path: |
-           third_party/FFmpeg/libavutil/tx_float.c
-           third_party/FFmpeg/libavutil/aarch64/tx_float_neon.S
-           **/obj/Linux/liblibavutil.a
           if-no-files-found: error
