@@ -3,9 +3,9 @@ set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
 
 if(ANDROID)
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+  set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -fPIC -DPIC")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
-  set(CMAKE_SHARED_LIBRARY_POSITION_INDEPENDENT_CODE ON)
 endif()
 
 # Must be set before project() so the toolchain bakes -mmacosx-version-min
