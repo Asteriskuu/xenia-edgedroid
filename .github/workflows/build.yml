@@ -191,6 +191,11 @@ jobs:
           find build-android -name "libxenia*.so" -type f -exec cp {} android/android_studio_project/app/src/main/jniLibs/arm64-v8a/ \;
           ls -la android/android_studio_project/app/src/main/jniLibs/arm64-v8a/
 
+      - name: Build host shader compiler
+        run: |
+         cmake -S . -B build-host -DXENIA_BUILD_MISC=ON
+         cmake --build build-host --target xenia-shader-cc
+
       - name: Build Android APK
         working-directory: android/android_studio_project
         env:
