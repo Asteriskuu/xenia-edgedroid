@@ -150,6 +150,20 @@ elseif(XE_TARGET_AARCH64)
   target_link_libraries(xenia-app PRIVATE xenia-cpu-backend-a64)
 endif()
 
+if(ANDROID)
+  foreach(_lib libavutil libavcodec libavformat)
+    if(TARGET ${_lib})
+      set_target_properties(${_lib} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+      
+      target_compile_definitions(${_lib} PRIVATE 
+        PIC 
+        HAVE_NEON=0 
+        HAVE_ASM=0
+      )
+    endif()
+  endforeach()
+endif()
+
 if(WIN32)
   target_link_libraries(xenia-app PRIVATE
     xenia-apu-xaudio2
