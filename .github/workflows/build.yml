@@ -175,8 +175,8 @@ jobs:
             -DCMAKE_ASM_COMPILER="${NDK_CLANG}" \
             -DXENIA_BUILD_TESTS=OFF \
             -DXENIA_UI=OFF \
-            -DFFMPEG_ENABLE_ASM=ON \
-            -DFFMPEG_ENABLE_NEON=ON \
+            -DFFMPEG_ENABLE_ASM=OFF \
+            -DFFMPEG_ENABLE_NEON=OFF \
             -DFFMPEG_EXTRA_CFLAGS="-fPIC" \
             -DFFMPEG_EXTRA_CXXFLAGS="-fPIC"
   
