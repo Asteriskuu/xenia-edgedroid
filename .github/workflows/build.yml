@@ -180,7 +180,7 @@ jobs:
             -DFFMPEG_EXTRA_CONFIGURE_FLAGS="--enable-pic" \
             -DFFMPEG_EXTRA_CFLAGS="-fPIC"
             
-          cmake --build build-android --config Release -j$(getconf _NPROCESSORS_ONLN)
+          cmake --build build-android --verbose --config Release -j$(getconf _NPROCESSORS_ONLN)
 
       - name: Copy native libraries
         run: |
