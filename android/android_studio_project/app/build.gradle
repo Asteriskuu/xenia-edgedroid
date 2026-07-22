@@ -23,6 +23,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_static"
+                arguments "-DXENIA_HOST_TOOLS_DIR=${project.rootDir}/../../build-host/host_tools"
             }
         }
     }
