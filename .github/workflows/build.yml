@@ -99,7 +99,7 @@ jobs:
           mkdir -p build-android/host_tools
           mkdir -p build
 
-          python3 xenia-build.py generate-version --build-dir build-android
+          python3 xenia-build.py generate-version --build-dir .
 
           python3 << 'EOF'
           import os
