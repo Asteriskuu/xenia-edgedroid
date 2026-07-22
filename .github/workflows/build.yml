@@ -231,5 +231,5 @@ jobs:
           path: |
            third_party/FFmpeg/libavutil/tx_float.c
            third_party/FFmpeg/libavutil/aarch64/tx_float_neon.S
-           obj/Linux/liblibavutil.a
+           **/obj/Linux/liblibavutil.a
           if-no-files-found: error
