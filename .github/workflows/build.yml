@@ -99,6 +99,8 @@ jobs:
           mkdir -p build-android/host_tools
           mkdir -p build
 
+          python3 xenia-build.py build
+
           python3 << 'EOF'
           import os
           import subprocess
