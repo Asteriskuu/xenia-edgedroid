@@ -1015,7 +1015,7 @@ if(XE_TARGET_AARCH64)
     )
     xe_add_gas_sources(libavutil
       FFmpeg/libavutil/aarch64/float_dsp_neon.S
-      #FFmpeg/libavutil/aarch64/tx_float_neon.S
+      FFmpeg/libavutil/aarch64/tx_float_neon.S
     )
   endif()
 endif()
