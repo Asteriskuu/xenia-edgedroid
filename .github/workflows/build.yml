@@ -193,7 +193,7 @@ jobs:
 
       - name: Build host shader compiler
         run: |
-         cmake -S . -B build-host -DXENIA_BUILD_MISC=ON
+         cmake -S . -B build-host
          cmake --build build-host --target xenia-shader-cc
 
       - name: Build Android APK
