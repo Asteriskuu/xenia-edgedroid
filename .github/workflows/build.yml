@@ -172,6 +172,7 @@ jobs:
             -DCMAKE_C_FLAGS="-fPIC -march=armv8-a" \
             -DCMAKE_CXX_FLAGS="-fPIC -march=armv8-a" \
             -DCMAKE_ASM_FLAGS="-fPIC -march=armv8-a" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-Bsymbolic" \
             -DCMAKE_ASM_COMPILER="${NDK_CLANG}" \
             -DXENIA_BUILD_TESTS=OFF \
             -DXENIA_UI=OFF \
