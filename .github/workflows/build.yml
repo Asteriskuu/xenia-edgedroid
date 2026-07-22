@@ -180,7 +180,7 @@ jobs:
             -DFFMPEG_EXTRA_CONFIGURE_FLAGS="--enable-pic" \
             -DFFMPEG_EXTRA_CFLAGS="-fPIC"
             
-          cmake --build build-android --verbose --config Release -j$(getconf _NPROCESSORS_ONLN)
+          cmake --build build-android --config Release -j$(getconf _NPROCESSORS_ONLN)
 
       - name: Copy native libraries
         run: |
@@ -221,4 +221,15 @@ jobs:
         with:
           name: xenia_edge_android
           path: artifacts/android
+          if-no-files-found: error
+
+      - name: Upload FFmpeg files
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-tx-float-debug
+          path: |
+           third_party/FFmpeg/libavutil/tx_float.c
+           third_party/FFmpeg/libavutil/aarch64/tx_float_neon.S
+           obj/Linux/liblibavutil.a
           if-no-files-found: error
