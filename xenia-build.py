@@ -903,6 +903,7 @@ def discover_commands(subparsers):
         "format": FormatCommand(subparsers),
         "tidy": TidyCommand(subparsers),
         "i18n": I18nCommand(subparsers),
+        "generate-version": GenerateVersionCommand(subparsers),
         }
     return commands
 
@@ -1015,6 +1016,30 @@ class SlangCommand(Command):
         print("Downloading the Slang shader compiler...\n")
         download_slang()
         print("\nSuccess!")
+        return 0
+
+
+class GenerateVersionCommand(Command):
+    """'generate-version' command.
+    """
+
+    def __init__(self, subparsers, *args, **kwargs):
+        super(GenerateVersionCommand, self).__init__(
+            subparsers,
+            name="generate-version",
+            help_short="Generates the version.h header file.",
+            *args, **kwargs)
+        self.parser.add_argument(
+            "--build-dir", default="build",
+            help="Directory where version.h will be written.")
+
+    def execute(self, args, pass_args, cwd):
+        build_dir = args["build_dir"]
+        print(f"Generating version.h in {build_dir}/...\n")
+        
+        generate_version_h(build_dir)
+        
+        print_status(ResultStatus.SUCCESS)
         return 0
 
 
