@@ -13,6 +13,9 @@
 #include "xenia/hid/nop/nop_input_driver.h"
 #include "xenia/config.h"
 
+#include "xenia/ui/window.h"
+#include "xenia/ui/windowed_app_context.h"
+
 #define LOG_TAG "XeniaAndroid"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -21,6 +24,28 @@ static std::unique_ptr<xe::Emulator> g_emulator;
 static std::thread g_emulator_thread;
 static bool g_emulator_running = false;
 static ANativeWindow* g_native_window = nullptr;
+
+class AndroidAppContext : public xe::ui::WindowedAppContext {
+public:
+    void QuitFromUIThread() override {}
+};
+static AndroidAppContext g_app_context;
+
+class AndroidDisplayWindow : public xe::ui::Window {
+public:
+    AndroidDisplayWindow(xe::ui::WindowedAppContext& context)
+        : xe::ui::Window(context, "Xenia", 1920, 1080) {}
+
+    ~AndroidDisplayWindow() override = default;
+
+    uintptr_t native_handle() const override {
+        return reinterpret_cast<uintptr_t>(g_native_window);
+    }
+
+    bool Initialize() override { return true; }
+    void OnClose() override {}
+};
+static std::unique_ptr<AndroidDisplayWindow> g_display_window;
 
 extern "C" {
 
@@ -79,7 +104,10 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             };
 
             LOGI("Setting up emulator");
-            if (XFAILED(g_emulator->Setup(nullptr, nullptr, false, audio_factory, graphics_factory, input_factory))) {
+
+            g_display_window = std::make_unique<AndroidDisplayWindow>(g_app_context);
+
+            if (XFAILED(g_emulator->Setup(g_display_window.get(), &g_app_context, false, audio_factory, graphics_factory, input_factory))) {
                 LOGE("Failed to setup emulator");
                 g_emulator_running = false;
                 return;
@@ -105,6 +133,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             LOGE("Exception: %s", e.what());
         }
         g_emulator_running = false;
+        g_display_window.reset();
     });
 
     env->ReleaseStringUTFChars(jgame_path, game_path);
@@ -125,6 +154,8 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeShutdown(
     if (g_emulator_thread.joinable()) {
         g_emulator_thread.join();
     }
+    
+    g_display_window.reset();
 
     if (g_native_window) {
         ANativeWindow_release(g_native_window);
