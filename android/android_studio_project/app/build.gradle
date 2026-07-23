@@ -29,8 +29,7 @@ android {
     }
 
     packagingOptions {
-            pickFirst 'lib/**/libxenia-app.so'
-        }
+        pickFirst 'lib/**/libxenia-app.so'
     }
 
     sourceSets {
