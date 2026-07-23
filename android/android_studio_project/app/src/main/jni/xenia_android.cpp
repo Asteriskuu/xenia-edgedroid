@@ -89,8 +89,8 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             g_emulator->MountStandardDrives();
 
             LOGI("Launching game: %s", game_path.c_str());
-            X_STATUS result = g_emulator->LaunchPath(game_path);
-            if (XFAILED(result)) {
+            xe::X_STATUS result = g_emulator->LaunchPath(game_path);
+            if (xe::XFAILED(result)) {
                 LOGE("Failed to launch game: %08X", result);
                 g_emulator_running = false;
                 return;
