@@ -12,7 +12,6 @@
 #include "xenia/apu/nop/nop_audio_system.h"
 #include "xenia/hid/nop/nop_input_driver.h"
 #include "xenia/config.h"
-
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
 
@@ -27,7 +26,8 @@ static ANativeWindow* g_native_window = nullptr;
 
 class AndroidAppContext : public xe::ui::WindowedAppContext {
 public:
-    void QuitFromUIThread() override {}
+    void NotifyUILoopOfPendingFunctions() override {}
+    void PlatformQuitFromUIThread() override {}
 };
 static AndroidAppContext g_app_context;
 
@@ -38,12 +38,12 @@ public:
 
     ~AndroidDisplayWindow() override = default;
 
-    uintptr_t native_handle() const override {
+    uintptr_t native_handle() const {
         return reinterpret_cast<uintptr_t>(g_native_window);
     }
 
-    bool Initialize() override { return true; }
-    void OnClose() override {}
+    bool Initialize() { return true; }
+    void OnClose() {}
 };
 static std::unique_ptr<AndroidDisplayWindow> g_display_window;
 
