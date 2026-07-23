@@ -25,6 +25,21 @@ static std::thread g_emulator_thread;
 static bool g_emulator_running = false;
 static ANativeWindow* g_native_window = nullptr;
 
+namespace xe {
+namespace ui {
+class AndroidSurface : public Surface {
+public:
+    AndroidSurface(ANativeWindow* window) : window_(window) {}
+    ~AndroidSurface() override = default;
+
+    ANativeWindow* native_window() const { return window_; }
+
+private:
+    ANativeWindow* window_;
+};
+}  // namespace ui
+}  // namespace xe
+
 class AndroidAppContext : public xe::ui::WindowedAppContext {
 public:
     void NotifyUILoopOfPendingFunctions() override {}
@@ -51,7 +66,12 @@ public:
     void RequestPaintImpl() override {}
 
     std::unique_ptr<xe::ui::Surface> CreateSurfaceImpl(xe::ui::Surface::TypeFlags allowed_types) override {
-        return nullptr;
+        if (!g_native_window) {
+            LOGE("ANativeWindow is null! Surface cannot be created.");
+            return nullptr;
+        }
+        LOGI("Creating Xenia Android Surface successfully.");
+        return std::make_unique<xe::ui::AndroidSurface>(g_native_window);
     }
 };
 static std::unique_ptr<AndroidDisplayWindow> g_display_window;
