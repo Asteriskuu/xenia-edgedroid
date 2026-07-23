@@ -105,6 +105,7 @@ if(ANDROID)
     xenia-ui-vulkan
     glslang-spirv
     log
+    android
   )
 else()
   # Desktop builds (Windows, macOS, Linux)
