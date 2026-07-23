@@ -28,6 +28,7 @@ target_sources(xenia-app PRIVATE
 if(ANDROID)
   target_sources(xenia-app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/emulator_window_android.cc
+    ${PROJECT_SOURCE_DIR}/android/android_studio_project/app/src/main/jni/xenia_android.cpp
   )
 else()
   target_sources(xenia-app PRIVATE
