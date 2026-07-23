@@ -28,16 +28,6 @@ android {
         }
     }
 
-    packagingOptions {
-        pickFirst 'lib/**/libxenia-app.so'
-    }
-
-    sourceSets {
-        main {
-            jniLibs.srcDirs = ['src/main/jniLibs']
-        }
-    }
-
     buildTypes {
         release {
             minifyEnabled true
