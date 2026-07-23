@@ -14,6 +14,7 @@
 #include "xenia/config.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
+#include "xenia/ui/surface.h"
 
 #define LOG_TAG "XeniaAndroid"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -44,6 +45,14 @@ public:
 
     bool Initialize() { return true; }
     void OnClose() {}
+
+    bool OpenImpl() override { return true; }
+    void RequestCloseImpl() override {}
+    void RequestPaintImpl() override {}
+
+    std::unique_ptr<xe::ui::Surface> CreateSurfaceImpl(xe::ui::Surface::TypeFlags allowed_types) override {
+        return nullptr;
+    }
 };
 static std::unique_ptr<AndroidDisplayWindow> g_display_window;
 
@@ -107,7 +116,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
             g_display_window = std::make_unique<AndroidDisplayWindow>(g_app_context);
 
-            if (XFAILED(g_emulator->Setup(g_display_window.get(), &g_app_context, false, audio_factory, graphics_factory, input_factory))) {
+            if (XFAILED(g_emulator->Setup(g_display_window.get(), nullptr, false, audio_factory, graphics_factory, input_factory))) {
                 LOGE("Failed to setup emulator");
                 g_emulator_running = false;
                 return;
