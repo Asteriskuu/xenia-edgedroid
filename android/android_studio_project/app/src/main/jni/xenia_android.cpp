@@ -32,6 +32,21 @@ public:
     AndroidSurface(ANativeWindow* window) : window_(window) {}
     ~AndroidSurface() override = default;
 
+    TypeIndex GetType() const override {
+        return kTypeIndex_AndroidNativeWindow;
+    }
+
+    bool GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const override {
+        if (!window_) {
+            return false;
+        }
+        
+        width_out = static_cast<uint32_t>(ANativeWindow_getWidth(window_));
+        height_out = static_cast<uint32_t>(ANativeWindow_getHeight(window_));
+        
+        return true;
+    }
+
     ANativeWindow* native_window() const { return window_; }
 
 private:
