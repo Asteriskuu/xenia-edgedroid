@@ -5,6 +5,8 @@
 #include <memory>
 #include <string>
 #include <filesystem>
+#include <atomic>
+#include <chrono>
 #include <android/log.h>
 
 #include "xenia/emulator.h"
@@ -22,7 +24,7 @@
 
 static std::unique_ptr<xe::Emulator> g_emulator;
 static std::thread g_emulator_thread;
-static bool g_emulator_running = false;
+static std::atomic<bool> g_emulator_running{false};
 static ANativeWindow* g_native_window = nullptr;
 
 namespace xe {
@@ -38,12 +40,18 @@ public:
 
     bool GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const override {
         if (!window_) {
+            LOGE("[Surface] Native window is null!");
             return false;
         }
         
         width_out = static_cast<uint32_t>(ANativeWindow_getWidth(window_));
         height_out = static_cast<uint32_t>(ANativeWindow_getHeight(window_));
         
+        LOGI("[Surface] Size requested by Vulkan: %dx%d", width_out, height_out);
+        
+        if (width_out == 0 || height_out == 0) {
+            LOGE("[Surface] DANGER: Window size is 0x0. Vulkan swapchain creation will likely fail/hang!");
+        }
         return true;
     }
 
@@ -58,7 +66,10 @@ private:
 class AndroidAppContext : public xe::ui::WindowedAppContext {
 public:
     void NotifyUILoopOfPendingFunctions() override {}
-    void PlatformQuitFromUIThread() override {}
+    void PlatformQuitFromUIThread() override {
+        LOGI("[AppContext] Quit requested from UI thread");
+        g_emulator_running = false;
+    }
 };
 static AndroidAppContext g_app_context;
 
@@ -107,7 +118,9 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
         return;
     }
 
-    LOGI("Booting game: %s", game_path);
+    int width = ANativeWindow_getWidth(native_window);
+    int height = ANativeWindow_getHeight(native_window);
+    LOGI("Booting game: %s | Surface Init Size: %dx%d", game_path, width, height);
 
     g_native_window = native_window;
     g_emulator_running = true;
@@ -118,64 +131,71 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             std::filesystem::create_directories(storage_root / "content");
             std::filesystem::create_directories(storage_root / "cache");
 
-            LOGI("Creating emulator with path: %s", game_path.c_str());
-
+            LOGI("[Tracer] Creating emulator instance...");
             g_emulator = std::make_unique<xe::Emulator>(
-                game_path,
-                storage_root,
-                storage_root / "content",
-                storage_root / "cache"
+                game_path, storage_root, storage_root / "content", storage_root / "cache"
             );
 
-            LOGI("Loading game config...");
+            LOGI("[Tracer] Loading config...");
             config::LoadGameConfigForFile(game_path);
 
             auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
-                LOGI("Creating Vulkan graphics system");
+                LOGI("[Tracer] Graphics factory invoked");
                 return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
             };
 
             auto audio_factory = [](xe::cpu::Processor* processor) -> std::unique_ptr<xe::apu::AudioSystem> {
-                LOGI("Creating NOP audio system");
                 return std::make_unique<xe::apu::nop::NopAudioSystem>(processor);
             };
 
             auto input_factory = [](xe::ui::Window* window) -> std::vector<std::unique_ptr<xe::hid::InputDriver>> {
                 std::vector<std::unique_ptr<xe::hid::InputDriver>> drivers;
-                LOGI("Creating NOP input driver");
                 drivers.push_back(std::make_unique<xe::hid::nop::NopInputDriver>(window, 0));
                 return drivers;
             };
 
-            LOGI("Setting up emulator");
-
+            LOGI("[Tracer] Creating Display Window...");
             g_display_window = std::make_unique<AndroidDisplayWindow>(g_app_context);
 
+            LOGI("[Tracer] Calling g_emulator->Setup(). This might block or crash!");
             if (XFAILED(g_emulator->Setup(g_display_window.get(), nullptr, false, audio_factory, graphics_factory, input_factory))) {
-                LOGE("Failed to setup emulator");
+                LOGE("[Tracer] SETUP FAILED!");
                 g_emulator_running = false;
                 return;
             }
 
-            LOGI("Mounting standard drives");
+            LOGI("[Tracer] Setup complete. Mounting standard drives...");
             g_emulator->MountStandardDrives();
 
-            LOGI("Launching game: %s", game_path.c_str());
+            LOGI("[Tracer] Calling LaunchPath()...");
             xe::X_STATUS result = g_emulator->LaunchPath(game_path);
             if (XFAILED(result)) {
-                LOGE("Failed to launch game: %08X", result);
+                LOGE("[Tracer] LAUNCH FAILED with code: %08X", result);
                 g_emulator_running = false;
                 return;
             }
 
-            LOGI("Game running, waiting for exit...");
-            g_emulator->WaitUntilExit();
+            LOGI("[Tracer] Game running! Entering manual UI pump loop...");
+            
+            while (g_emulator_running) {
+                g_app_context.ExecutePendingFunctions();
+                
+                if (g_emulator->has_requested_exit()) {
+                    LOGI("[Tracer] Emulator requested exit internally.");
+                    break;
+                }
+                
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            }
 
-            LOGI("Game exited successfully");
+            LOGI("Game loop exited successfully");
 
         } catch (const std::exception& e) {
-            LOGE("Exception: %s", e.what());
+            LOGE("Exception caught in emulator thread: %s", e.what());
+        } catch (...) {
+            LOGE("Unknown fatal exception caught in emulator thread!");
         }
+        
         g_emulator_running = false;
         g_display_window.reset();
     });
