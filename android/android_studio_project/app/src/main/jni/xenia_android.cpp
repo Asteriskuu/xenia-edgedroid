@@ -127,7 +127,8 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
     g_emulator_thread = std::thread([game_path = std::string(game_path), native_window]() {
         try {
-            std::filesystem::path storage_root = "/data/data/jp.xenia.emulator";
+            //std::filesystem::path storage_root = "/data/data/jp.xenia.emulator";
+            std::filesystem::path storage_root = "/data/data/jp.xenia.emulator.github.debug";
             std::filesystem::create_directories(storage_root / "content");
             std::filesystem::create_directories(storage_root / "cache");
 
