@@ -1883,7 +1883,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                   const std::string_view module_path) {
   // Making changes to the UI (setting the icon) and executing game config
   // load callbacks which expect to be called from the UI thread.
-  // If not on UI thread, dispatch to it synchronously.
+  // On most platforms we dispatch to the UI thread synchronously. On Android
+  // the native UI pending-function pump isn't run from native code, so the
+  // synchronous dispatch would deadlock—run inline there instead.
+#if !XE_PLATFORM_ANDROID
   if (!display_window_->app_context().IsInUIThread()) {
     X_STATUS result = X_STATUS_UNSUCCESSFUL;
     display_window_->app_context().CallInUIThreadSynchronous(
@@ -1892,6 +1895,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
         });
     return result;
   }
+#endif  // !XE_PLATFORM_ANDROID
 
   // Expose the HDD content partition. Games that resolve saves/DLC to a raw
   // \Device\Harddisk0\Partition1\Content path via XamContentResolve open it
