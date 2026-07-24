@@ -47,6 +47,7 @@
             android:exported="true"
             android:label="@string/activity_label_window_demo"
             android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:theme="@style/Theme.AppCompat.Light.NoActionBar" />
 
     </application>
