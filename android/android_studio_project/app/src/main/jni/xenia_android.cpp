@@ -175,19 +175,8 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 return;
             }
 
-            LOGI("[Tracer] Game running! Entering manual UI pump loop...");
-            
-            while (g_emulator_running) {
-                g_app_context.ExecutePendingFunctions();
-                
-                if (g_emulator->has_requested_exit()) {
-                    LOGI("[Tracer] Emulator requested exit internally.");
-                    break;
-                }
-                
-                std::this_thread::sleep_for(std::chrono::milliseconds(16));
-            }
-
+            LOGI("[Tracer] Game running! Entering standard WaitUntilExit() loop...");
+            g_emulator->WaitUntilExit();
             LOGI("Game loop exited successfully");
 
         } catch (const std::exception& e) {
