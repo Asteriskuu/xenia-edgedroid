@@ -28,11 +28,11 @@ X_STATUS VulkanGraphicsSystem::Setup(cpu::Processor* processor,
                                      kernel::KernelState* kernel_state,
                                      ui::WindowedAppContext* app_context,
                                      bool with_presentation) {
-  #if XE_PLATFORM_ANDROID
+#if XE_PLATFORM_ANDROID
   provider_ = xe::ui::vulkan::VulkanProvider::Create(false, with_presentation);
-  #else
+#else
   provider_ = xe::ui::vulkan::VulkanProvider::Create(true, with_presentation);
-  #endif
+#endif
 
   if (!provider_) {
     XELOGE("Vulkan provider creation failed");
