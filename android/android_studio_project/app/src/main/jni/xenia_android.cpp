@@ -11,6 +11,7 @@
 
 #include "xenia/emulator.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
+#include "xenia/ui/vulkan/vulkan_provider.h"
 #include "xenia/apu/nop/nop_audio_system.h"
 #include "xenia/hid/nop/nop_input_driver.h"
 #include "xenia/config.h"
@@ -118,6 +119,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
         return;
     }
 
+    ANativeWindow_acquire(native_window);
     int width = ANativeWindow_getWidth(native_window);
     int height = ANativeWindow_getHeight(native_window);
     LOGI("Booting game: %s | Surface Init Size: %dx%d", game_path, width, height);
@@ -127,7 +129,6 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
     g_emulator_thread = std::thread([game_path = std::string(game_path), native_window]() {
         try {
-            //std::filesystem::path storage_root = "/data/data/jp.xenia.emulator";
             std::filesystem::path storage_root = "/data/data/jp.xenia.emulator.github.debug";
             std::filesystem::create_directories(storage_root / "content");
             std::filesystem::create_directories(storage_root / "cache");
@@ -142,12 +143,12 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
             auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
                 LOGI("[Tracer] Graphics factory invoked");
-                if (xe::gpu::vulkan::VulkanGraphicsSystem::IsAvailable()) {
-                    return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
-                } else {
-                    LOGI("[Tracer] Vulkan not available on this device - returning nullptr (no presenter)");
+                auto probe = xe::ui::vulkan::VulkanProvider::Create(false, false);
+                if (!probe) {
+                    LOGI("[Tracer] Vulkan provider probe failed - skipping Vulkan on this device");
                     return nullptr;
                 }
+                return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
             };
 
             auto audio_factory = [](xe::cpu::Processor* processor) -> std::unique_ptr<xe::apu::AudioSystem> {
