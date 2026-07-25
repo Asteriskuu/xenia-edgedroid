@@ -112,7 +112,6 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
     const char* game_path = env->GetStringUTFChars(jgame_path, nullptr);
     ANativeWindow* native_window = ANativeWindow_fromSurface(env, surface);
-
     if (!native_window) {
         LOGE("Failed to get native window");
         env->ReleaseStringUTFChars(jgame_path, game_path);
@@ -120,9 +119,22 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
     }
 
     ANativeWindow_acquire(native_window);
-    int width = ANativeWindow_getWidth(native_window);
-    int height = ANativeWindow_getHeight(native_window);
-    LOGI("Booting game: %s | Surface Init Size: %dx%d", game_path, width, height);
+
+    int width = 0, height = 0;
+    const int max_wait_ms = 2000;
+    int waited = 0;
+    while (waited < max_wait_ms) {
+      width = ANativeWindow_getWidth(native_window);
+      height = ANativeWindow_getHeight(native_window);
+      if (width > 0 && height > 0) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      waited += 50;
+    }
+    if (width <= 0 || height <= 0) {
+      LOGW("nativeBootGame: surface still has 0 size after wait; continuing anyway");
+    } else {
+      LOGI("nativeBootGame: surface size detected %dx%d", width, height);
+    }
 
     g_native_window = native_window;
     g_emulator_running = true;
@@ -142,12 +154,13 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             config::LoadGameConfigForFile(game_path);
 
             auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
-                LOGI("[Tracer] Graphics factory invoked");
+                LOGI("[Tracer] Graphics factory invoked: probing Vulkan provider...");
                 auto probe = xe::ui::vulkan::VulkanProvider::Create(false, false);
                 if (!probe) {
                     LOGI("[Tracer] Vulkan provider probe failed - skipping Vulkan on this device");
                     return nullptr;
                 }
+                LOGI("[Tracer] Vulkan provider probe succeeded");
                 return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
             };
 
@@ -164,7 +177,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             LOGI("[Tracer] Creating Display Window...");
             g_display_window = std::make_unique<AndroidDisplayWindow>(g_app_context);
 
-            LOGI("[Tracer] Calling g_emulator->Setup(). This might block or crash!");
+            LOGI("[Tracer] Calling g_emulator->Setup()");
             if (XFAILED(g_emulator->Setup(g_display_window.get(), nullptr, false, audio_factory, graphics_factory, input_factory))) {
                 LOGE("[Tracer] SETUP FAILED!");
                 g_emulator_running = false;
@@ -191,7 +204,6 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
         } catch (...) {
             LOGE("Unknown fatal exception caught in emulator thread!");
         }
-        
         g_emulator_running = false;
         g_display_window.reset();
     });
