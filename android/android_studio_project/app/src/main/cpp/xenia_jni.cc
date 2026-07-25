@@ -28,6 +28,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
         return;
     }
 
+    ANativeWindow_acquire(native_window);
     g_native_window = native_window;
     g_emulator_running = true;
 
