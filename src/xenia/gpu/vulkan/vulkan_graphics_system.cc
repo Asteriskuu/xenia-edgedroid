@@ -28,17 +28,15 @@ X_STATUS VulkanGraphicsSystem::Setup(cpu::Processor* processor,
                                      kernel::KernelState* kernel_state,
                                      ui::WindowedAppContext* app_context,
                                      bool with_presentation) {
+  #if XE_PLATFORM_ANDROID
+  provider_ = xe::ui::vulkan::VulkanProvider::Create(false, with_presentation);
+  #else
   provider_ = xe::ui::vulkan::VulkanProvider::Create(true, with_presentation);
+  #endif
+
   if (!provider_) {
     XELOGE("Vulkan provider creation failed");
-    xe::FatalError(
-        "Unable to initialize the Vulkan graphics subsystem.\n"
-        "\n"
-        "Ensure that you have the latest drivers for your GPU and that it "
-        "supports Vulkan.\n"
-        "\n"
-        "See https://xenia.jp/faq/ for more information and a list of "
-        "supported GPUs.");
+    return X_STATUS_UNSUCCESSFUL;
   }
   return GraphicsSystem::Setup(processor, kernel_state, app_context,
                                with_presentation);
