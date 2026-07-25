@@ -127,6 +127,11 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
             OnHostGpuLossFromAnyThread(is_responsible);
           });
     }
+
+    if (!presenter_) {
+      XELOGE("GraphicsSystem: Presenter creation failed while presentation was requested");
+      return X_STATUS_UNSUCCESSFUL;
+    }
   }
 
   // Create command processor. This will spin up a thread to process all
