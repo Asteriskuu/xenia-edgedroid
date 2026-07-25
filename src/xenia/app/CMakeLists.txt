@@ -293,4 +293,5 @@ xe_embed_compressed_bundle(xenia-app
 
 target_include_directories(xenia-app PRIVATE
   "${PROJECT_SOURCE_DIR}/third_party/rapidjson/include"
+  "${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include"
 )
