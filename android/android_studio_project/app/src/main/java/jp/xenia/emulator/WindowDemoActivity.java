@@ -28,7 +28,8 @@ public class WindowDemoActivity extends AppCompatActivity implements SurfaceHold
     public void surfaceCreated(SurfaceHolder holder) {
         surfaceReady = true;
         if (gamePath != null) {
-            nativeBootGame(gamePath, holder.getSurface());
+            SurfaceView surfaceView = findViewById(R.id.window_demo_surface_view);
+            surfaceView.post(() -> nativeBootGame(gamePath, holder.getSurface()));
         }
     }
 
