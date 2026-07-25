@@ -142,7 +142,12 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
             auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
                 LOGI("[Tracer] Graphics factory invoked");
-                return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
+                if (xe::gpu::vulkan::VulkanGraphicsSystem::IsAvailable()) {
+                    return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
+                } else {
+                    LOGI("[Tracer] Vulkan not available on this device - returning nullptr (no presenter)");
+                    return nullptr;
+                }
             };
 
             auto audio_factory = [](xe::cpu::Processor* processor) -> std::unique_ptr<xe::apu::AudioSystem> {
