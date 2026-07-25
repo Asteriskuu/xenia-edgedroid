@@ -65,7 +65,8 @@ jobs:
            libx11-xcb-dev \
            libxcb1-dev \
            libxcb-util-dev
-         git submodule update --init --depth=1 -j$(getconf _NPROCESSORS_ONLN) $(grep -oP '(?<=path = )(?!third_party\/DirectXShaderCompiler).+' .gitmodules)
+         git submodule sync
+         git submodule update --init --recursive -j$(getconf _NPROCESSORS_ONLN)
          ./xenia-build.py fetchdata
 
       - name: Setup sccache
