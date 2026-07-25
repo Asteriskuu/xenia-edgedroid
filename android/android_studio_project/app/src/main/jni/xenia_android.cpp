@@ -131,7 +131,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
       waited += 50;
     }
     if (width <= 0 || height <= 0) {
-      LOGW("nativeBootGame: surface still has 0 size after wait; continuing anyway");
+      LOGI("nativeBootGame: surface still has 0 size after wait; continuing anyway");
     } else {
       LOGI("nativeBootGame: surface size detected %dx%d", width, height);
     }
