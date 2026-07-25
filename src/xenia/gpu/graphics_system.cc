@@ -129,7 +129,9 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
     }
 
     if (!presenter_) {
-      XELOGE("GraphicsSystem: Presenter creation failed while presentation was requested");
+      XELOGE(
+          "GraphicsSystem: Presenter creation failed while presentation was "
+          "requested");
       return X_STATUS_UNSUCCESSFUL;
     }
   }
