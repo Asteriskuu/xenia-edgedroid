@@ -10,6 +10,8 @@
 #include <android/log.h>
 #include <signal.h>
 #include <setjmp.h>
+#include <mutex>
+#include <condition_variable>
 
 #include "xenia/emulator.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
@@ -30,6 +32,8 @@ static std::unique_ptr<xe::Emulator> g_emulator;
 static std::thread g_emulator_thread;
 static std::atomic<bool> g_emulator_running{false};
 static ANativeWindow* g_native_window = nullptr;
+static std::mutex g_state_mutex;
+static std::condition_variable g_state_condition;
 
 namespace xe {
 namespace ui {
@@ -48,14 +52,31 @@ public:
             return false;
         }
         
-        width_out = static_cast<uint32_t>(ANativeWindow_getWidth(window_));
-        height_out = static_cast<uint32_t>(ANativeWindow_getHeight(window_));
+        int attempts = 0;
+        const int max_attempts = 10;
         
-        LOGI("[Surface] Size requested by Vulkan: %dx%d", width_out, height_out);
-        
+        do {
+            width_out = static_cast<uint32_t>(ANativeWindow_getWidth(window_));
+            height_out = static_cast<uint32_t>(ANativeWindow_getHeight(window_));
+            
+            if (width_out > 0 && height_out > 0) {
+                LOGI("[Surface] Size query succeeded: %dx%d (attempt %d)", width_out, height_out, attempts + 1);
+                return true;
+            }
+            
+            if (attempts < max_attempts - 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            attempts++;
+        } while (attempts < max_attempts && width_out == 0 && height_out == 0);
+
         if (width_out == 0 || height_out == 0) {
-            LOGE("[Surface] DANGER: Window size is 0x0. Vulkan swapchain creation will likely fail/hang!");
+            LOGE("[Surface] CRITICAL: Window size is 0x0 after %d attempts! Vulkan swapchain creation will fail!", max_attempts);
+            LOGE("[Surface] This usually means the layout hasn't been finalized yet.");
+            LOGE("[Surface] Ensure the Activity waits for onLayoutChange() before calling nativeBootGame()");
+            return false;
         }
+        
         return true;
     }
 
@@ -69,10 +90,13 @@ private:
 
 class AndroidAppContext : public xe::ui::WindowedAppContext {
 public:
-    void NotifyUILoopOfPendingFunctions() override {}
+    void NotifyUILoopOfPendingFunctions() override {
+    }
+    
     void PlatformQuitFromUIThread() override {
         LOGI("[AppContext] Quit requested from UI thread");
         g_emulator_running = false;
+        g_state_condition.notify_all();
     }
 };
 static AndroidAppContext g_app_context;
@@ -109,6 +133,13 @@ static std::unique_ptr<AndroidDisplayWindow> g_display_window;
 static void segfault_handler(int sig) {
     LOGE("[CRASH] Segmentation fault caught in emulator thread!");
     g_emulator_running = false;
+    g_state_condition.notify_all();
+}
+
+static void abort_handler(int sig) {
+    LOGE("[CRASH] Abort signal caught in emulator thread!");
+    g_emulator_running = false;
+    g_state_condition.notify_all();
 }
 
 extern "C" {
@@ -118,173 +149,275 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
     JNIEnv* env, jobject thiz,
     jstring jgame_path, jobject surface) {
 
+    LOGI("[JNI] nativeBootGame called");
+    
     const char* game_path = env->GetStringUTFChars(jgame_path, nullptr);
+    if (!game_path) {
+        LOGE("[JNI] Failed to get game path string");
+        return;
+    }
+
     ANativeWindow* native_window = ANativeWindow_fromSurface(env, surface);
     if (!native_window) {
-        LOGE("Failed to get native window");
+        LOGE("[JNI] Failed to get native window from Surface");
         env->ReleaseStringUTFChars(jgame_path, game_path);
         return;
     }
 
     ANativeWindow_acquire(native_window);
+    LOGI("[JNI] Native window acquired");
 
     int width = 0, height = 0;
-    const int max_wait_ms = 2000;
+    const int max_wait_ms = 5000;
     int waited = 0;
+    int poll_count = 0;
+    
     while (waited < max_wait_ms) {
-      width = ANativeWindow_getWidth(native_window);
-      height = ANativeWindow_getHeight(native_window);
-      if (width > 0 && height > 0) break;
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      waited += 50;
+        width = ANativeWindow_getWidth(native_window);
+        height = ANativeWindow_getHeight(native_window);
+        
+        if (width > 0 && height > 0) {
+            LOGI("[JNI] Surface ready after %dms: %dx%d (poll attempt %d)", waited, width, height, poll_count);
+            break;
+        }
+        
+        int sleep_time = (waited < 500) ? 25 : 100;
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
+        waited += sleep_time;
+        poll_count++;
     }
+    
     if (width <= 0 || height <= 0) {
-      LOGI("nativeBootGame: surface still has 0 size after wait; continuing anyway");
-    } else {
-      LOGI("nativeBootGame: surface size detected %dx%d", width, height);
+        LOGE("[JNI] CRITICAL: Surface size never became valid!");
+        LOGE("[JNI] Waited %dms with %d polls", max_wait_ms, poll_count);
+        LOGE("[JNI] Final size: %dx%d", width, height);
+        LOGE("[JNI] This usually means Activity didn't wait for onLayoutChange() before calling nativeBootGame()");
+        ANativeWindow_release(native_window);
+        env->ReleaseStringUTFChars(jgame_path, game_path);
+        return;
     }
+
+    LOGI("[JNI] Surface size confirmed: %dx%d", width, height);
 
     g_native_window = native_window;
     g_emulator_running = true;
 
     g_emulator_thread = std::thread([game_path = std::string(game_path), native_window]() {
         signal(SIGSEGV, segfault_handler);
-        signal(SIGABRT, segfault_handler);
+        signal(SIGABRT, abort_handler);
+        signal(SIGTERM, segfault_handler);
+        
+        LOGI("[Emulator] Thread started, game_path: %s", game_path.c_str());
         
         try {
-            LOGI("[Tracer] Thread started, game_path: %s", game_path.c_str());
             
             if (!std::filesystem::exists(game_path)) {
                 LOGE("[ERROR] Game file does not exist: %s", game_path.c_str());
                 g_emulator_running = false;
+                g_state_condition.notify_all();
                 return;
             }
-            LOGI("[Tracer] File exists, size: %zu bytes", std::filesystem::file_size(game_path));
-            
+            LOGI("[Emulator] File exists, size: %zu bytes", std::filesystem::file_size(game_path));
+        
             std::filesystem::path storage_root = "/data/data/jp.xenia.emulator.github.debug";
-            std::filesystem::create_directories(storage_root / "content");
-            std::filesystem::create_directories(storage_root / "cache");
-            LOGI("[Tracer] Storage directories created");
+            try {
+                std::filesystem::create_directories(storage_root / "content");
+                std::filesystem::create_directories(storage_root / "cache");
+                LOGI("[Emulator] Storage directories created");
+            } catch (const std::exception& e) {
+                LOGE("[ERROR] Failed to create storage directories: %s", e.what());
+                g_emulator_running = false;
+                g_state_condition.notify_all();
+                return;
+            }
 
-            LOGI("[Tracer] Creating emulator instance...");
-            g_emulator = std::make_unique<xe::Emulator>(
-                game_path, storage_root, storage_root / "content", storage_root / "cache"
-            );
-            LOGI("[Tracer] Emulator instance created successfully");
+            LOGI("[Emulator] Creating emulator instance...");
+            try {
+                g_emulator = std::make_unique<xe::Emulator>(
+                    game_path, storage_root, storage_root / "content", storage_root / "cache"
+                );
+            } catch (const std::exception& e) {
+                LOGE("[ERROR] Failed to create emulator: %s", e.what());
+                g_emulator_running = false;
+                g_state_condition.notify_all();
+                return;
+            }
+            LOGI("[Emulator] Emulator instance created successfully");
 
-            LOGI("[Tracer] Loading config...");
-            config::LoadGameConfigForFile(game_path);
-            LOGI("[Tracer] Config loaded");
+            LOGI("[Emulator] Loading config...");
+            try {
+                config::LoadGameConfigForFile(game_path);
+                LOGI("[Emulator] Config loaded");
+            } catch (const std::exception& e) {
+                LOGE("[ERROR] Failed to load config: %s", e.what());
+            }
 
             auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
-                LOGI("[Tracer] Graphics factory invoked: probing Vulkan provider...");
+                LOGI("[Emulator] Graphics factory invoked: probing Vulkan provider...");
                 auto probe = xe::ui::vulkan::VulkanProvider::Create(false, false);
                 if (!probe) {
-                    LOGI("[Tracer] Vulkan provider probe failed - skipping Vulkan on this device");
+                    LOGE("[ERROR] Vulkan provider probe failed - Vulkan not available on this device");
                     return nullptr;
                 }
-                LOGI("[Tracer] Vulkan provider probe succeeded");
+                LOGI("[Emulator] Vulkan provider probe succeeded");
                 return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
             };
 
             auto audio_factory = [](xe::cpu::Processor* processor) -> std::unique_ptr<xe::apu::AudioSystem> {
-                LOGI("[Tracer] Audio factory invoked");
+                LOGI("[Emulator] Audio factory invoked");
                 return std::make_unique<xe::apu::nop::NopAudioSystem>(processor);
             };
 
             auto input_factory = [](xe::ui::Window* window) -> std::vector<std::unique_ptr<xe::hid::InputDriver>> {
-                LOGI("[Tracer] Input factory invoked");
+                LOGI("[Emulator] Input factory invoked");
                 std::vector<std::unique_ptr<xe::hid::InputDriver>> drivers;
                 drivers.push_back(std::make_unique<xe::hid::nop::NopInputDriver>(window, 0));
                 return drivers;
             };
 
-            LOGI("[Tracer] Creating Display Window...");
-            g_display_window = std::make_unique<AndroidDisplayWindow>(g_app_context);
-            LOGI("[Tracer] Display window created");
-
-            LOGI("[Tracer] Calling g_emulator->Setup()...");
-            if (XFAILED(g_emulator->Setup(g_display_window.get(), nullptr, false, audio_factory, graphics_factory, input_factory))) {
-                LOGE("[Tracer] SETUP FAILED!");
+            LOGI("[Emulator] Creating Display Window...");
+            try {
+                g_display_window = std::make_unique<AndroidDisplayWindow>(g_app_context);
+                LOGI("[Emulator] Display window created");
+            } catch (const std::exception& e) {
+                LOGE("[ERROR] Failed to create display window: %s", e.what());
                 g_emulator_running = false;
+                g_state_condition.notify_all();
                 return;
             }
-            LOGI("[Tracer] Setup completed successfully");
 
-            LOGI("[Tracer] Mounting standard drives...");
-            g_emulator->MountStandardDrives();
-            LOGI("[Tracer] Standard drives mounted");
+            LOGI("[Emulator] Calling g_emulator->Setup()...");
+            xe::X_STATUS setup_result = g_emulator->Setup(
+                g_display_window.get(), nullptr, false, 
+                audio_factory, graphics_factory, input_factory
+            );
+            
+            if (XFAILED(setup_result)) {
+                LOGE("[ERROR] Setup failed with code: 0x%08X", setup_result);
+                g_emulator_running = false;
+                g_display_window.reset();
+                g_emulator.reset();
+                g_state_condition.notify_all();
+                return;
+            }
+            LOGI("[Emulator] Setup completed successfully");
 
-            LOGI("[Tracer] About to call LaunchPath() with: %s", game_path.c_str());
-            LOGI("[Tracer] Emulator state before launch: running=%d", g_emulator_running.load());
+            LOGI("[Emulator] Mounting standard drives...");
+            try {
+                g_emulator->MountStandardDrives();
+                LOGI("[Emulator] Standard drives mounted");
+            } catch (const std::exception& e) {
+                LOGE("[ERROR] Failed to mount drives: %s", e.what());
+            }
+
+            LOGI("[Emulator] About to call LaunchPath() with: %s", game_path.c_str());
             
             if (!g_emulator) {
                 LOGE("[ERROR] g_emulator is null before LaunchPath!");
                 g_emulator_running = false;
+                g_state_condition.notify_all();
                 return;
             }
 
-            xe::X_STATUS result = g_emulator->LaunchPath(game_path);
+            xe::X_STATUS launch_result = g_emulator->LaunchPath(game_path);
+            LOGI("[Emulator] LaunchPath() returned: 0x%08X", launch_result);
             
-            LOGI("[Tracer] LaunchPath() returned: %08X", result);
-            
-            if (XFAILED(result)) {
-                LOGE("[Tracer] LAUNCH FAILED with code: %08X", result);
+            if (XFAILED(launch_result)) {
+                LOGE("[ERROR] Launch failed with code: 0x%08X", launch_result);
                 g_emulator_running = false;
+                g_state_condition.notify_all();
                 return;
             }
 
-            LOGI("[Tracer] Game running! Entering standard WaitUntilExit() loop...");
+            LOGI("[Emulator] Game launching! Entering WaitUntilExit() loop...");
             g_emulator->WaitUntilExit();
-            LOGI("[Tracer] Game loop exited successfully");
+            LOGI("[Emulator] Game loop exited successfully");
 
         } catch (const std::exception& e) {
             LOGE("[EXCEPTION] Caught std::exception in emulator thread");
             LOGE("[EXCEPTION] Type: %s", typeid(e).name());
             LOGE("[EXCEPTION] Message: %s", e.what());
             g_emulator_running = false;
+            g_state_condition.notify_all();
         } catch (...) {
             LOGE("[CRASH] Unknown fatal exception caught in emulator thread!");
             g_emulator_running = false;
+            g_state_condition.notify_all();
         }
         
-        LOGI("[Tracer] Cleaning up emulator thread...");
+        LOGI("[Emulator] Cleaning up emulator thread...");
+        try {
+            if (g_display_window) {
+                g_display_window.reset();
+            }
+            if (g_emulator) {
+                g_emulator.reset();
+            }
+        } catch (const std::exception& e) {
+            LOGE("[ERROR] Exception during cleanup: %s", e.what());
+        }
+        
         g_emulator_running = false;
-        g_display_window.reset();
-        LOGI("[Tracer] Emulator thread cleanup complete");
+        g_state_condition.notify_all();
+        LOGI("[Emulator] Emulator thread cleanup complete");
     });
 
     env->ReleaseStringUTFChars(jgame_path, game_path);
+    LOGI("[JNI] nativeBootGame returning, emulator thread launched");
 }
 
 JNIEXPORT void JNICALL
 Java_jp_xenia_emulator_WindowDemoActivity_nativeShutdown(
     JNIEnv* env, jobject thiz) {
 
-    LOGI("Shutting down emulator");
+    LOGI("[JNI] nativeShutdown called");
     g_emulator_running = false;
-
+    g_state_condition.notify_all();
+    
     if (g_emulator) {
-        LOGI("Calling g_emulator->Shutdown()...");
-        g_emulator->Shutdown();
-        g_emulator.reset();
-        LOGI("g_emulator shutdown complete");
+        LOGI("[JNI] Calling g_emulator->Shutdown()...");
+        try {
+            g_emulator->Shutdown();
+            g_emulator.reset();
+            LOGI("[JNI] g_emulator shutdown complete");
+        } catch (const std::exception& e) {
+            LOGE("[ERROR] Exception during emulator shutdown: %s", e.what());
+            g_emulator.reset();
+        }
     }
 
     if (g_emulator_thread.joinable()) {
-        LOGI("Waiting for emulator thread to join...");
-        g_emulator_thread.join();
-        LOGI("Emulator thread joined");
+        LOGI("[JNI] Waiting for emulator thread to join (max 10 seconds)...");
+        
+        bool joined = false;
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) {
+            if (!g_emulator_running) {
+                g_emulator_thread.join();
+                joined = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        if (!joined) {
+            LOGE("[ERROR] Emulator thread did not join within timeout!");
+        } else {
+            LOGI("[JNI] Emulator thread joined");
+        }
     }
     
-    g_display_window.reset();
-
+    if (g_display_window) {
+        g_display_window.reset();
+    }
+    
     if (g_native_window) {
         ANativeWindow_release(g_native_window);
         g_native_window = nullptr;
+        LOGI("[JNI] Native window released");
     }
 
-    LOGI("Shutdown complete");
+    LOGI("[JNI] Shutdown complete");
 }
 
 JNIEXPORT jboolean JNICALL
@@ -293,4 +426,4 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeIsRunning(
     return g_emulator_running ? JNI_TRUE : JNI_FALSE;
 }
 
-}
+}  // extern "C"
