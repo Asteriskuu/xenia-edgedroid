@@ -8,6 +8,8 @@
 #include <atomic>
 #include <chrono>
 #include <android/log.h>
+#include <signal.h>
+#include <setjmp.h>
 
 #include "xenia/emulator.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
@@ -22,6 +24,7 @@
 #define LOG_TAG "XeniaAndroid"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
 static std::unique_ptr<xe::Emulator> g_emulator;
 static std::thread g_emulator_thread;
@@ -103,6 +106,11 @@ public:
 };
 static std::unique_ptr<AndroidDisplayWindow> g_display_window;
 
+static void segfault_handler(int sig) {
+    LOGE("[CRASH] Segmentation fault caught in emulator thread!");
+    g_emulator_running = false;
+}
+
 extern "C" {
 
 JNIEXPORT void JNICALL
@@ -140,18 +148,33 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
     g_emulator_running = true;
 
     g_emulator_thread = std::thread([game_path = std::string(game_path), native_window]() {
+        signal(SIGSEGV, segfault_handler);
+        signal(SIGABRT, segfault_handler);
+        
         try {
+            LOGI("[Tracer] Thread started, game_path: %s", game_path.c_str());
+            
+            if (!std::filesystem::exists(game_path)) {
+                LOGE("[ERROR] Game file does not exist: %s", game_path.c_str());
+                g_emulator_running = false;
+                return;
+            }
+            LOGI("[Tracer] File exists, size: %zu bytes", std::filesystem::file_size(game_path));
+            
             std::filesystem::path storage_root = "/data/data/jp.xenia.emulator.github.debug";
             std::filesystem::create_directories(storage_root / "content");
             std::filesystem::create_directories(storage_root / "cache");
+            LOGI("[Tracer] Storage directories created");
 
             LOGI("[Tracer] Creating emulator instance...");
             g_emulator = std::make_unique<xe::Emulator>(
                 game_path, storage_root, storage_root / "content", storage_root / "cache"
             );
+            LOGI("[Tracer] Emulator instance created successfully");
 
             LOGI("[Tracer] Loading config...");
             config::LoadGameConfigForFile(game_path);
+            LOGI("[Tracer] Config loaded");
 
             auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
                 LOGI("[Tracer] Graphics factory invoked: probing Vulkan provider...");
@@ -165,10 +188,12 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             };
 
             auto audio_factory = [](xe::cpu::Processor* processor) -> std::unique_ptr<xe::apu::AudioSystem> {
+                LOGI("[Tracer] Audio factory invoked");
                 return std::make_unique<xe::apu::nop::NopAudioSystem>(processor);
             };
 
             auto input_factory = [](xe::ui::Window* window) -> std::vector<std::unique_ptr<xe::hid::InputDriver>> {
+                LOGI("[Tracer] Input factory invoked");
                 std::vector<std::unique_ptr<xe::hid::InputDriver>> drivers;
                 drivers.push_back(std::make_unique<xe::hid::nop::NopInputDriver>(window, 0));
                 return drivers;
@@ -176,19 +201,33 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
             LOGI("[Tracer] Creating Display Window...");
             g_display_window = std::make_unique<AndroidDisplayWindow>(g_app_context);
+            LOGI("[Tracer] Display window created");
 
-            LOGI("[Tracer] Calling g_emulator->Setup()");
+            LOGI("[Tracer] Calling g_emulator->Setup()...");
             if (XFAILED(g_emulator->Setup(g_display_window.get(), nullptr, false, audio_factory, graphics_factory, input_factory))) {
                 LOGE("[Tracer] SETUP FAILED!");
                 g_emulator_running = false;
                 return;
             }
+            LOGI("[Tracer] Setup completed successfully");
 
-            LOGI("[Tracer] Setup complete. Mounting standard drives...");
+            LOGI("[Tracer] Mounting standard drives...");
             g_emulator->MountStandardDrives();
+            LOGI("[Tracer] Standard drives mounted");
 
-            LOGI("[Tracer] Calling LaunchPath()...");
+            LOGI("[Tracer] About to call LaunchPath() with: %s", game_path.c_str());
+            LOGI("[Tracer] Emulator state before launch: running=%d", g_emulator_running.load());
+            
+            if (!g_emulator) {
+                LOGE("[ERROR] g_emulator is null before LaunchPath!");
+                g_emulator_running = false;
+                return;
+            }
+
             xe::X_STATUS result = g_emulator->LaunchPath(game_path);
+            
+            LOGI("[Tracer] LaunchPath() returned: %08X", result);
+            
             if (XFAILED(result)) {
                 LOGE("[Tracer] LAUNCH FAILED with code: %08X", result);
                 g_emulator_running = false;
@@ -197,15 +236,22 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
             LOGI("[Tracer] Game running! Entering standard WaitUntilExit() loop...");
             g_emulator->WaitUntilExit();
-            LOGI("Game loop exited successfully");
+            LOGI("[Tracer] Game loop exited successfully");
 
         } catch (const std::exception& e) {
-            LOGE("Exception caught in emulator thread: %s", e.what());
+            LOGE("[EXCEPTION] Caught std::exception in emulator thread");
+            LOGE("[EXCEPTION] Type: %s", typeid(e).name());
+            LOGE("[EXCEPTION] Message: %s", e.what());
+            g_emulator_running = false;
         } catch (...) {
-            LOGE("Unknown fatal exception caught in emulator thread!");
+            LOGE("[CRASH] Unknown fatal exception caught in emulator thread!");
+            g_emulator_running = false;
         }
+        
+        LOGI("[Tracer] Cleaning up emulator thread...");
         g_emulator_running = false;
         g_display_window.reset();
+        LOGI("[Tracer] Emulator thread cleanup complete");
     });
 
     env->ReleaseStringUTFChars(jgame_path, game_path);
@@ -219,12 +265,16 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeShutdown(
     g_emulator_running = false;
 
     if (g_emulator) {
+        LOGI("Calling g_emulator->Shutdown()...");
         g_emulator->Shutdown();
         g_emulator.reset();
+        LOGI("g_emulator shutdown complete");
     }
 
     if (g_emulator_thread.joinable()) {
+        LOGI("Waiting for emulator thread to join...");
         g_emulator_thread.join();
+        LOGI("Emulator thread joined");
     }
     
     g_display_window.reset();
