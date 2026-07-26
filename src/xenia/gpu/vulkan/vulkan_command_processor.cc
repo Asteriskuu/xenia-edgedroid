@@ -470,7 +470,7 @@ bool VulkanCommandProcessor::SetupContext() {
     return false;
   }
 
-  // Needed by NormalizeSampleCount.
+  // Fallback for query segment normalization when no draw pinned a scale.
   zpd_draw_resolution_scale_x_ = draw_resolution_scale_x;
   zpd_draw_resolution_scale_y_ = draw_resolution_scale_y;
 
@@ -3445,14 +3445,25 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // life. Or even disregard the viewport bounds range in the fragment shader
   // interlocks case completely - apply the viewport and the scissor offset
   // directly to pixel address and to things like ps_param_gen.
-  uint32_t draw_resolution_scale_x = texture_cache_->draw_resolution_scale_x();
-  uint32_t draw_resolution_scale_y = texture_cache_->draw_resolution_scale_y();
+
+  // Resolution scale of this draw, which may be 1x1 because of
+  // draw_resolution_scale_threshold, which the divisors have to match too.
+  uint32_t draw_resolution_scale_x = render_target_cache_->GetDrawScaleX();
+  uint32_t draw_resolution_scale_y = render_target_cache_->GetDrawScaleY();
+  // ZPD segments can't mix scales. The resolved sample count is divided by
+  // one scale area per segment. Split before the FSI counter index goes
+  // into system constants.
+  UpdateZPDScale(draw_resolution_scale_x * draw_resolution_scale_y);
   draw_util::GetViewportInfoArgs gviargs{};
   gviargs.Setup(
       draw_resolution_scale_x, draw_resolution_scale_y,
-      texture_cache_->draw_resolution_scale_x_divisor(),
-      texture_cache_->draw_resolution_scale_y_divisor(), false,
-      device_properties.maxViewportDimensions[0],
+      draw_resolution_scale_x > 1
+          ? texture_cache_->draw_resolution_scale_x_divisor()
+          : divisors::MagicDiv(1),
+      draw_resolution_scale_y > 1
+          ? texture_cache_->draw_resolution_scale_y_divisor()
+          : divisors::MagicDiv(1),
+      false, device_properties.maxViewportDimensions[0],
       device_properties.maxViewportDimensions[1], true,
       normalized_depth_control,
       host_render_targets_used &&
@@ -3851,9 +3862,10 @@ bool VulkanCommandProcessor::IssueCopy() {
 
   uint32_t written_address, written_length;
   reg::RB_COPY_DEST_INFO copy_dest_info;
+  bool is_scaled;
   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
                                      written_address, written_length,
-                                     &copy_dest_info)) {
+                                     &copy_dest_info, &is_scaled)) {
     if (debug_markers_enabled_) {
       PopDebugMarker();
     }
@@ -4587,6 +4599,7 @@ bool VulkanCommandProcessor::CloseZPDQuery(ReportHandle report_handle,
   resolve.submission = GetCurrentSubmission();
   resolve.query_index = zpd_active_query_index_;
   resolve.query_generation = zpd_active_query_generation_;
+  resolve.scale_area = GetZPDScaleArea();
   resolve.uses_fsi_counter = zpd_active_query_is_fsi_;
   resolve.report_handle = report_handle;
   zpd_resolves_in_flight_.push_back(resolve);
@@ -4690,7 +4703,8 @@ void VulkanCommandProcessor::PumpQueryResolves() {
       }
       zpd_host_query_pool_->ReleaseQueryIndex(resolve.query_index,
                                               resolve.query_generation);
-      OnZPDQueryResolved(resolve.report_handle, raw_samples);
+      OnZPDQueryResolved(resolve.report_handle, raw_samples,
+                         resolve.scale_area);
     }
   }
 }
@@ -5473,13 +5487,12 @@ void VulkanCommandProcessor::UpdateDynamicState(
               ? draw_util::kD3D10PolygonOffsetFactorUnorm24
               : draw_util::kD3D10PolygonOffsetFactorFloat24;
       // With non-square resolution scaling, make sure the worst-case impact is
-      // reverted (slope only along the scaled axis), thus max. More bias is
-      // better than less bias, because less bias means Z fighting with the
-      // background is more likely.
+      // reverted (slope only along the scaled axis), thus max. Per-draw scale
+      // so native draws get the guest bias as is. More bias is better than less
+      // bias; less bias means Z fighting with the background is more likely.
       depth_bias_slope_factor *=
           xenos::kPolygonOffsetScaleSubpixelUnit *
-          float(std::max(render_target_cache_->draw_resolution_scale_x(),
-                         render_target_cache_->draw_resolution_scale_y()));
+          float(std::max(draw_resolution_scale_x, draw_resolution_scale_y));
     }
     // std::memcmp instead of != so in case of NaN, every draw won't be
     // invalidating it.
@@ -5660,8 +5673,10 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
   bool edram_fragment_shader_interlock =
       render_target_cache_->GetPath() ==
       RenderTargetCache::Path::kPixelShaderInterlock;
-  uint32_t draw_resolution_scale_x = texture_cache_->draw_resolution_scale_x();
-  uint32_t draw_resolution_scale_y = texture_cache_->draw_resolution_scale_y();
+  // Resolution scale of this draw.
+  // 1x1 with draw_resolution_scale_threshold (FSI only).
+  uint32_t draw_resolution_scale_x = render_target_cache_->GetDrawScaleX();
+  uint32_t draw_resolution_scale_y = render_target_cache_->GetDrawScaleY();
 
   // Get the color info register values for each render target. Also, for FSI,
   // exclude components that don't exist in the format from the write mask.

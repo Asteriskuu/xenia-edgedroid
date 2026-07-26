@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_BACKEND_A64_A64_BACKEND_H_
 #define XENIA_CPU_BACKEND_A64_A64_BACKEND_H_
 
+#include <atomic>
 #include <memory>
 
 #include "xenia/base/bit_map.h"
@@ -38,14 +39,23 @@ static constexpr uint32_t GUEST_TRAMPOLINE_MIN_LEN = 8;
 static constexpr uint32_t MAX_GUEST_TRAMPOLINES =
     (GUEST_TRAMPOLINE_END - GUEST_TRAMPOLINE_BASE) / GUEST_TRAMPOLINE_MIN_LEN;
 
-#define A64_RESERVE_BLOCK_SHIFT 16
-#define A64_RESERVE_NUM_ENTRIES \
-  ((1024ULL * 1024ULL * 1024ULL * 4ULL) >> A64_RESERVE_BLOCK_SHIFT)
+// The Xenon reservation granule is one 128 byte cache line.
+static constexpr uint32_t A64_RESERVE_GRANULE_SHIFT = 7;
+// One generation counter per granule, hashed into a fixed size table. A
+// successful stwcx. bumps its granule, which kills every other thread's
+// reservation on it. Two granules colliding in the table only costs a spurious
+// stwcx. failure, which the architecture permits.
+static constexpr uint32_t A64_RESERVE_NUM_ENTRIES = 1u << 20;
+static constexpr uint32_t A64_RESERVE_ENTRY_MASK = A64_RESERVE_NUM_ENTRIES - 1;
 
 struct ReserveHelper {
-  uint64_t blocks[A64_RESERVE_NUM_ENTRIES / 64];
+  std::atomic<uint32_t> generations[A64_RESERVE_NUM_ENTRIES];
 
-  ReserveHelper() { memset(blocks, 0, sizeof(blocks)); }
+  ReserveHelper() {
+    for (auto& generation : generations) {
+      generation.store(0, std::memory_order_relaxed);
+    }
+  }
 };
 
 struct A64BackendStackpoint {
@@ -78,8 +88,10 @@ struct A64BackendContext {
   uint64_t cached_reserve_value_;
   uint64_t* guest_tick_count;
   A64BackendStackpoint* stackpoints;
-  uint64_t cached_reserve_offset;
-  uint32_t cached_reserve_bit;
+  // guest address the live reservation was taken on, and the granule
+  // generation as it read at that point
+  uint32_t reserve_address;
+  uint32_t reserve_generation;
   unsigned int current_stackpoint_depth;
   unsigned int pending_stackpoint_sync_depth;
   unsigned int fpcr_fpu;

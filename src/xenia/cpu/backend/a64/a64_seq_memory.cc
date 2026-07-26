@@ -1155,10 +1155,10 @@ static const Xbyak_aarch64::XReg& LoadBackendCtxPtr(A64Emitter& e) {
 }
 
 // RESERVED_LOAD/STORE call out to host helpers in a64_backend.cc. The helpers
-// share a global per-cache-line bitmap so a stwcx. on one thread invalidates
-// concurrent lwarx reservations on others (PPC semantics). Doing this purely
-// inline with ldaxr/stlxr would only protect against contention on the same
-// host cache line; ABA on the cached value would silently succeed.
+// share a global per-granule generation counter so a stwcx. on one thread
+// invalidates concurrent lwarx reservations on others (PPC semantics). Doing
+// this purely inline with ldaxr/stlxr would only protect against contention on
+// the same host cache line; ABA on the cached value would silently succeed.
 struct RESERVED_LOAD_I32
     : Sequence<RESERVED_LOAD_I32, I<OPCODE_RESERVED_LOAD, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
