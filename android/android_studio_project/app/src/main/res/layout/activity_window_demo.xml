@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<jp.xenia.emulator.WindowSurfaceView xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
-    android:id="@+id/window_demo_surface_view"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    tools:context="jp.xenia.emulator.WindowDemoActivity" />
+    tools:context="jp.xenia.emulator.WindowDemoActivity">
+
+    <TextureView
+        android:id="@+id/window_demo_texture_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+</FrameLayout>
