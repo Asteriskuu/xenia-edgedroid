@@ -9,6 +9,7 @@ import android.os.HandlerThread;
 import android.provider.OpenableColumns;
 import android.view.Surface;
 import android.view.TextureView;
+import android.view.View;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 import java.io.InputStream;
@@ -86,7 +87,7 @@ public class WindowDemoActivity extends AppCompatActivity implements TextureView
     }
 
     @Override
-    public void onSurfaceTextureFrameAvailable(android.graphics.SurfaceTexture surface) {
+    public void onSurfaceTextureUpdated(android.graphics.SurfaceTexture surface) {
     }
 
     @Override
