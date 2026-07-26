@@ -1100,6 +1100,7 @@ bool D3D12CommandProcessor::SetupContext() {
     return false;
   }
 
+  // Fallback for query segment normalization when no draw pinned a scale.
   zpd_draw_resolution_scale_x_ = draw_resolution_scale_x;
   zpd_draw_resolution_scale_y_ = draw_resolution_scale_y;
 
@@ -2888,17 +2889,26 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
     current_external_pipeline_ = nullptr;
   }
 
-  // Get dynamic rasterizer state.
-  uint32_t draw_resolution_scale_x = texture_cache_->draw_resolution_scale_x();
-  uint32_t draw_resolution_scale_y = texture_cache_->draw_resolution_scale_y();
+  // Get dynamic rasterizer state. Using the resolution scale of this draw,
+  // which may be 1x1 because of draw_resolution_scale_threshold.
+  uint32_t draw_resolution_scale_x = render_target_cache_->GetDrawScaleX();
+  uint32_t draw_resolution_scale_y = render_target_cache_->GetDrawScaleY();
+  // ZPD segments can't mix scales. The resolved sample count is divided by
+  // one scale area per segment. Split before the ROV counter index goes
+  // into system constants.
+  UpdateZPDScale(draw_resolution_scale_x * draw_resolution_scale_y);
   draw_util::ViewportInfo viewport_info;
   draw_util::GetViewportInfoArgs gviargs{};
 
   gviargs.Setup(
       draw_resolution_scale_x, draw_resolution_scale_y,
-      texture_cache_->draw_resolution_scale_x_divisor(),
-      texture_cache_->draw_resolution_scale_y_divisor(), true,
-      D3D12_VIEWPORT_BOUNDS_MAX, D3D12_VIEWPORT_BOUNDS_MAX, false,
+      draw_resolution_scale_x > 1
+          ? texture_cache_->draw_resolution_scale_x_divisor()
+          : divisors::MagicDiv(1),
+      draw_resolution_scale_y > 1
+          ? texture_cache_->draw_resolution_scale_y_divisor()
+          : divisors::MagicDiv(1),
+      true, D3D12_VIEWPORT_BOUNDS_MAX, D3D12_VIEWPORT_BOUNDS_MAX, false,
       normalized_depth_control,
       host_render_targets_used &&
           render_target_cache_->depth_float24_convert_in_pixel_shader(),
@@ -3292,9 +3302,10 @@ XE_NOINLINE
 bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   uint32_t written_address, written_length;
   reg::RB_COPY_DEST_INFO copy_dest_info;
+  bool is_scaled;
   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
                                      written_address, written_length,
-                                     &copy_dest_info)) {
+                                     &copy_dest_info, &is_scaled)) {
     return false;
   }
 
@@ -3323,10 +3334,10 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
     return true;
   }
 
-  bool is_scaled = texture_cache_->IsDrawResolutionScaled();
+  // is_scaled reflects this resolve (native resolves under a scale threshold go
+  // to shared memory unscaled); a native or zero-copy resolve is already in
+  // guest RAM, so there is nothing to read back.
   if (!is_scaled && zero_copy) {
-    // The non-scaled resolve already wrote buffer_ (guest RAM) in place, so it
-    // is coherent with the CPU - nothing to read back.
     return true;
   }
   ID3D12Resource* dest_buffer = guest_ram_buffer;
@@ -4082,8 +4093,10 @@ bool D3D12CommandProcessor::UpdateBindingsMesa(
     deferred_command_list_.D3DSetGraphicsRootSignature(root_signature);
   }
 
-  uint32_t draw_resolution_scale_x = texture_cache_->draw_resolution_scale_x();
-  uint32_t draw_resolution_scale_y = texture_cache_->draw_resolution_scale_y();
+  // Resolution scale of this draw.
+  // 1x1 with draw_resolution_scale_threshold (RTV only)
+  uint32_t draw_resolution_scale_x = render_target_cache_->GetDrawScaleX();
+  uint32_t draw_resolution_scale_y = render_target_cache_->GetDrawScaleY();
 
   // Fill the SPIR-V system constants, mirroring
   // VulkanCommandProcessor::UpdateSystemConstantValues (the shared
@@ -4883,6 +4896,7 @@ bool D3D12CommandProcessor::CloseZPDQuery(ReportHandle report_handle,
   resolve.submission = GetCurrentSubmission();
   resolve.query_index = zpd_active_query_index_;
   resolve.query_generation = zpd_active_query_generation_;
+  resolve.scale_area = GetZPDScaleArea();
   resolve.uses_rov_counter = zpd_active_query_is_rov_;
   resolve.report_handle = report_handle;
   zpd_resolves_in_flight_.push_back(resolve);
@@ -4945,7 +4959,8 @@ void D3D12CommandProcessor::PumpQueryResolves() {
           resolve.query_index, resolve.uses_rov_counter);
       zpd_host_query_pool_->ReleaseQueryIndex(resolve.query_index,
                                               resolve.query_generation);
-      OnZPDQueryResolved(resolve.report_handle, raw_samples);
+      OnZPDQueryResolved(resolve.report_handle, raw_samples,
+                         resolve.scale_area);
     } else {
       if (cvars::occlusion_query_log) {
         XELOGI(

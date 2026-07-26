@@ -312,6 +312,8 @@ class PipelineCache : public GuestSpirvShaderCache::Host {
     // Marks pipelines that use the spirv_to_dxil (Mesa) path so they keep
     // their own cache entries.
     uint32_t use_mesa_dxil : 1;  // 28
+    // Native draw (scale threshold), keeps slope-scale unscaled.
+    uint32_t resolution_scale_native : 1;  // 29
 
     uint32_t stencil_write_mask : 8;                   // 8
     xenos::StencilOp stencil_front_fail_op : 3;        // 11
@@ -328,7 +330,7 @@ class PipelineCache : public GuestSpirvShaderCache::Host {
     inline bool operator==(const PipelineDescription& other) const;
     // Bumped to invalidate caches: vertex/pixel_shader_modification are now the
     // canonical SPIR-V (spirv_to_dxil) modifications, not DXBC.
-    static constexpr uint32_t kVersion = 0x20260701;
+    static constexpr uint32_t kVersion = 0x20260726;
   });
 
   XEPACKEDSTRUCT(PipelineStoredDescription, {

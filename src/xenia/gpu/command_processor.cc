@@ -1318,7 +1318,9 @@ bool CommandProcessor::EndZPDReport(uint32_t report_address,
 
   if (logical.pending_segments == 0) {
     resolved_immediately = true;
-    final_value = NormalizeSampleCount(logical.accumulated_samples);
+    // Segments were already normalized as they resolved.
+    final_value = static_cast<uint32_t>(
+        std::min<uint64_t>(logical.accumulated_samples, UINT32_MAX));
 
     cached_delta = final_value;
     has_cached_delta = true;
@@ -1454,6 +1456,7 @@ void CommandProcessor::CloseQuerySegment() {
   uint64_t submission = 0;
   if (!CloseZPDQuery(zpd_active_segment_.report_handle, submission)) {
     zpd_active_segment_.segment_active = false;
+    zpd_active_segment_.scale_area = 0;
     zpd_active_segment_.segment_pending_begin =
         zpd_active_segment_.logical_active;
     zpd_stats_.failed++;
@@ -1472,14 +1475,30 @@ void CommandProcessor::CloseQuerySegment() {
   }
 
   zpd_active_segment_.segment_active = false;
+  zpd_active_segment_.scale_area = 0;
 
   zpd_active_segment_.segment_pending_begin =
       zpd_active_segment_.logical_active;
   zpd_stats_.segments_ended++;
 }
 
+void CommandProcessor::UpdateZPDScale(uint32_t scale_area) {
+  if (GetZPDMode() == ZPDMode::kFake || !zpd_active_segment_.logical_active) {
+    return;
+  }
+  if (zpd_active_segment_.segment_active && zpd_active_segment_.scale_area &&
+      zpd_active_segment_.scale_area != scale_area) {
+    // Draw scale changed in the middle of a report, so close the segment so
+    // normalization divides correctly, and start a fresh one for this draw.
+    CloseQuerySegment();
+    OpenQuerySegment(false);
+  }
+  zpd_active_segment_.scale_area = scale_area;
+}
+
 void CommandProcessor::OnZPDQueryResolved(ReportHandle report_handle,
-                                          uint64_t raw_samples) {
+                                          uint64_t raw_samples,
+                                          uint32_t scale_area) {
   auto it = logical_zpd_reports_.find(report_handle);
   if (it == logical_zpd_reports_.end()) {
     return;
@@ -1491,10 +1510,11 @@ void CommandProcessor::OnZPDQueryResolved(ReportHandle report_handle,
     logical.pending_segments--;
   }
 
-  logical.accumulated_samples += raw_samples;
+  logical.accumulated_samples += NormalizeSampleCount(raw_samples, scale_area);
 
   if (logical.ended && logical.pending_segments == 0) {
-    uint32_t final_value = NormalizeSampleCount(logical.accumulated_samples);
+    uint32_t final_value = static_cast<uint32_t>(
+        std::min<uint64_t>(logical.accumulated_samples, UINT32_MAX));
 
     logical.cached_delta = final_value;
     logical.has_cached_delta = true;
@@ -1627,12 +1647,13 @@ bool CommandProcessor::IsZPDReportCurrent(const ZPDReport& report) const {
   return current_seq == report.slot_sequence_id;
 }
 
-uint32_t CommandProcessor::NormalizeSampleCount(uint64_t samples) const {
+uint32_t CommandProcessor::NormalizeSampleCount(uint64_t samples,
+                                                uint32_t scale_area) {
   if (samples == 0) {
     return 0;
   }
 
-  uint64_t scale = zpd_draw_resolution_scale_x_ * zpd_draw_resolution_scale_y_;
+  uint64_t scale = scale_area;
   // Round, don't truncate. 1 guest sample at 2x = 4 host samples, need >= 1.
   uint64_t normalized = scale <= 1 ? samples : (samples + (scale >> 1)) / scale;
 

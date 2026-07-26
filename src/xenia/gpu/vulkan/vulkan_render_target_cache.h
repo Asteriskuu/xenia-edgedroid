@@ -116,11 +116,17 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
   // Performs the resolve to a shared memory area according to the current
   // register values, and also clears the render targets if needed. Must be in a
-  // frame for calling.
+  // frame for calling. copy_dest_info_out, if not null, receives the
+  // destination info with the format normalized to the xenos::TextureFormat
+  // the copy was actually performed with (only meaningful when a nonzero
+  // length was written).
+  // written_scaled_out: whether the data went to the scaled resolve address
+  // space rather than shared memory (native resolves don't).
   bool Resolve(const Memory& memory, VulkanSharedMemory& shared_memory,
                VulkanTextureCache& texture_cache, uint32_t& written_address_out,
                uint32_t& written_length_out,
-               reg::RB_COPY_DEST_INFO* copy_dest_info_out = nullptr);
+               reg::RB_COPY_DEST_INFO* copy_dest_info_out = nullptr,
+               bool* written_scaled_out = nullptr);
 
   bool Update(bool is_rasterization_done,
               reg::RB_DEPTHCONTROL normalized_depth_control,
@@ -313,6 +319,13 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       kResolveCopyShaders[size_t(draw_util::ResolveCopyShaderIndex::kCount)];
   std::array<VkPipeline, size_t(draw_util::ResolveCopyShaderIndex::kCount)>
       resolve_copy_pipelines_{};
+  // Unscaled variants for fully native resolves. Only created with resolution
+  // scaling, otherwise the main set is already unscaled. A separate set
+  // because the scaled shaders can't just run at 1x1, their push constants
+  // and destination address space assume the scaled resolve buffer.
+  VkPipelineLayout resolve_copy_native_pipeline_layout_ = VK_NULL_HANDLE;
+  std::array<VkPipeline, size_t(draw_util::ResolveCopyShaderIndex::kCount)>
+      resolve_copy_native_pipelines_{};
 
   // On the fragment shader interlock path, the render pass key is used purely
   // for passing parameters to pipeline setup - there's always only one render
@@ -600,6 +613,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       // Decode (not bit-reinterpret) a 7e3 <-> 8_8_8_8 reuse. See
       // IsTransferValueConverted7e3And8888.
       uint32_t value_convert : 1;
+      // Scale classes of the two sides. The shader bakes each side's tile
+      // size and conversion between the scale spaces.
+      uint32_t dest_scale_native : 1;
+      uint32_t source_scale_native : 1;
 
       // Last bits because this affects the pipeline layout - after sorting,
       // only change it as fewer times as possible. Depth buffers have an
@@ -731,6 +748,12 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       // Last bit because this affects the pipeline - after sorting, only change
       // it at most once. Depth buffers have an additional stencil SRV.
       uint32_t is_depth : 1;
+      // Dumping to the scaled EDRAM layout duplicates this native render
+      // target's guest pixels.
+      uint32_t source_scale_native : 1;
+      // source_scale_native only.
+      // Address the EDRAM buffer with the plain 1x1 tile layout.
+      uint32_t native_layout : 1;
     };
 
     DumpPipelineKey() : key(0) { static_assert_size(*this, sizeof(key)); }
@@ -880,9 +903,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   VkPipeline GetDumpPipeline(DumpPipelineKey key);
 
   // Writes contents of host render targets within rectangles from
-  // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
+  // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_ - with the plain 1x1
+  // tile layout if native_layout is set.
   void DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used,
-                         uint32_t dump_rows, uint32_t dump_pitch);
+                         uint32_t dump_rows, uint32_t dump_pitch,
+                         bool native_layout);
 
   bool gamma_render_target_as_unorm16_ = false;
 

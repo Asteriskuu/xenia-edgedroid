@@ -133,6 +133,10 @@ uint64_t GuestSpirvShaderCache::GetPixelShaderModification(
   // from the system constants, so these stay at their defaults.
   if (render_target_cache_.GetPath() ==
       RenderTargetCache::Path::kHostRenderTargets) {
+    // Whether this draw is native res due to a scale threshold.
+    modification.pixel.resolution_scale_native =
+        uint32_t(render_target_cache_.IsDrawScaleNative());
+
     using DepthStencilMode =
         SpirvShaderTranslator::Modification::DepthStencilMode;
     if (host_.depth_float24_convert_in_pixel_shader() &&
