@@ -144,14 +144,16 @@ public class WindowDemoActivity extends AppCompatActivity implements TextureView
                 launchPath = uri.getPath();
             }
 
+            final String finalLaunchPath = launchPath;
+
             if (rendererHandler != null) {
                 rendererHandler.post(() -> {
-                    Log.i(TAG, "Launching game from renderer thread: " + launchPath);
-                    nativeBootGame(launchPath, surface);
+                    Log.i(TAG, "Launching game from renderer thread: " + finalLaunchPath);
+                    nativeBootGame(finalLaunchPath, surface);
                 });
             } else {
                 Log.e(TAG, "Renderer handler is null!");
-                nativeBootGame(launchPath, surface);
+                nativeBootGame(finalLaunchPath, surface);
             }
         } catch (Exception e) {
             Log.e(TAG, "Error preparing game file: " + e.getMessage(), e);
