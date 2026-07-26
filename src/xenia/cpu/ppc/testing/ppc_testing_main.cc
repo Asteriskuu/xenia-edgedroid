@@ -335,7 +335,10 @@ class TestRunner {
           processor_->backend());
       auto* bctx =
           x64_backend->BackendContextForGuestContext(thread_state_->context());
-      bctx->flags &= ~(1U << xe::cpu::backend::x64::kX64BackendMXCSRModeBit);
+      // Also drop any reservation a previous test left behind, so stwcx.
+      // tests don't depend on file/test ordering.
+      bctx->flags &= ~((1U << xe::cpu::backend::x64::kX64BackendMXCSRModeBit) |
+                       (1U << xe::cpu::backend::x64::kX64BackendHasReserveBit));
     }
 #elif XE_ARCH_ARM64
     // Reset FPCR and backend flags to default FPU state before each test.
@@ -344,7 +347,10 @@ class TestRunner {
           processor_->backend());
       auto* bctx =
           a64_backend->BackendContextForGuestContext(thread_state_->context());
-      bctx->flags &= ~(1U << xe::cpu::backend::a64::kA64BackendFPCRModeBit);
+      // Also drop any reservation a previous test left behind, so stwcx.
+      // tests don't depend on file/test ordering.
+      bctx->flags &= ~((1U << xe::cpu::backend::a64::kA64BackendFPCRModeBit) |
+                       (1U << xe::cpu::backend::a64::kA64BackendHasReserveBit));
       // Explicitly reset the hardware FPCR to default FPU mode (0 = round
       // nearest, no flush-to-zero, no default-NaN). Without this, a previous
       // test that set VMX mode (FZ|DN) leaves the hardware FPCR dirty, and
