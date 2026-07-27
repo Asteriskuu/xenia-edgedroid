@@ -654,11 +654,9 @@ object_ref<UserModule> KernelState::LoadUserModuleFromMemory(
 X_RESULT KernelState::FinishLoadingUserModule(
     const object_ref<UserModule> module, bool call_entry) {
   ALOGI("FinishLoadingUserModule: entered");
-  ALOGI("FinishLoadingUserModule: module=%p",
-        static_cast<void*>(module.get()));
+  ALOGI("FinishLoadingUserModule: module=%p", static_cast<void*>(module.get()));
 
-  ALOGI("FinishLoadingUserModule: title_id=0x%08X",
-        module->title_id());
+  ALOGI("FinishLoadingUserModule: title_id=0x%08X", module->title_id());
 
   const auto module_hash = module->hash();
   if (module_hash.has_value()) {
