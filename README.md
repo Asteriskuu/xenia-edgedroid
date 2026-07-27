@@ -6,6 +6,10 @@
 
 <h1 align="center">Xenia Edgedroid - Xbox 360 Emulator</h1>
 
+> [!NOTE]
+> This repo looks like its gonna have a prototype working soon!
+> Of course its just gonna be a prototype. not a full on android emulator
+
 > [!WARNING]
 > I wouldn't recommend downloading any actions build yet. most of them dont work well.
 > If this message disappears. it means theres a working version
