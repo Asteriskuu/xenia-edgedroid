@@ -983,9 +983,9 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
   }
 
   if (xe::threading::logical_processor_count() >= 6) {
-    // No host thread under the cooperative scheduler (guest runs on a fiber),
-    // so host affinity does not apply.
-    if (!cvars::ignore_thread_affinities && thread_) {
+    // Pin only guest threads; host service threads (XHostThread) keep a
+    // thread_ under the cooperative scheduler and must not be pinned.
+    if (!cvars::ignore_thread_affinities && thread_ && is_guest_thread()) {
       thread_->set_affinity_mask(uint64_t(1) << cpu_index);
     }
   } else {
