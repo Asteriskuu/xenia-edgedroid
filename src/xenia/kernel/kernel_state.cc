@@ -654,9 +654,19 @@ object_ref<UserModule> KernelState::LoadUserModuleFromMemory(
 X_RESULT KernelState::FinishLoadingUserModule(
     const object_ref<UserModule> module, bool call_entry) {
   ALOGI("FinishLoadingUserModule: entered");
-  ALOGI("FinishLoadingUserModule: module=%p", static_cast<void*>(module.get()));
-  ALOGI("FinishLoadingUserModule: title_id=0x%08X hash=0x%08X",
-        module->title_id(), module->hash());
+  ALOGI("FinishLoadingUserModule: module=%p",
+        static_cast<void*>(module.get()));
+
+  ALOGI("FinishLoadingUserModule: title_id=0x%08X",
+        module->title_id());
+
+  const auto module_hash = module->hash();
+  if (module_hash.has_value()) {
+    ALOGI("FinishLoadingUserModule: hash=0x%016llX",
+          static_cast<unsigned long long>(module_hash.value()));
+  } else {
+    ALOGI("FinishLoadingUserModule: hash=none");
+  }
 
   // TODO(Gliniak): Apply custom patches here
   ALOGI("FinishLoadingUserModule: before LoadContinue");
