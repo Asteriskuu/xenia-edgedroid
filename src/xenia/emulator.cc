@@ -696,8 +696,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
 
       ALOGI("D: calling LaunchXexFile()");
       auto result = LaunchXexFile(path);
-      ALOGI("D: LaunchXexFile returned 0x%08X",
-            static_cast<unsigned>(result));
+      ALOGI("D: LaunchXexFile returned 0x%08X", static_cast<unsigned>(result));
       return result;
     }
 
