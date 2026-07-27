@@ -665,8 +665,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
   const std::string path_utf8 = xe::path_to_utf8(path);
 
   ALOGI("A: LaunchPath entered");
-  ALOGI("A: LaunchPath path = %s",
-      path_utf8.c_str());
+  ALOGI("A: LaunchPath path = %s", path_utf8.c_str());
 
   // Remember for relaunch fallback
   if (!path.empty()) {
@@ -678,8 +677,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
 
   ALOGI("B: calling GetFileSignature()");
   const auto signature = GetFileSignature(path);
-  ALOGI("B: GetFileSignature returned = %d",
-      static_cast<int>(signature));
+  ALOGI("B: GetFileSignature returned = %d", static_cast<int>(signature));
 
   X_STATUS mount_result = X_STATUS_SUCCESS;
 
@@ -690,7 +688,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
       ALOGI("C: mounting package to \\Device\\Package_0");
       mount_result = MountPath(path, "\\Device\\Package_0");
       ALOGI("C: MountPath returned 0x%08X",
-          static_cast<unsigned>(mount_result));
+            static_cast<unsigned>(mount_result));
       if (mount_result) {
         ALOGE("C: mount failed");
         return mount_result;
@@ -698,8 +696,8 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
 
       ALOGI("D: calling LaunchXexFile()");
       auto result = LaunchXexFile(path);
-      ALOGI("D: LaunchXexFile returned 0x%08X", 
-          static_cast<unsigned>(result));
+      ALOGI("D: LaunchXexFile returned 0x%08X",
+            static_cast<unsigned>(result));
       return result;
     }
 
@@ -709,7 +707,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
       ALOGI("C: mounting STFS package to \\Device\\Package_0");
       mount_result = MountPath(path, "\\Device\\Package_0");
       ALOGI("C: MountPath returned 0x%08X",
-          static_cast<unsigned>(mount_result));
+            static_cast<unsigned>(mount_result));
       if (mount_result) {
         ALOGE("C: mount failed");
         return mount_result;
@@ -718,7 +716,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
       ALOGI("D: calling LaunchStfsContainer()");
       auto result = LaunchStfsContainer(path);
       ALOGI("D: LaunchStfsContainer returned 0x%08X",
-          static_cast<unsigned>(result));
+            static_cast<unsigned>(result));
       return result;
     }
 
@@ -726,7 +724,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
       ALOGI("C: mounting disc image to \\Device\\Cdrom0");
       mount_result = MountPath(path, "\\Device\\Cdrom0");
       ALOGI("C: MountPath returned 0x%08X",
-          static_cast<unsigned>(mount_result));
+            static_cast<unsigned>(mount_result));
       if (mount_result) {
         ALOGE("C: mount failed");
         return mount_result;
@@ -735,7 +733,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
       ALOGI("D: calling LaunchDiscImage()");
       auto result = LaunchDiscImage(path);
       ALOGI("D: LaunchDiscImage returned 0x%08X",
-          static_cast<unsigned>(result));
+            static_cast<unsigned>(result));
       return result;
     }
 
@@ -743,7 +741,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
       ALOGI("C: mounting disc archive to \\Device\\Cdrom0");
       mount_result = MountPath(path, "\\Device\\Cdrom0");
       ALOGI("C: MountPath returned 0x%08X",
-          static_cast<unsigned>(mount_result));
+            static_cast<unsigned>(mount_result));
       if (mount_result) {
         ALOGE("C: mount failed");
         return mount_result;
@@ -752,7 +750,7 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
       ALOGI("D: calling LaunchDiscArchive()");
       auto result = LaunchDiscArchive(path);
       ALOGI("D: LaunchDiscArchive returned 0x%08X",
-          static_cast<unsigned>(result));
+            static_cast<unsigned>(result));
       return result;
     }
 
