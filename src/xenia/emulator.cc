@@ -650,39 +650,92 @@ Emulator::FileSignatureType Emulator::GetFileSignature(
 }
 
 X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
+  XELOGI("LaunchPath: entered");
+  XELOGI("LaunchPath: path = {}", xe::path_to_utf8(path));
+
   // Remember for relaunch fallback
   if (!path.empty()) {
     last_launch_path_ = path;
+    XELOGI("LaunchPath: last_launch_path_ updated");
+  } else {
+    XELOGW("LaunchPath: received empty path");
   }
 
   X_STATUS mount_result = X_STATUS_SUCCESS;
 
-  switch (GetFileSignature(path)) {
+  const auto signature = GetFileSignature(path);
+  XELOGI("LaunchPath: file signature = {}", static_cast<int>(signature));
+
+  switch (signature) {
     case FileSignatureType::XEX1:
     case FileSignatureType::XEX2:
     case FileSignatureType::ELF: {
+      XELOGI("LaunchPath: mounting package to \\Device\\Package_0");
       mount_result = MountPath(path, "\\Device\\Package_0");
-      return mount_result ? mount_result : LaunchXexFile(path);
-    } break;
+      XELOGI("LaunchPath: MountPath returned 0x{:08X}", mount_result);
+      if (mount_result) {
+        XELOGE("LaunchPath: mount failed");
+        return mount_result;
+      }
+
+      XELOGI("LaunchPath: calling LaunchXexFile");
+      auto result = LaunchXexFile(path);
+      XELOGI("LaunchPath: LaunchXexFile returned 0x{:08X}", result);
+      return result;
+    }
+
     case FileSignatureType::LIVE:
     case FileSignatureType::CON:
     case FileSignatureType::PIRS: {
+      XELOGI("LaunchPath: mounting STFS package to \\Device\\Package_0");
       mount_result = MountPath(path, "\\Device\\Package_0");
-      return mount_result ? mount_result : LaunchStfsContainer(path);
-    } break;
+      XELOGI("LaunchPath: MountPath returned 0x{:08X}", mount_result);
+      if (mount_result) {
+        XELOGE("LaunchPath: mount failed");
+        return mount_result;
+      }
+
+      XELOGI("LaunchPath: calling LaunchStfsContainer");
+      auto result = LaunchStfsContainer(path);
+      XELOGI("LaunchPath: LaunchStfsContainer returned 0x{:08X}", result);
+      return result;
+    }
+
     case FileSignatureType::XISO: {
+      XELOGI("LaunchPath: mounting disc image to \\Device\\Cdrom0");
       mount_result = MountPath(path, "\\Device\\Cdrom0");
-      return mount_result ? mount_result : LaunchDiscImage(path);
-    } break;
+      XELOGI("LaunchPath: MountPath returned 0x{:08X}", mount_result);
+      if (mount_result) {
+        XELOGE("LaunchPath: mount failed");
+        return mount_result;
+      }
+
+      XELOGI("LaunchPath: calling LaunchDiscImage");
+      auto result = LaunchDiscImage(path);
+      XELOGI("LaunchPath: LaunchDiscImage returned 0x{:08X}", result);
+      return result;
+    }
+
     case FileSignatureType::ZAR: {
+      XELOGI("LaunchPath: mounting disc archive to \\Device\\Cdrom0");
       mount_result = MountPath(path, "\\Device\\Cdrom0");
-      return mount_result ? mount_result : LaunchDiscArchive(path);
-    } break;
+      XELOGI("LaunchPath: MountPath returned 0x{:08X}", mount_result);
+      if (mount_result) {
+        XELOGE("LaunchPath: mount failed");
+        return mount_result;
+      }
+
+      XELOGI("LaunchPath: calling LaunchDiscArchive");
+      auto result = LaunchDiscArchive(path);
+      XELOGI("LaunchPath: LaunchDiscArchive returned 0x{:08X}", result);
+      return result;
+    }
+
     case FileSignatureType::EXE:
     case FileSignatureType::Unknown:
     default:
+      XELOGE("LaunchPath: unsupported file type");
       return X_STATUS_NOT_SUPPORTED;
-      break;
   }
 }
 
