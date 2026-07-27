@@ -7,9 +7,7 @@
  ******************************************************************************
  */
 
-#if XE_PLATFORM_ANDROID
 #include <android/log.h>
-#endif
 #include <ranges>
 
 #include "xenia/emulator.h"
@@ -75,14 +73,12 @@
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #endif  // XE_ARCH
 
-#if XE_PLATFORM_ANDROID
 #define ALOGI(...) \
   __android_log_print(ANDROID_LOG_INFO, "XeniaAndroid", __VA_ARGS__)
 #define ALOGW(...) \
   __android_log_print(ANDROID_LOG_WARN, "XeniaAndroid", __VA_ARGS__)
 #define ALOGE(...) \
   __android_log_print(ANDROID_LOG_ERROR, "XeniaAndroid", __VA_ARGS__)
-#endif
 
 DEFINE_double(time_scalar, 1.0,
               "Scalar used to speed or slow time (1x, 2x, 1/2x, etc).",
