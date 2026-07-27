@@ -122,6 +122,16 @@ class Backend {
   }
   virtual void FreeGuestTrampoline(uint32_t trampoline_addr) {}
 
+  // lwarx/stwcx. for host code, on the same reservation state the JIT uses, so
+  // a host store cancels a guest thread's reservation. Values are guest endian.
+  // Defaults are a plain access, for backends that never run guest code.
+  virtual uint32_t ReservedLoad32(ppc::PPCContext* context, uint32_t address);
+  virtual uint64_t ReservedLoad64(ppc::PPCContext* context, uint32_t address);
+  virtual bool ReservedStore32(ppc::PPCContext* context, uint32_t address,
+                               uint32_t value);
+  virtual bool ReservedStore64(ppc::PPCContext* context, uint32_t address,
+                               uint64_t value);
+
   // JIT tracing runtime controls. "available" reflects whether the trace hooks
   // were compiled into emitted code (XENIA_ENABLE_ITRACE / XENIA_ENABLE_DTRACE
   // build options); when unavailable the enable flags have no effect.

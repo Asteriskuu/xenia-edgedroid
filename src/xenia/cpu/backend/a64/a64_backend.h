@@ -39,12 +39,10 @@ static constexpr uint32_t GUEST_TRAMPOLINE_MIN_LEN = 8;
 static constexpr uint32_t MAX_GUEST_TRAMPOLINES =
     (GUEST_TRAMPOLINE_END - GUEST_TRAMPOLINE_BASE) / GUEST_TRAMPOLINE_MIN_LEN;
 
-// The Xenon reservation granule is one 128 byte cache line.
+// Xenon reservation granule is one 128 byte cache line.
 static constexpr uint32_t A64_RESERVE_GRANULE_SHIFT = 7;
-// One generation counter per granule, hashed into a fixed size table. A
-// successful stwcx. bumps its granule, which kills every other thread's
-// reservation on it. Two granules colliding in the table only costs a spurious
-// stwcx. failure, which the architecture permits.
+// A generation counter per granule, hashed. stwcx. bumps its granule to kill
+// other threads' reservations. Colliding granules only cost a spurious failure.
 static constexpr uint32_t A64_RESERVE_NUM_ENTRIES = 1u << 20;
 static constexpr uint32_t A64_RESERVE_ENTRY_MASK = A64_RESERVE_NUM_ENTRIES - 1;
 
@@ -88,8 +86,7 @@ struct A64BackendContext {
   uint64_t cached_reserve_value_;
   uint64_t* guest_tick_count;
   A64BackendStackpoint* stackpoints;
-  // guest address the live reservation was taken on, and the granule
-  // generation as it read at that point
+  // address of the live reservation, and its granule generation when taken
   uint32_t reserve_address;
   uint32_t reserve_generation;
   unsigned int current_stackpoint_depth;
@@ -157,6 +154,13 @@ class A64Backend : public Backend {
   void FreeGuestTrampoline(uint32_t trampoline_addr) override;
   void SetGuestRoundingMode(void* ctx, unsigned int mode) override;
   bool PopulatePseudoStacktrace(GuestPseudoStackTrace* st) override;
+
+  uint32_t ReservedLoad32(ppc::PPCContext* context, uint32_t address) override;
+  uint64_t ReservedLoad64(ppc::PPCContext* context, uint32_t address) override;
+  bool ReservedStore32(ppc::PPCContext* context, uint32_t address,
+                       uint32_t value) override;
+  bool ReservedStore64(ppc::PPCContext* context, uint32_t address,
+                       uint64_t value) override;
 
   bool trace_instr_available() const override;
   bool trace_data_available() const override;
