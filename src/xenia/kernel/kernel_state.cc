@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include <android/log.h>
 #include <ranges>
 
 #include "xenia/kernel/kernel_state.h"
@@ -30,6 +31,13 @@
 #include "xenia/ui/imgui_host_notification.h"
 
 #include "third_party/crypto/TinySHA1.hpp"
+
+#define ALOGI(...) \
+  __android_log_print(ANDROID_LOG_INFO, "XeniaAndroid", __VA_ARGS__)
+#define ALOGW(...) \
+  __android_log_print(ANDROID_LOG_WARN, "XeniaAndroid", __VA_ARGS__)
+#define ALOGE(...) \
+  __android_log_print(ANDROID_LOG_ERROR, "XeniaAndroid", __VA_ARGS__)
 
 DEFINE_bool(apply_title_update, true, "Apply title updates.", "Kernel");
 DEFINE_bool(allow_incompatible_title_update, true,
@@ -645,22 +653,48 @@ object_ref<UserModule> KernelState::LoadUserModuleFromMemory(
 
 X_RESULT KernelState::FinishLoadingUserModule(
     const object_ref<UserModule> module, bool call_entry) {
+  ALOGI("FinishLoadingUserModule: entered");
+  ALOGI("FinishLoadingUserModule: module=%p",
+        static_cast<void*>(module.get()));
+  ALOGI("FinishLoadingUserModule: title_id=0x%08X hash=0x%08X",
+        module->title_id(), module->hash());
+
   // TODO(Gliniak): Apply custom patches here
+  ALOGI("FinishLoadingUserModule: before LoadContinue");
   X_RESULT result = module->LoadContinue();
+  ALOGI("FinishLoadingUserModule: after LoadContinue result=0x%08X",
+        static_cast<unsigned>(result));
   if (XFAILED(result)) {
+    ALOGE("FinishLoadingUserModule: LoadContinue failed");
     return result;
   }
+
+  ALOGI("FinishLoadingUserModule: before Dump");
   module->Dump();
+  ALOGI("FinishLoadingUserModule: after Dump");
+
+  ALOGI("FinishLoadingUserModule: before ApplyPatchesForTitle");
   emulator_->patcher()->ApplyPatchesForTitle(memory_, module->title_id(),
                                              module->hash());
+  ALOGI("FinishLoadingUserModule: after ApplyPatchesForTitle");
+
+  ALOGI("FinishLoadingUserModule: before on_patch_apply");
   emulator_->on_patch_apply();
+  ALOGI("FinishLoadingUserModule: after on_patch_apply");
+
   if (module->xex_module()) {
+    ALOGI("FinishLoadingUserModule: before Precompile");
     module->xex_module()->Precompile();
+    ALOGI("FinishLoadingUserModule: after Precompile");
+  } else {
+    ALOGI("FinishLoadingUserModule: xex_module is null");
   }
 
   if (module->is_dll_module() && module->entry_point() && call_entry) {
     // Call DllMain(DLL_PROCESS_ATTACH):
     // https://msdn.microsoft.com/en-us/library/windows/desktop/ms682583%28v=vs.85%29.aspx
+    ALOGI("FinishLoadingUserModule: before DLL entry");
+
     uint64_t args[] = {
         module->handle(),
         1,  // DLL_PROCESS_ATTACH
@@ -670,9 +704,14 @@ X_RESULT KernelState::FinishLoadingUserModule(
     module->is_attached_ = true;
 
     auto thread_state = XThread::GetCurrentThread()->thread_state();
+    ALOGI("FinishLoadingUserModule: calling processor()->Execute");
     processor()->Execute(thread_state, module->entry_point(), args,
                          xe::countof(args));
+    ALOGI("FinishLoadingUserModule: after DLL entry");
   }
+
+  ALOGI("FinishLoadingUserModule: returning 0x%08X",
+        static_cast<unsigned>(result));
   return result;
 }
 
