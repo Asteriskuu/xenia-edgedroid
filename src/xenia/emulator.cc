@@ -2048,7 +2048,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // Allow xam to request module loads.
   ALOGI("CompleteLaunch: getting xam module");
   auto xam = kernel_state()->GetKernelModule<kernel::xam::XamModule>("xam.xex");
-  ALOGI("CompleteLaunch: xam module ptr = %p", xam);
+  ALOGI("CompleteLaunch: xam module ptr = %p", xam.get());
 
   ALOGI("CompleteLaunch: loading module %s", std::string(module_path).c_str());
   auto module = kernel_state_->LoadUserModule(module_path);
