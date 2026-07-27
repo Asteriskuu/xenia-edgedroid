@@ -769,8 +769,7 @@ X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
   // Get just the filename (foo.xex).
   auto file_name = path.filename();
   ALOGI("LaunchXexFile: path = %s", xe::path_to_utf8(path).c_str());
-  ALOGI("LaunchXexFile: file_name = %s",
-        xe::path_to_utf8(file_name).c_str());
+  ALOGI("LaunchXexFile: file_name = %s", xe::path_to_utf8(file_name).c_str());
 
   // Launch the game.
   auto fs_path = fmt::format("{}\\", kDefaultGameSymbolicLink) +
@@ -1980,8 +1979,7 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                   const std::string_view module_path) {
   ALOGI("CompleteLaunch: entered");
   ALOGI("CompleteLaunch: path = %s", xe::path_to_utf8(path).c_str());
-  ALOGI("CompleteLaunch: module_path = %s",
-        std::string(module_path).c_str());
+  ALOGI("CompleteLaunch: module_path = %s", std::string(module_path).c_str());
 
   // Making changes to the UI (setting the icon) and executing game config
   // load callbacks which expect to be called from the UI thread.
