@@ -419,6 +419,9 @@ object_ref<UserModule> UserModule::Restore(KernelState* kernel_state,
 }
 
 void UserModule::Dump() {
+#if XE_PLATFORM_ANDROID
+  return;
+#endif
   if (module_format_ == kModuleFormatElf) {
     // Quick die.
     return;
