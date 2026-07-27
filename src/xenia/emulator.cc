@@ -12,7 +12,7 @@
 #include "xenia/emulator.h"
 
 #include <algorithm>
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID
 #include <fstream>
 #endif
 #include "config.h"
@@ -149,12 +149,14 @@ Emulator::Emulator(const std::filesystem::path& command_line,
       paused_(false),
       restoring_(false),
       restore_fence_() {
+#if XE_PLATFORM_WIN32 == 1
   if (cvars::priority_class != 0) {
     if (SetProcessPriorityClass(cvars::priority_class)) {
       XELOGI("Higher priority class request: Successful. New priority: {}",
              cvars::priority_class);
     }
   }
+#endif
 
 #if XE_PLATFORM_WIN32 == 1
   // Show a disclaimer that links to the quickstart
@@ -279,7 +281,7 @@ X_STATUS Emulator::Setup(
   // logical processors.
   xe::threading::EnableAffinityConfiguration();
 
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID
   // Check if /dev/shm is mounted with noexec. The code cache uses shm_open
   // with PROT_EXEC, which will fail with EPERM on noexec tmpfs mounts.
   {
