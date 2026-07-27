@@ -71,6 +71,16 @@ struct MEMORY_BARRIER
 EMITTER_OPCODE_TABLE(OPCODE_MEMORY_BARRIER, MEMORY_BARRIER);
 
 // ============================================================================
+// OPCODE_LOAD_BARRIER
+// ============================================================================
+struct LOAD_BARRIER : Sequence<LOAD_BARRIER, I<OPCODE_LOAD_BARRIER, VoidOp>> {
+  static void Emit(A64Emitter& e, const EmitArgType& i) {
+    e.dmb(Xbyak_aarch64::ISHLD);
+  }
+};
+EMITTER_OPCODE_TABLE(OPCODE_LOAD_BARRIER, LOAD_BARRIER);
+
+// ============================================================================
 // OPCODE_CACHE_CONTROL
 // ============================================================================
 struct CACHE_CONTROL

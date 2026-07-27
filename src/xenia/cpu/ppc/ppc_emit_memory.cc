@@ -757,8 +757,9 @@ int InstrEmit_sync(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_isync(PPCHIRBuilder& f, const InstrData& i) {
-  // XEINSTRNOTIMPLEMENTED();
-  f.Nop();
+  // Only the memory ordering half is modelled. Guests pair isync with a
+  // conditional branch to acquire a lock.
+  f.LoadBarrier();
   return 0;
 }
 
@@ -773,15 +774,12 @@ int InstrEmit_ldarx(PPCHIRBuilder& f, const InstrData& i) {
   // RESERVE_ADDR <- real_addr(EA)
   // RT <- MEM(EA, 8)
 
-  // The barrier is here so we read a current value.
   Value* ea = CalculateEA_0(f, i.X.RA, i.X.RB);
 
   if (cvars::no_reserved_ops) {
     f.StoreGPR(i.X.RT, f.ByteSwap(f.Load(ea, INT64_TYPE)));
 
   } else {
-    f.MemoryBarrier();
-
     Value* rt = f.ByteSwap(f.LoadWithReserve(ea, INT64_TYPE));
     f.StoreGPR(i.X.RT, rt);
   }
@@ -799,16 +797,12 @@ int InstrEmit_lwarx(PPCHIRBuilder& f, const InstrData& i) {
   // RESERVE_ADDR <- real_addr(EA)
   // RT <- i32.0 || MEM(EA, 4)
 
-  // The barrier is here so we read a current value.
-
   Value* ea = CalculateEA_0(f, i.X.RA, i.X.RB);
   if (cvars::no_reserved_ops) {
     f.StoreGPR(i.X.RT,
                f.ZeroExtend(f.ByteSwap(f.Load(ea, INT32_TYPE)), INT64_TYPE));
 
   } else {
-    f.MemoryBarrier();
-
     Value* rt =
         f.ZeroExtend(f.ByteSwap(f.LoadWithReserve(ea, INT32_TYPE)), INT64_TYPE);
     f.StoreGPR(i.X.RT, rt);
@@ -843,12 +837,6 @@ int InstrEmit_stdcx(PPCHIRBuilder& f, const InstrData& i) {
   }
   f.StoreContext(offsetof(PPCContext, cr0.cr0_lt), f.LoadZeroInt8());
   f.StoreContext(offsetof(PPCContext, cr0.cr0_gt), f.LoadZeroInt8());
-
-  // Issue memory barrier for when we go out of lock and want others to see our
-  // updates.
-  if (!cvars::no_reserved_ops) {
-    f.MemoryBarrier();
-  }
   return 0;
 }
 
@@ -880,12 +868,6 @@ int InstrEmit_stwcx(PPCHIRBuilder& f, const InstrData& i) {
 
   f.StoreContext(offsetof(PPCContext, cr0.cr0_lt), f.LoadZeroInt8());
   f.StoreContext(offsetof(PPCContext, cr0.cr0_gt), f.LoadZeroInt8());
-
-  // Issue memory barrier for when we go out of lock and want others to see our
-  // updates.
-  if (!cvars::no_reserved_ops) {
-    f.MemoryBarrier();
-  }
 
   return 0;
 }
