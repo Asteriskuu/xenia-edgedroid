@@ -1978,6 +1978,11 @@ static std::string format_version(xex2_version version) {
 
 X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                   const std::string_view module_path) {
+  ALOGI("CompleteLaunch: entered");
+  ALOGI("CompleteLaunch: path = %s", xe::path_to_utf8(path).c_str());
+  ALOGI("CompleteLaunch: module_path = %s",
+        std::string(module_path).c_str());
+
   // Making changes to the UI (setting the icon) and executing game config
   // load callbacks which expect to be called from the UI thread.
   // On most platforms we dispatch to the UI thread synchronously. On Android
@@ -1985,11 +1990,14 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // synchronous dispatch would deadlock—run inline there instead.
 #if !XE_PLATFORM_ANDROID
   if (!display_window_->app_context().IsInUIThread()) {
+    ALOGI("CompleteLaunch: dispatching to UI thread");
     X_STATUS result = X_STATUS_UNSUCCESSFUL;
     display_window_->app_context().CallInUIThreadSynchronous(
         [this, &path, &module_path, &result]() {
           result = CompleteLaunch(path, module_path);
         });
+    ALOGI("CompleteLaunch: UI thread returned 0x%08X",
+          static_cast<unsigned>(result));
     return result;
   }
 #endif  // !XE_PLATFORM_ANDROID
@@ -1999,10 +2007,14 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // directly, not through the save:/dlc: symlinks. Without this the open lands
   // on the NullDevice below and fails, so a title can never see its own
   // existing content and keeps recreating it.
+  ALOGI("CompleteLaunch: registering content device");
   auto content_device = std::make_unique<vfs::HostPathDevice>(
       "\\Device\\Harddisk0\\Partition1\\Content", content_root_, false, true);
   if (content_device->Initialize()) {
     file_system_->RegisterDevice(std::move(content_device));
+    ALOGI("CompleteLaunch: content device registered");
+  } else {
+    ALOGW("CompleteLaunch: content device failed to initialize");
   }
 
   // Setup NullDevices for raw HDD partition accesses
@@ -2016,84 +2028,111 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // Partition1 will go to this. Registering during CompleteLaunch allows us
   // to make sure any HostPathDevices are ready beforehand. (see comment above
   // cache:\ device registration for more info about why)
+  ALOGI("CompleteLaunch: registering null HDD device");
   auto null_paths = {std::string("\\Partition0"), std::string("\\Cache0"),
                      std::string("\\Cache1")};
   auto null_device =
       std::make_unique<vfs::NullDevice>("\\Device\\Harddisk0", null_paths);
   if (null_device->Initialize()) {
     file_system_->RegisterDevice(std::move(null_device));
+    ALOGI("CompleteLaunch: null HDD device registered");
+  } else {
+    ALOGW("CompleteLaunch: null HDD device failed to initialize");
   }
 
   // Reset state.
+  ALOGI("CompleteLaunch: resetting title state");
   title_id_ = std::nullopt;
   title_name_ = "";
   title_version_ = "";
   display_window_->SetIcon(nullptr, 0);
 
   // Allow xam to request module loads.
+  ALOGI("CompleteLaunch: getting xam module");
   auto xam = kernel_state()->GetKernelModule<kernel::xam::XamModule>("xam.xex");
+  ALOGI("CompleteLaunch: xam module ptr = %p", xam);
 
-  XELOGI("Loading module {}", module_path);
+  ALOGI("CompleteLaunch: loading module %s", std::string(module_path).c_str());
   auto module = kernel_state_->LoadUserModule(module_path);
   if (!module) {
     XELOGE("Failed to load user module {}", path);
+    ALOGE("CompleteLaunch: LoadUserModule failed");
     return X_STATUS_NOT_FOUND;
   }
+  ALOGI("CompleteLaunch: user module loaded");
 
   if (!module->is_executable()) {
+    ALOGE("CompleteLaunch: module is not executable");
     kernel_state_->UnloadUserModule(module, false);
     XELOGE("Failed to load user module {}", path);
     return X_STATUS_NOT_SUPPORTED;
   }
 
+  ALOGI("CompleteLaunch: applying title update");
   X_RESULT result = kernel_state_->ApplyTitleUpdate(module);
+  ALOGI("CompleteLaunch: ApplyTitleUpdate returned 0x%08X",
+        static_cast<unsigned>(result));
   if (XFAILED(result)) {
     XELOGE("Failed to apply title update! Cannot run module {}", path);
     return result;
   }
 
+  ALOGI("CompleteLaunch: finishing loading user module");
   result = kernel_state_->FinishLoadingUserModule(module);
+  ALOGI("CompleteLaunch: FinishLoadingUserModule returned 0x%08X",
+        static_cast<unsigned>(result));
   if (XFAILED(result)) {
     XELOGE("Failed to initialize user module {}", path);
     return result;
   }
+
   // Grab the current title ID.
+  ALOGI("CompleteLaunch: reading execution info");
   xex2_opt_execution_info* info = nullptr;
   uint32_t workspace_address = 0;
   module->GetOptHeader(XEX_HEADER_EXECUTION_INFO, &info);
 
+  ALOGI("CompleteLaunch: allocating workspace");
   kernel_state_->memory()
       ->LookupHeapByType(false, 0x1000)
       ->Alloc(module->workspace_size(), 0x1000,
               kMemoryAllocationReserve | kMemoryAllocationCommit,
               kMemoryProtectRead | kMemoryProtectWrite, false,
               &workspace_address);
+  ALOGI("CompleteLaunch: workspace_address = 0x%08X", workspace_address);
 
   if (!info) {
     title_id_ = 0;
+    ALOGI("CompleteLaunch: no execution info, title_id set to 0");
   } else {
     title_id_ = info->title_id;
     auto title_version = info->version();
     if (title_version.value != 0) {
       title_version_ = format_version(title_version);
     }
+    ALOGI("CompleteLaunch: title_id = %08X", title_id_.value());
+    ALOGI("CompleteLaunch: title_version = %s", title_version_.c_str());
   }
 
   // Try and load the resource database (xex only).
   if (module->title_id()) {
     auto title_id = fmt::format("{:08X}", module->title_id());
+    ALOGI("CompleteLaunch: module title_id = %s", title_id.c_str());
 
     const auto db = kernel_state_->module_xdbf(module);
+    ALOGI("CompleteLaunch: module_xdbf retrieved");
 
     game_info_database_ =
         std::make_unique<kernel::util::GameInfoDatabase>(db.get());
     kernel_state_->xam_state()->LoadSpaInfo(db.get());
+    ALOGI("CompleteLaunch: game info database and SPA loaded");
 
     if (game_info_database_->IsValid()) {
       title_name_ = game_info_database_->GetTitleName(static_cast<XLanguage>(
           kernel_state_->xconfig()->ReadSetting<uint32_t>(
               kernel::XCONFIG_USER_CATEGORY, kernel::XCONFIG_USER_LANGUAGE)));
       XELOGI("Title name: {}", title_name_);
+      ALOGI("CompleteLaunch: title name = %s", title_name_.c_str());
 
       // Show achievments data
       const std::vector<kernel::util::GameInfoDatabase::Achievement>
@@ -2198,8 +2237,11 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
       auto icon_block = game_info_database_->GetIcon();
       if (!icon_block.empty()) {
+        ALOGI("CompleteLaunch: setting title icon");
         display_window_->SetIcon(icon_block.data(), icon_block.size());
       }
+    } else {
+      ALOGW("CompleteLaunch: game info database invalid");
     }
   }
 
@@ -2209,25 +2251,33 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // skipped until pipelines are ready, so this is safe. By the time actual
   // gameplay starts, most cached pipelines should be compiled.
   if (graphics_system_) {
+    ALOGI("CompleteLaunch: initializing shader storage");
     on_shader_storage_initialization(true);
     graphics_system_->InitializeShaderStorage(
         cache_root_, title_id_.value(), false,
         [this]() { on_shader_storage_initialization(false); });
   }
 
+  ALOGI("CompleteLaunch: launching module");
   auto main_thread = kernel_state_->LaunchModule(module);
   if (!main_thread) {
+    ALOGE("CompleteLaunch: LaunchModule failed");
     return X_STATUS_UNSUCCESSFUL;
   }
+  ALOGI("CompleteLaunch: LaunchModule succeeded");
   main_thread_ = main_thread;
+
+  ALOGI("CompleteLaunch: firing on_launch");
   on_launch(title_id_.value(), title_name_);
 
   // Plugins must be loaded after calling LaunchModule() and
   // FinishLoadingUserModule() which will apply TUs and patching to the main
   // xex.
   if (cvars::allow_plugins) {
+    ALOGI("CompleteLaunch: checking plugins");
     if (plugin_loader_->IsAnyPluginForTitleAvailable(title_id_.value(),
                                                      module->hash().value())) {
+      ALOGI("CompleteLaunch: loading plugins");
       plugin_loader_->LoadTitlePlugins(title_id_.value(),
                                        module->hash().value());
     }
@@ -2236,8 +2286,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // Resume the main thread now.
   // If the debugger has requested a suspend this will just decrement the
   // suspend count without resuming it until the debugger wants.
+  ALOGI("CompleteLaunch: resuming main thread");
   main_thread_->Resume();
 
+  ALOGI("CompleteLaunch: finished successfully");
   return X_STATUS_SUCCESS;
 }
 
