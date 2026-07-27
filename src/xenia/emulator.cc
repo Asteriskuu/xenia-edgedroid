@@ -758,6 +758,8 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
 }
 
 X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
+  ALOGI("LaunchXexFile: entered");
+
   // We create a virtual filesystem pointing to its directory and symlink
   // that to the game filesystem.
   // e.g., /my/files/foo.xex will get a local fs at:
@@ -766,39 +768,61 @@ X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
   // -> game:\foo.xex
   // Get just the filename (foo.xex).
   auto file_name = path.filename();
+  ALOGI("LaunchXexFile: path = %s", xe::path_to_utf8(path).c_str());
+  ALOGI("LaunchXexFile: file_name = %s",
+        xe::path_to_utf8(file_name).c_str());
 
   // Launch the game.
   auto fs_path = fmt::format("{}\\", kDefaultGameSymbolicLink) +
                  xe::path_to_utf8(file_name);
+  ALOGI("LaunchXexFile: fs_path = %s", fs_path.c_str());
+
+  ALOGI("LaunchXexFile: calling CompleteLaunch()");
   X_STATUS result = CompleteLaunch(path, fs_path);
+  ALOGI("LaunchXexFile: CompleteLaunch returned 0x%08X",
+        static_cast<unsigned>(result));
 
   if (XFAILED(result)) {
+    ALOGE("LaunchXexFile: CompleteLaunch failed");
     return result;
   }
 
+  ALOGI("LaunchXexFile: setting deployment type");
   kernel_state_->deployment_type_ = XDeploymentType::kInstalledToHDD;
 
   if (!kernel::IsSystemTitle(kernel_state_->title_id())) {
+    ALOGI("LaunchXexFile: not a system title, returning");
     return result;
   }
 
+  ALOGI("LaunchXexFile: system title detected");
   const std::string mount_path =
       utf8::find_base_guest_path(kernel_state_->GetExecutableModule()->path());
+  ALOGI("LaunchXexFile: mount_path = %s", mount_path.c_str());
 
   // System related symlinks. This should point to dashboard location in the
   // future.
+  ALOGI("LaunchXexFile: registering \\SystemRoot");
   file_system_->RegisterSymbolicLink("\\SystemRoot", mount_path);
 
+  ALOGI("LaunchXexFile: loading xam.xex");
   auto module = kernel_state_->LoadUserModule("xam.xex");
 
   if (!module) {
+    ALOGI("LaunchXexFile: xam.xex not found, trying $flash_xam.xex");
     module = kernel_state_->LoadUserModule("$flash_xam.xex");
   }
 
   if (module) {
+    ALOGI("LaunchXexFile: finishing load of system module");
     result = kernel_state_->FinishLoadingUserModule(module, false);
+    ALOGI("LaunchXexFile: FinishLoadingUserModule returned 0x%08X",
+          static_cast<unsigned>(result));
+  } else {
+    ALOGW("LaunchXexFile: no system module loaded");
   }
 
+  ALOGI("LaunchXexFile: returning 0x%08X", static_cast<unsigned>(result));
   return result;
 }
 
