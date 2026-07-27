@@ -14,6 +14,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/atomic.h"
+#include "xenia/base/byte_order.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/logging.h"
@@ -489,9 +490,9 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
 }
 
 // ==========================================================================
-// Reservation helpers — implement PPC lwarx/stwcx semantics with a global
-// per-granule generation counter so cross-thread stores invalidate other
-// threads' reservations (data-based CAS alone is ABA-vulnerable).
+// Reservation helpers. A global per-granule generation counter so
+// cross-thread stores invalidate other threads' reservations. A CAS on the
+// value alone would be ABA-vulnerable.
 // ==========================================================================
 namespace {
 
@@ -511,13 +512,22 @@ extern "C" uint64_t TryAcquireReservationHelper(void* raw_context,
   auto* bctx = BackendContextFromRawContext(raw_context);
   auto& granule =
       ReserveGranule(bctx->reserve_helper_, uint32_t(guest_address));
-  // Snapshot the generation before the caller reads the value. The acquire
-  // keeps that load from being hoisted above this one.
+  // snapshot the generation first, the acquire pins the value read after
   bctx->reserve_generation = granule.load(std::memory_order_acquire);
   bctx->reserve_address = uint32_t(guest_address);
-  // lwarx always replaces any reservation this thread already held.
+  // lwarx replaces any reservation this thread already held
   bctx->flags |= 1u << kA64BackendHasReserveBit;
   return 1;
+}
+
+template <typename T>
+T ReservedLoadImpl(ppc::PPCContext* context, uint32_t address) {
+  T* host_address = context->TranslateVirtual<T*>(address);
+  TryAcquireReservationHelper(context, address);
+  auto* bctx = BackendContextFromRawContext(context);
+  const T raw = *host_address;
+  bctx->cached_reserve_value_ = static_cast<uint64_t>(raw);
+  return xe::byte_swap(raw);
 }
 
 template <typename T>
@@ -526,16 +536,16 @@ uint64_t ReservedStoreImpl(void* raw_context, uint64_t guest_address,
   auto* bctx = BackendContextFromRawContext(raw_context);
   const uint32_t reserve_flag = 1u << kA64BackendHasReserveBit;
   const bool had_reservation = (bctx->flags & reserve_flag) != 0;
-  // stwcx. always clears the reservation, whether or not it stores.
+  // stwcx. always clears the reservation, stored or not
   bctx->flags &= ~reserve_flag;
-  // The reservation must be for the address we're storing to.
+  // the reservation must be for the address we're storing to
   if (!had_reservation || bctx->reserve_address != uint32_t(guest_address)) {
     return 0;
   }
 
   auto& granule =
       ReserveGranule(bctx->reserve_helper_, uint32_t(guest_address));
-  // Anyone storing to this granule since our lwarx kills the reservation.
+  // a store to this granule since our lwarx kills the reservation
   if (granule.load(std::memory_order_acquire) != bctx->reserve_generation) {
     return 0;
   }
@@ -552,7 +562,7 @@ uint64_t ReservedStoreImpl(void* raw_context, uint64_t guest_address,
   }
 
   if (exchange_ok) {
-    // The store landed, so kill every other reservation on this granule.
+    // the store landed, so kill other reservations on this granule
     granule.fetch_add(1, std::memory_order_release);
   }
   return exchange_ok ? 1 : 0;
@@ -575,6 +585,34 @@ extern "C" uint64_t ReservedStore64Helper(void* raw_context,
 }
 
 }  // namespace
+
+uint32_t A64Backend::ReservedLoad32(ppc::PPCContext* context,
+                                    uint32_t address) {
+  return ReservedLoadImpl<uint32_t>(context, address);
+}
+
+uint64_t A64Backend::ReservedLoad64(ppc::PPCContext* context,
+                                    uint32_t address) {
+  return ReservedLoadImpl<uint64_t>(context, address);
+}
+
+bool A64Backend::ReservedStore32(ppc::PPCContext* context, uint32_t address,
+                                 uint32_t value) {
+  return ReservedStoreImpl<uint32_t>(
+             context, address,
+             reinterpret_cast<uint64_t>(
+                 context->TranslateVirtual<uint32_t*>(address)),
+             xe::byte_swap(value)) != 0;
+}
+
+bool A64Backend::ReservedStore64(ppc::PPCContext* context, uint32_t address,
+                                 uint64_t value) {
+  return ReservedStoreImpl<uint64_t>(
+             context, address,
+             reinterpret_cast<uint64_t>(
+                 context->TranslateVirtual<uint64_t*>(address)),
+             xe::byte_swap(value)) != 0;
+}
 
 // ==========================================================================
 // ResolveFunction — runtime function resolution.

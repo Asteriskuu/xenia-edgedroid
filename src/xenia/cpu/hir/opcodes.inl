@@ -278,6 +278,14 @@ DEFINE_OPCODE(
     OPCODE_SIG_X,
     OPCODE_FLAG_MEMORY | OPCODE_FLAG_VOLATILE)
 
+// Orders prior loads against later accesses, the acquire half of a lock.
+// Free on a store-ordered host.
+DEFINE_OPCODE(
+    OPCODE_LOAD_BARRIER,
+    "load_barrier",
+    OPCODE_SIG_X,
+    OPCODE_FLAG_MEMORY | OPCODE_FLAG_VOLATILE)
+
 DEFINE_OPCODE(
     OPCODE_MAX,
     "max",

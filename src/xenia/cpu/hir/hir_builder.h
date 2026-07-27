@@ -208,6 +208,7 @@ class HIRBuilder {
   void CacheControl(Value* address, size_t cache_line_size,
                     CacheControlType type);
   void MemoryBarrier();
+  void LoadBarrier();
   void DelayExecution();
   void SetRoundingMode(Value* value);
   Value* Max(Value* value1, Value* value2);
