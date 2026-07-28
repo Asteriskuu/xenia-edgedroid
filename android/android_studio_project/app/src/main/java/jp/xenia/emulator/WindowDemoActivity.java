@@ -29,6 +29,7 @@ public class WindowDemoActivity extends AppCompatActivity implements TextureView
     private boolean layoutReady = false;
     private int surfaceWidth = 0;
     private int surfaceHeight = 0;
+    private Surface mActiveSurface;
 
     static {
         System.loadLibrary("xenia-app");
@@ -67,7 +68,8 @@ public class WindowDemoActivity extends AppCompatActivity implements TextureView
         }
 
         if (layoutReady && gamePath != null) {
-            launchGame(new Surface(surfaceTexture));
+            mActiveSurface = new Surface(surfaceTexture);
+            launchGame(mActiveSurface);
         }
     }
 
@@ -82,6 +84,7 @@ public class WindowDemoActivity extends AppCompatActivity implements TextureView
     public boolean onSurfaceTextureDestroyed(android.graphics.SurfaceTexture surface) {
         Log.i(TAG, "onSurfaceTextureDestroyed");
         surfaceReady = false;
+        mActiveSurface = null;
         nativeShutdown();
         return true;
     }
@@ -105,7 +108,8 @@ public class WindowDemoActivity extends AppCompatActivity implements TextureView
             if (surfaceReady && gamePath != null && textureView != null) {
                 android.graphics.SurfaceTexture surfaceTexture = textureView.getSurfaceTexture();
                 if (surfaceTexture != null) {
-                    launchGame(new Surface(surfaceTexture));
+                    mActiveSurface = new Surface(surfaceTexture);
+                    launchGame(mActiveSurface);
                 }
             }
         }
