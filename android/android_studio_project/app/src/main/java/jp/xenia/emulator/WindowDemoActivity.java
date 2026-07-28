@@ -8,7 +8,8 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.provider.OpenableColumns;
 import android.view.Surface;
-import android.view.TextureView;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.View;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
@@ -19,9 +20,9 @@ import java.io.File;
 import java.io.IOException;
 import android.util.Log;
 
-public class WindowDemoActivity extends AppCompatActivity implements TextureView.SurfaceTextureListener, View.OnLayoutChangeListener {
+public class WindowDemoActivity extends AppCompatActivity implements SurfaceHolder.Callback {
     private static final String TAG = "WindowDemoActivity";
-    private TextureView textureView;
+    private SurfaceView surfaceView;
     private HandlerThread rendererThread;
     private Handler rendererHandler;
     private String gamePath = null;
@@ -42,77 +43,50 @@ public class WindowDemoActivity extends AppCompatActivity implements TextureView
 
         gamePath = getIntent().getStringExtra("game_path");
 
-        textureView = findViewById(R.id.window_demo_texture_view);
-        if (textureView == null) {
-            Log.e(TAG, "TextureView not found in layout!");
+        surfaceView = findViewById(R.id.window_demo_surface_view);
+        if (surfaceView == null) {
+            Log.e(TAG, "SurfaceView not found in layout!");
             finish();
             return;
         }
 
-        textureView.setSurfaceTextureListener(this);
-        textureView.addOnLayoutChangeListener(this);
+        surfaceView.getHolder().addCallback(this);
     }
 
     @Override
-    public void onSurfaceTextureAvailable(android.graphics.SurfaceTexture surfaceTexture, int width, int height) {
-        Log.i(TAG, "onSurfaceTextureAvailable: " + width + "x" + height);
-        
-        surfaceWidth = width;
-        surfaceHeight = height;
+    public void surfaceCreated(SurfaceHolder holder) {
+        Log.i(TAG, "surfaceCreated");
         surfaceReady = true;
+        mActiveSurface = holder.getSurface();
 
         if (rendererThread == null) {
             rendererThread = new HandlerThread("XeniaRenderer");
             rendererThread.start();
             rendererHandler = new Handler(rendererThread.getLooper());
         }
-
-        if (layoutReady && gamePath != null) {
-            mActiveSurface = new Surface(surfaceTexture);
-            launchGame(mActiveSurface);
-        }
     }
 
     @Override
-    public void onSurfaceTextureSizeChanged(android.graphics.SurfaceTexture surface, int width, int height) {
-        Log.i(TAG, "onSurfaceTextureSizeChanged: " + width + "x" + height);
+    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        Log.i(TAG, "surfaceChanged: " + width + "x" + height);
         surfaceWidth = width;
         surfaceHeight = height;
-    }
-
-    @Override
-    public boolean onSurfaceTextureDestroyed(android.graphics.SurfaceTexture surface) {
-        Log.i(TAG, "onSurfaceTextureDestroyed");
-        surfaceReady = false;
-        mActiveSurface = null;
-        nativeShutdown();
-        return true;
-    }
-
-    @Override
-    public void onSurfaceTextureUpdated(android.graphics.SurfaceTexture surface) {
-    }
-
-    @Override
-    public void onLayoutChange(android.view.View v, int left, int top, int right, int bottom,
-                             int oldLeft, int oldTop, int oldRight, int oldBottom) {
-        int width = right - left;
-        int height = bottom - top;
 
         if (width > 0 && height > 0 && !layoutReady) {
-            Log.i(TAG, "Layout finalized: " + width + "x" + height);
             layoutReady = true;
-            surfaceWidth = width;
-            surfaceHeight = height;
-
-            if (surfaceReady && gamePath != null && textureView != null) {
-                android.graphics.SurfaceTexture surfaceTexture = textureView.getSurfaceTexture();
-                if (surfaceTexture != null) {
-                    mActiveSurface = new Surface(surfaceTexture);
-                    launchGame(mActiveSurface);
-                }
+            if (surfaceReady && gamePath != null) {
+                launchGame(mActiveSurface);
             }
         }
+    }
+
+    @Override
+    public void surfaceDestroyed(SurfaceHolder holder) {
+        Log.i(TAG, "surfaceDestroyed");
+        surfaceReady = false;
+        layoutReady = false;
+        mActiveSurface = null;
+        nativeShutdown();
     }
 
     private void launchGame(Surface surface) {
