@@ -343,7 +343,7 @@ void XThread::FreeStack() {
 
 X_STATUS XThread::Create() {
   ALOGI(
-      "XThread::Create: entered thread_id={:08X} stack_size={} flags=0x{:08X}",
+      "XThread::Create: entered thread_id=%08X stack_size=%zu flags=0x%08X",
       thread_id_, creation_params_.stack_size, creation_params_.creation_flags);
 
   // Thread kernel object.
@@ -359,7 +359,7 @@ X_STATUS XThread::Create() {
     ALOGW("XThread::Create: stack allocation failed");
     return X_STATUS_NO_MEMORY;
   }
-  ALOGI("XThread::Create: stack allocated stack_limit={:08X} stack_base={:08X}",
+  ALOGI("XThread::Create: stack allocated stack_limit=%08X stack_base=%08X",
         stack_limit_, stack_base_);
 
   // Allocate TLS block.
@@ -379,8 +379,8 @@ X_STATUS XThread::Create() {
     tls_extended_size = tls_header->data_size;
   }
 
-  ALOGI("XThread::Create: tls_slots={} tls_extended_size={}", tls_slots,
-        tls_extended_size);
+  ALOGI("XThread::Create: tls_slots=%u tls_extended_size=%u",
+        tls_slots, tls_extended_size);
 
   // Allocate both the slots and the extended data.
   // Some TLS is compiled with the binary (declspec(thread)) vars. The game
@@ -394,7 +394,7 @@ X_STATUS XThread::Create() {
     return X_STATUS_NO_MEMORY;
   }
 
-  ALOGI("XThread::Create: TLS allocated static={:08X} dynamic={:08X} total={}",
+  ALOGI("XThread::Create: TLS allocated static=%08X dynamic=%08X total=%u",
         tls_static_address_, tls_dynamic_address_, tls_total_size_);
 
   // Zero all of TLS.
@@ -426,7 +426,7 @@ X_STATUS XThread::Create() {
     ALOGW("XThread::Create: unable to allocate thread state block");
     return X_STATUS_NO_MEMORY;
   }
-  ALOGI("XThread::Create: PCR allocated at {:08X}", pcr_address_);
+  ALOGI("XThread::Create: PCR allocated at %08X", pcr_address_);
 
   // Allocate processor thread state.
   // This is thread safe.
@@ -441,7 +441,7 @@ X_STATUS XThread::Create() {
 
   uint8_t cpu_index = GetFakeCpuNumber(
       static_cast<uint8_t>(creation_params_.creation_flags >> 24));
-  ALOGI("XThread::Create: cpu_index={}", cpu_index);
+  ALOGI("XThread::Create: cpu_index=%u", static_cast<unsigned>(cpu_index));
 
   // Initialize the KTHREAD object.
   InitializeGuestObject();
@@ -503,7 +503,8 @@ X_STATUS XThread::Create() {
 
       // Set name immediately, if we have one.
       thread_->set_name(thread_name_);
-      ALOGI("XThread::Create: host thread name set to '{}'", thread_name_);
+      ALOGI("XThread::Create: host thread name set to '%s'",
+            thread_name_.c_str());
 
       // Profiler needs to know about the thread.
       xe::Profiler::ThreadEnter(thread_name_.c_str());
@@ -546,7 +547,7 @@ X_STATUS XThread::Create() {
       thread_->set_priority(creation_params_.creation_flags & 0x20 ? 1 : 0);
     }
 
-    ALOGI("XThread::Create: host thread created system_id={:08X}",
+    ALOGI("XThread::Create: host thread created system_id=%08X",
           thread_->system_id());
   }
 
