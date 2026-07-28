@@ -9,6 +9,7 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -378,7 +379,7 @@ dword_result_t XamShowNuiTroubleshooterUI_entry(dword_t user_index,
               ->Then(&fence);
         })) {
       kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-      fence.Wait();
+      GuestScheduler::WaitOnFence(fence);
       kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
     }
   }

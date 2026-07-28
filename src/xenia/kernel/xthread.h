@@ -462,22 +462,19 @@ class XThread : public XObject, public cpu::Thread {
 
   int32_t priority() const { return priority_; }
   int32_t QueryPriority();
+  // KeQueryBasePriorityThread: the base priority as a signed increment relative
+  // to the priority-class base, NOT the absolute priority.
+  int32_t QueryBasePriority();
   void SetPriority(int32_t increment);
+  // KeSetBasePriorityThread: |increment| is a signed offset from the priority-
+  // class base, not an absolute priority. Returns the previous increment.
+  int32_t SetBasePriority(int32_t increment);
 
-  // Called periodically (~20ms) by KernelState's timestamp timer to simulate
-  // the Xenon scheduler's quantum-based priority decay for non-real-time
-  // threads (base_priority < 18).  Threads that run for longer than one
-  // quantum (~20ms) have their effective priority decayed toward the base,
-  // which causes them to drop into lower host priority buckets and prevents
-  // starvation.  On the first decay step the accumulated priority boost is
-  // also drained.
-  void CheckQuantumAndDecay();
-  // Called when a thread wakes from a kernel wait.  Applies a priority
-  // boost of |increment| above base_priority (matching the Xenon kernel's
-  // unwait-boost behavior) and restarts the quantum timer.  The boost is
-  // drained on the next quantum expiry via CheckQuantumAndDecay().
-  // If increment is 0 or the thread has boost disabled, the priority is
-  // simply restored to base_priority.
+  // Called at a guest quantum end. Decays a non-real-time thread by boost + 1
+  // levels floored at base, then clears the boost.
+  void OnQuantumEnd();
+  // Called when a thread wakes from a kernel wait. Applies the Xenon unwait
+  // boost of |increment| above base, upward only and clamped to max dynamic.
   void BoostOnWake(int32_t increment);
 
   // Xbox thread IDs:
@@ -517,14 +514,34 @@ class XThread : public XObject, public cpu::Thread {
   // Create().
   xe::threading::Fiber* fiber() const { return fiber_.get(); }
 
+  // Drops the self reference from Create and any surviving handle. The delete
+  // point for a fiber thread, so the caller must ensure it is not executing.
+  void ReclaimExited();
+
+  // The object this thread is registered on as a cooperative waiter, owned by
+  // XObject::Enter/LeaveCooperativeWait. Atomic because the waiting fiber
+  // clears it just as a terminating thread may be reading it, and either order
+  // is fine since a redundant release is a no-op.
+  XObject* cooperative_wait_object() const {
+    return cooperative_wait_object_.load(std::memory_order_acquire);
+  }
+  void set_cooperative_wait_object(XObject* object) {
+    cooperative_wait_object_.store(object, std::memory_order_release);
+  }
+
   // Intrusive scheduler links, owned exclusively by GuestScheduler and only
   // touched under its lock. Embedding them here keeps the queue operations
   // allocation-free. A thread is in at most one of the ready or blocked lists.
   struct SchedulerLinks {
     XThread* ready_next = nullptr;  // link for the ready OR blocked list
-    bool queued = false;            // in the ready list
-    bool blocked = false;           // parked in the blocked (waiting) list
-    bool has_run = false;           // diagnostic: dispatched at least once
+    int cpu = -1;                   // CPU owning the list we are on
+    int queued_prio = 0;     // priority level of the ready list we are on
+    bool queued = false;     // in the ready list
+    bool blocked = false;    // parked in the blocked (waiting) list
+    bool suspended = false;  // parked with a nonzero suspend count
+    bool running = false;    // executing on a dispatch thread
+    bool preempted = false;  // slice cut short by a higher-priority thread
+    bool has_run = false;    // diagnostic: dispatched at least once
   };
   SchedulerLinks& scheduler_links() { return scheduler_links_; }
 
@@ -553,6 +570,10 @@ class XThread : public XObject, public cpu::Thread {
 
   void DeliverAPCs();
   void RundownAPCs();
+
+  // Publishes a new effective priority to the guest KTHREAD field, the host
+  // thread and the scheduler's ready queue. Every change goes through here.
+  void PublishPriority(int32_t priority);
 
   xe::threading::WaitHandle* GetWaitHandle() override {
     // Under the cooperative scheduler there is no host thread, so a
@@ -584,7 +605,6 @@ class XThread : public XObject, public cpu::Thread {
   int32_t priority_ = 0;       // current effective priority (may be decayed)
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this
   int32_t boost_amount_ = 0;   // accumulated priority boost above base
-  uint64_t quantum_start_ms_ = 0;  // host uptime (ms) when quantum last reset
 
 #if !XE_PLATFORM_WIN32
   // Condition variable for thread self-suspension.
@@ -605,6 +625,10 @@ class XThread : public XObject, public cpu::Thread {
   // fiber instead of its own host thread (cpu::Thread::thread_).
   std::unique_ptr<xe::threading::Fiber> fiber_;
   SchedulerLinks scheduler_links_;
+  // Set by the first ReclaimExited so both terminal paths reclaim once.
+  std::atomic<bool> self_reference_dropped_{false};
+  // Owned by XObject::Enter/LeaveCooperativeWait.
+  std::atomic<XObject*> cooperative_wait_object_{nullptr};
   // Signaled when a fiber-backed thread exits, so waits on the thread object
   // resolve (the host thread handle that normally serves this role is absent).
   std::unique_ptr<xe::threading::Event> fiber_exit_event_;

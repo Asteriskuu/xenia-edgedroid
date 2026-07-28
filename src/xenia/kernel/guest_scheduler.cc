@@ -14,11 +14,15 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/math.h"
+#include "xenia/base/mutex.h"
+#include "xenia/cpu/backend/backend.h"
+#include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/processor.h"
+#include "xenia/cpu/stack_walker.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xthread.h"
-
-DECLARE_bool(ignore_thread_affinities);
 
 namespace xe {
 namespace kernel {
@@ -27,11 +31,62 @@ namespace kernel {
 // non-dispatch thread. Set by each CPU's RunLoop.
 static thread_local int t_current_cpu = -1;
 
-GuestScheduler::GuestScheduler(KernelState* kernel_state)
-    : kernel_state_(kernel_state) {
-  int n = static_cast<int>(cvars::guest_scheduler_cpus);
-  host_cpu_count_ = n < 1 ? 1 : (n > kMaxCpus ? kMaxCpus : n);
+// Off a dispatch thread there is no CPU to index, so the caller must bail.
+static bool OnDispatchThread(const char* what) {
+  if (t_current_cpu >= 0) {
+    return true;
+  }
+  XELOGW("GuestScheduler: {} called off a dispatch thread, ignoring", what);
+  return false;
 }
+
+// Clamps a thread's priority to the ready-queue index range [0, 31].
+static int ClampPriority(int32_t priority) {
+  return priority < 0 ? 0 : (priority > 31 ? 31 : priority);
+}
+
+// JIT safepoint handler, yields the fiber once its timeslice has expired. The
+// deferred cases leave the deadline expired, so the next safepoint retries.
+static void PreemptCurrentFiber(void* /*raw_context*/) {
+  XThread* self = XThread::GetCurrentFiberThread();
+  if (!self) {
+    return;
+  }
+  // A co-resident fiber would re-enter the recursive lock on this host thread.
+  if (xe::global_critical_region::is_held_by_current_thread()) {
+    return;
+  }
+  // At DISPATCH_LEVEL and above the console masks the decrementer.
+  auto* context = self->thread_state()->context();
+  auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+  if (kpcr->current_irql >= 2) {
+    return;
+  }
+  // Involuntary quantum end, so no yield to a lower-priority thread.
+  self->kernel_state()->guest_scheduler()->YieldCurrentThread(true, false);
+}
+
+// Raw host ticks per us, so a quantum becomes a JIT deadline, 0 if unusable.
+static double CalibrateTicksPerUs() {
+  uint64_t qpc_freq = Clock::host_tick_frequency_platform();
+  uint64_t qpc0 = Clock::host_tick_count_platform();
+  uint64_t tsc0 = Clock::host_tick_count_raw();
+  uint64_t qpc_end = qpc0 + qpc_freq / 2000;  // ~0.5 ms
+  while (Clock::host_tick_count_platform() < qpc_end) {
+  }
+  uint64_t qpc1 = Clock::host_tick_count_platform();
+  uint64_t tsc1 = Clock::host_tick_count_raw();
+  double secs = qpc1 > qpc0 ? double(qpc1 - qpc0) / double(qpc_freq) : 0.0;
+  double per_us = secs > 0.0 ? double(tsc1 - tsc0) / (secs * 1e6) : 0.0;
+  // Spans an x86 TSC at 1-6 GHz and an ARM64 generic timer at 1-100 MHz.
+  if (per_us < 0.5 || per_us > 100000.0) {
+    return 0.0;
+  }
+  return per_us;
+}
+
+GuestScheduler::GuestScheduler(KernelState* kernel_state)
+    : kernel_state_(kernel_state) {}
 
 GuestScheduler::~GuestScheduler() { Shutdown(); }
 
@@ -52,30 +107,40 @@ void GuestScheduler::EnsureStarted() {
   if (!started_.compare_exchange_strong(expected, true)) {
     return;
   }
+  // Not in the ctor, which runs before per-title cvar overrides are applied.
+  int n = static_cast<int>(cvars::guest_scheduler_cpus);
+  host_cpu_count_ = n < 1 ? 1 : (n > kMaxCpus ? kMaxCpus : n);
+
+  xe::cpu::backend::preempt_yield_handler = &PreemptCurrentFiber;
+  double ticks_per_us = CalibrateTicksPerUs();
+  quantum_ticks_ =
+      static_cast<uint64_t>(ticks_per_us * cvars::guest_scheduler_quantum_us);
+  if (quantum_ticks_) {
+    XELOGI("GuestScheduler: preemption slice = {} us ({} ticks)",
+           uint32_t(cvars::guest_scheduler_quantum_us), quantum_ticks_);
+  } else {
+    // Priority preemption still works, it expires the deadline outright.
+    XELOGW(
+        "GuestScheduler: no timeslice preemption ({}), fibers only switch on "
+        "voluntary yields",
+        ticks_per_us > 0.0 ? "guest_scheduler_quantum_us is 0"
+                           : "host tick counter did not calibrate");
+  }
+
   for (int i = 0; i < host_cpu_count_; ++i) {
     cpus_[i].ready_event = xe::threading::Event::CreateAutoResetEvent(false);
   }
-  // Pin each dispatch thread to its own host logical processor so the host
-  // scheduler keeps them genuinely parallel instead of migrating them or
-  // stacking several on one core. Gated on the affinity cvar, and only when
-  // there are enough host cores to spare.
-  bool pin = !cvars::ignore_thread_affinities &&
-             xe::threading::logical_processor_count() >=
-                 static_cast<uint32_t>(host_cpu_count_);
   for (int i = 0; i < host_cpu_count_; ++i) {
     xe::threading::Thread::CreationParameters params;
     cpus_[i].host_thread =
         xe::threading::Thread::Create(params, [this, i]() { RunLoop(i); });
     cpus_[i].host_thread->set_name(std::string("Guest CPU ") +
                                    std::to_string(i));
-    if (pin) {
-      cpus_[i].host_thread->set_affinity_mask(uint64_t(1) << i);
-    }
   }
 }
 
 void GuestScheduler::Shutdown() {
-  if (!started_.load()) {
+  if (!started_.load() && !io_started_.load()) {
     return;
   }
   shutting_down_.store(true);
@@ -84,6 +149,9 @@ void GuestScheduler::Shutdown() {
       cpu.ready_event->Set();
     }
   }
+  if (io_event_) {
+    io_event_->Set();
+  }
   for (Cpu& cpu : cpus_) {
     if (cpu.host_thread) {
       // Join before reset(): reset() only closes the handle.
@@ -91,27 +159,40 @@ void GuestScheduler::Shutdown() {
       cpu.host_thread.reset();
     }
   }
+  // After the dispatch threads, so no fiber is still watching a BlockingCall.
+  if (io_thread_) {
+    xe::threading::Wait(io_thread_.get(), false);
+    io_thread_.reset();
+  }
 }
 
-void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index) {
+void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index,
+                                  bool yield_to_other) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     auto& links = thread->scheduler_links();
-    // Blocked threads move via RereadyBlocked, not here, since ready and
-    // blocked share ready_next and a thread must be in only one list.
-    assert_false(links.blocked);
+    // The single gate for every "make it runnable" request, so a state that
+    // already owns its wake-up is a silent no-op. Blocked and suspended move
+    // via RereadyBlocked and ResumeThread, all three lists sharing ready_next.
+    if (links.blocked || links.suspended) {
+      return;
+    }
+    // A running fiber's context is not saved until it yields, so only the
+    // dispatch thread that owns it, links.cpu, may re-queue it.
+    if (links.running && links.cpu != t_current_cpu) {
+      return;
+    }
     if (links.queued) {
       return;
     }
     links.queued = true;
-    links.ready_next = nullptr;
-    Cpu& cpu = cpus_[cpu_index];
-    if (cpu.ready_tail) {
-      cpu.ready_tail->scheduler_links().ready_next = thread;
-    } else {
-      cpu.ready_head = thread;
+    links.cpu = cpu_index;
+    bool at_head = links.preempted;
+    links.preempted = false;
+    LinkReadyLocked(cpus_[cpu_index], thread, at_head);
+    if (yield_to_other) {
+      cpus_[cpu_index].yield_to_other = thread;
     }
-    cpu.ready_tail = thread;
   }
   if (cpus_[cpu_index].ready_event) {
     cpus_[cpu_index].ready_event->Set();
@@ -126,26 +207,143 @@ void GuestScheduler::MarkReady(XThread* thread) {
       KTHREAD_STATE_TERMINATED) {
     return;
   }
-  // Affinity placement: only safe because the caller guarantees the thread is
-  // not currently running (a new thread, or one woken from a wait/suspend).
   EnqueueReady(thread, CpuOf(thread));
+}
+
+void GuestScheduler::ResumeThread(XThread* thread) {
+  assert_not_null(thread);
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    auto& links = thread->scheduler_links();
+    if (links.suspended) {
+      Cpu& cpu = cpus_[links.cpu];
+      UnlinkLocked(cpu.suspended_head, cpu.suspended_tail, thread);
+      links.suspended = false;
+      links.ready_next = nullptr;
+    }
+  }
+  // Only enqueues if it was never queued, e.g. created suspended.
+  MarkReady(thread);
+}
+
+bool GuestScheduler::ParkSuspended(XThread* thread, int cpu_index) {
+  std::lock_guard<std::mutex> lock(lock_);
+  auto& links = thread->scheduler_links();
+  // Re-read under the lock, a Resume racing the dispatcher's check would have
+  // found us not yet parked and parking anyway would strand the thread.
+  if (thread->suspend_count() == 0) {
+    return false;
+  }
+  // Clearing running last, so it is never both unowned and unlisted.
+  links.suspended = true;
+  links.cpu = cpu_index;
+  links.ready_next = nullptr;
+  Cpu& cpu = cpus_[cpu_index];
+  LinkTailLocked(cpu.suspended_head, cpu.suspended_tail, thread);
+  links.running = false;
+  return true;
+}
+
+XThread* GuestScheduler::HighestReadyExcept(const Cpu& cpu, XThread* except) {
+  uint32_t summary = cpu.ready_summary;
+  while (summary) {
+    int level = 31 - xe::lzcnt(summary);
+    summary &= ~(uint32_t(1) << level);
+    XThread* head = cpu.ready_head[level];
+    if (head != except) {
+      return head;
+    }
+    // Its successor outranks anything on a lower level.
+    if (except->scheduler_links().ready_next) {
+      return except->scheduler_links().ready_next;
+    }
+  }
+  return nullptr;
 }
 
 XThread* GuestScheduler::DequeueReady(int cpu_index) {
   std::lock_guard<std::mutex> lock(lock_);
   Cpu& cpu = cpus_[cpu_index];
-  XThread* thread = cpu.ready_head;
-  if (!thread) {
+  if (cpu.ready_summary == 0) {
     return nullptr;
   }
+  // Strict priority alone lets a high-priority yield-spinner deadlock on the
+  // lower-priority co-resident it depends on, so a voluntary yield opts out.
+  XThread* yielder = cpu.yield_to_other;
+  cpu.yield_to_other = nullptr;
+
+  // Highest set bit = highest ready priority.
+  int level = 31 - xe::lzcnt(cpu.ready_summary);
+  XThread* thread = cpu.ready_head[level];
+  if (yielder && thread == yielder) {
+    if (XThread* other = HighestReadyExcept(cpu, yielder)) {
+      // |other| may sit mid-list, so unlink it generally rather than as a head.
+      int other_level = other->scheduler_links().queued_prio;
+      UnlinkLocked(cpu.ready_head[other_level], cpu.ready_tail[other_level],
+                   other);
+      if (!cpu.ready_head[other_level]) {
+        cpu.ready_summary &= ~(uint32_t(1) << other_level);
+      }
+      auto& other_links = other->scheduler_links();
+      other_links.ready_next = nullptr;
+      other_links.queued = false;
+      other_links.running = true;
+      return other;
+    }
+  }
+
   auto& links = thread->scheduler_links();
-  cpu.ready_head = links.ready_next;
-  if (!cpu.ready_head) {
-    cpu.ready_tail = nullptr;
+  cpu.ready_head[level] = links.ready_next;
+  if (!cpu.ready_head[level]) {
+    cpu.ready_tail[level] = nullptr;
+    cpu.ready_summary &= ~(uint32_t(1) << level);
   }
   links.ready_next = nullptr;
   links.queued = false;
+  // Owned from here, not from SwitchTo, because in between it is in no list and
+  // a concurrent MarkReady would queue it onto another CPU.
+  links.running = true;
   return thread;
+}
+
+void GuestScheduler::LinkTailLocked(XThread*& head, XThread*& tail,
+                                    XThread* thread) {
+  if (tail) {
+    tail->scheduler_links().ready_next = thread;
+  } else {
+    head = thread;
+  }
+  tail = thread;
+}
+
+void GuestScheduler::LinkHeadLocked(XThread*& head, XThread*& tail,
+                                    XThread* thread) {
+  thread->scheduler_links().ready_next = head;
+  head = thread;
+  if (!tail) {
+    tail = thread;
+  }
+}
+
+void GuestScheduler::LinkReadyLocked(Cpu& cpu, XThread* thread, bool at_head) {
+  auto& links = thread->scheduler_links();
+  int prio = ClampPriority(thread->priority());
+  links.queued_prio = prio;
+  links.ready_next = nullptr;
+  if (at_head) {
+    LinkHeadLocked(cpu.ready_head[prio], cpu.ready_tail[prio], thread);
+  } else {
+    LinkTailLocked(cpu.ready_head[prio], cpu.ready_tail[prio], thread);
+  }
+  cpu.ready_summary |= uint32_t(1) << prio;
+  // Outranking the running fiber expires its quantum, so its next JIT
+  // safepoint yields and the dispatcher picks us.
+  XThread* running = cpu.current_thread;
+  if (running && running != thread &&
+      prio > ClampPriority(running->priority())) {
+    running->scheduler_links().preempted = true;
+    running->thread_state()->context()->quantum_deadline = 0;
+  }
 }
 
 void GuestScheduler::UnlinkLocked(XThread*& head, XThread*& tail,
@@ -165,23 +363,59 @@ void GuestScheduler::UnlinkLocked(XThread*& head, XThread*& tail,
   }
 }
 
-void GuestScheduler::ForgetThread(XThread* thread) {
+void GuestScheduler::RequeueForPriority(XThread* thread) {
   std::lock_guard<std::mutex> lock(lock_);
   auto& links = thread->scheduler_links();
-  // The thread is in at most one CPU's list, but we don't track which, so scan
-  // all of them. Rare path (external Terminate of a queued/blocked thread).
-  if (links.queued) {
-    for (Cpu& cpu : cpus_) {
-      UnlinkLocked(cpu.ready_head, cpu.ready_tail, thread);
-    }
-    links.queued = false;
-  } else if (links.blocked) {
-    for (Cpu& cpu : cpus_) {
-      UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
-    }
-    links.blocked = false;
+  if (!links.queued || links.cpu < 0) {
+    return;
   }
+  Cpu& cpu = cpus_[links.cpu];
+  int old = links.queued_prio;
+  UnlinkLocked(cpu.ready_head[old], cpu.ready_tail[old], thread);
+  if (!cpu.ready_head[old]) {
+    cpu.ready_summary &= ~(uint32_t(1) << old);
+  }
+  LinkReadyLocked(cpu, thread, false);
+}
+
+bool GuestScheduler::ForgetThread(XThread* thread) {
+  std::lock_guard<std::mutex> lock(lock_);
+  auto& links = thread->scheduler_links();
+  // A thread that ever ran has a live fiber stack and one a dispatch thread
+  // owns is about to be switched to, so neither may be freed.
+  const bool reclaimable = !links.has_run && !links.running;
+  if (links.cpu >= 0) {
+    Cpu& cpu = cpus_[links.cpu];
+    if (links.queued) {
+      int prio = links.queued_prio;
+      UnlinkLocked(cpu.ready_head[prio], cpu.ready_tail[prio], thread);
+      if (!cpu.ready_head[prio]) {
+        cpu.ready_summary &= ~(uint32_t(1) << prio);
+      }
+    } else if (links.blocked) {
+      UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
+    } else if (links.suspended) {
+      UnlinkLocked(cpu.suspended_head, cpu.suspended_tail, thread);
+    }
+  }
+  links.queued = false;
+  links.blocked = false;
+  links.suspended = false;
   links.ready_next = nullptr;
+  // Drop every raw pointer a CPU may still hold to it. A fiber detaching itself
+  // keeps current_thread, which SwitchTo clears on the way out.
+  for (Cpu& cpu : cpus_) {
+    if (cpu.yield_to_other == thread) {
+      cpu.yield_to_other = nullptr;
+    }
+    if (cpu.exited_thread == thread) {
+      cpu.exited_thread = nullptr;
+    }
+    if (cpu.current_thread == thread && !links.running) {
+      cpu.current_thread = nullptr;
+    }
+  }
+  return reclaimable;
 }
 
 void GuestScheduler::SwitchTo(XThread* next) {
@@ -190,33 +424,225 @@ void GuestScheduler::SwitchTo(XThread* next) {
   auto& links = next->scheduler_links();
   if (!links.has_run) {
     links.has_run = true;
+    dispatched_any_.store(true);
     XELOGI("GuestScheduler: first run tid={:08X} '{}'", next->thread_id(),
            next->thread_name());
   }
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    assert_true(links.running);
+    cpus_[t_current_cpu].current_thread = next;
+  }
   XThread::SetCurrentThread(next);
   next->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_RUNNING;
+  // With no slice never expire on time alone, a zero deadline would preempt at
+  // every safepoint.
+  next->thread_state()->context()->quantum_deadline =
+      quantum_ticks_ ? Clock::host_tick_count_raw() + quantum_ticks_
+                     : UINT64_MAX;
   next->fiber()->SwitchTo();
   // Back on the idle fiber.
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    links.running = false;
+    cpus_[t_current_cpu].current_thread = nullptr;
+  }
   XThread::SetCurrentThread(nullptr);
 }
 
+void GuestScheduler::ReportGlobalLockHazard() {
+  static constexpr size_t kMaxReports = 32;
+  static constexpr size_t kMaxFrames = 32;
+
+  XThread* self = XThread::GetCurrentThread();
+  uint32_t tid = self ? self->thread_id() : 0;
+  const char* name = self ? self->thread_name().c_str() : "?";
+
+  cpu::StackWalker* stack_walker =
+      kernel_state_->processor() ? kernel_state_->processor()->stack_walker()
+                                 : nullptr;
+  if (!stack_walker) {
+    if (!global_lock_hazard_saturated_.exchange(true)) {
+      XELOGW(
+          "GuestScheduler: fiber tid={:08X} '{}' yielded while holding the "
+          "global critical region (no stack walker to name the shim).",
+          tid, name);
+    }
+    return;
+  }
+
+  uint64_t frame_pcs[kMaxFrames] = {};
+  uint64_t stack_hash = 0;
+  size_t frame_count =
+      stack_walker->CaptureStackTrace(frame_pcs, 0, kMaxFrames, &stack_hash);
+  if (!frame_count) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(global_lock_hazard_mutex_);
+    if (!global_lock_hazard_stacks_.insert(stack_hash).second) {
+      return;  // Already reported.
+    }
+    if (global_lock_hazard_stacks_.size() >= kMaxReports) {
+      global_lock_hazard_saturated_.store(true, std::memory_order_relaxed);
+    }
+  }
+
+  cpu::StackFrame frames[kMaxFrames] = {};
+  stack_walker->ResolveStack(frame_pcs, frames, frame_count);
+
+  uint32_t guest_lr = self ? uint32_t(self->thread_state()->context()->lr) : 0;
+  // The region is a scoped lock, so the acquiring shim is an ancestor frame.
+  XELOGW(
+      "GuestScheduler: fiber tid={:08X} '{}' yielded while holding the global "
+      "critical region (guest lr={:08X}). A co-resident fiber can now re-enter "
+      "the recursive lock. Yield path host stack:",
+      tid, name, guest_lr);
+  for (size_t i = 0; i < frame_count; ++i) {
+    cpu::StackFrame& frame = frames[i];
+    if (frame.type == cpu::StackFrame::Type::kHost) {
+      XELOGW("  #{:02} host  {:016X} {}", i, frame.host_pc,
+             frame.host_symbol.name[0] ? frame.host_symbol.name : "?");
+    } else {
+      XELOGW("  #{:02} guest {:016X} pc={:08X}", i, frame.host_pc,
+             frame.guest_pc);
+    }
+  }
+}
+
 void GuestScheduler::YieldToScheduler() {
-  assert_true(t_current_cpu >= 0);
+  if (!OnDispatchThread("YieldToScheduler")) {
+    return;
+  }
+  if (!global_lock_hazard_saturated_.load(std::memory_order_relaxed) &&
+      xe::global_critical_region::is_held_by_current_thread()) {
+    ReportGlobalLockHazard();
+  }
   cpus_[t_current_cpu].idle_fiber->SwitchTo();
 }
 
-void GuestScheduler::YieldCurrentThread() {
-  assert_true(t_current_cpu >= 0);
+void GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
+  if (!OnDispatchThread("YieldCurrentThread")) {
+    return;
+  }
   XThread* self = XThread::GetCurrentThread();
-  // Re-queue on the current CPU, not the affinity CPU: the running fiber's
-  // context isn't saved until it yields below, so another CPU must not be able
-  // to grab it yet.
-  EnqueueReady(self, t_current_cpu);
+  // A slice cut short by a higher-priority thread is not a quantum end, that
+  // thread re-runs at the head instead.
+  if (quantum_end && !self->scheduler_links().preempted) {
+    self->OnQuantumEnd();
+  }
+  // Re-queue on the current CPU, not the affinity CPU, because our context is
+  // not saved until the yield below and another CPU must not grab it yet.
+  EnqueueReady(self, t_current_cpu, to_lower);
   YieldToScheduler();
 }
 
+void GuestScheduler::SpinYield(std::chrono::milliseconds host_sleep) {
+  XThread* self = XThread::GetCurrentFiberThread();
+  if (self) {
+    // The holder we spin on may be a fiber queued behind us on this same
+    // dispatch thread, so yielding the host thread would never let it run.
+    auto* scheduler = self->kernel_state()->guest_scheduler();
+    if (host_sleep.count()) {
+      // Parking rather than re-queueing, so a lone fiber idles instead of
+      // spinning its dispatch thread at full speed.
+      scheduler->BlockCurrentThread();
+    } else {
+      scheduler->YieldCurrentThread(false);
+    }
+    return;
+  }
+  if (host_sleep.count()) {
+    xe::threading::Sleep(host_sleep);
+  } else {
+    xe::threading::MaybeYield();
+  }
+}
+
+void GuestScheduler::EnsureIoWorker() {
+  std::call_once(io_once_, [this]() {
+    io_event_ = xe::threading::Event::CreateAutoResetEvent(false);
+    xe::threading::Thread::CreationParameters params;
+    io_thread_ =
+        xe::threading::Thread::Create(params, [this]() { IoWorkerLoop(); });
+    io_thread_->set_name("Guest I/O");
+    io_started_.store(true);
+  });
+}
+
+bool GuestScheduler::CurrentThreadOffloadsBlockingCalls() {
+  if (!enabled() || !XThread::GetCurrentFiberThread()) {
+    return false;
+  }
+  // The offloaded call can need the global critical region itself, and only
+  // this fiber can release it, so holding it means running inline.
+  return !xe::global_critical_region::is_held_by_current_thread();
+}
+
+void GuestScheduler::WaitOnFence(xe::threading::Fence& fence) {
+  XThread* self = enabled() ? XThread::GetCurrentFiberThread() : nullptr;
+  if (!self) {
+    fence.Wait();
+    return;
+  }
+  auto* scheduler = self->kernel_state()->guest_scheduler();
+  while (!fence.TryWait()) {
+    scheduler->BlockCurrentThread();
+  }
+}
+
+void GuestScheduler::RunBlockingHostCallOffloaded(
+    const std::function<void()>& fn) {
+  EnsureIoWorker();
+  BlockingCall call;
+  call.fn = &fn;
+  {
+    std::lock_guard<std::mutex> lock(io_lock_);
+    io_queue_.push(&call);
+  }
+  io_event_->Set();
+  while (!call.done.load(std::memory_order_acquire)) {
+    BlockCurrentThread();
+  }
+}
+
+void GuestScheduler::IoWorkerLoop() {
+  while (!shutting_down_.load()) {
+    BlockingCall* call = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(io_lock_);
+      if (!io_queue_.empty()) {
+        call = io_queue_.front();
+        io_queue_.pop();
+      }
+    }
+    if (!call) {
+      xe::threading::Wait(io_event_.get(), false);
+      continue;
+    }
+    (*call->fn)();
+    call->done.store(true, std::memory_order_release);
+    // Wake the parked caller instead of leaving it to the backoff timer.
+    WakeAll();
+  }
+}
+
+void GuestScheduler::WakeAll() {
+  if (!started_.load()) {
+    return;
+  }
+  for (int i = 0; i < host_cpu_count_; ++i) {
+    if (cpus_[i].has_blocked.load(std::memory_order_relaxed) &&
+        cpus_[i].ready_event) {
+      cpus_[i].ready_event->Set();
+    }
+  }
+}
+
 void GuestScheduler::NotifyThreadExited(XThread* thread) {
-  assert_true(t_current_cpu >= 0);
+  if (!OnDispatchThread("NotifyThreadExited")) {
+    return;
+  }
   XELOGI("GuestScheduler: exited tid={:08X} '{}'", thread->thread_id(),
          thread->thread_name());
   // This CPU's dispatch loop reclaims it, since we can't drop the last handle
@@ -225,7 +651,9 @@ void GuestScheduler::NotifyThreadExited(XThread* thread) {
 }
 
 void GuestScheduler::BlockCurrentThread() {
-  assert_true(t_current_cpu >= 0);
+  if (!OnDispatchThread("BlockCurrentThread")) {
+    return;
+  }
   XThread* self = XThread::GetCurrentThread();
   int cpu_index = t_current_cpu;
   {
@@ -233,39 +661,50 @@ void GuestScheduler::BlockCurrentThread() {
     auto& links = self->scheduler_links();
     // Park self (running, in no list) on this CPU's blocked list.
     links.blocked = true;
+    links.preempted = false;
+    links.cpu = cpu_index;
     links.ready_next = nullptr;
     Cpu& cpu = cpus_[cpu_index];
-    if (cpu.blocked_tail) {
-      cpu.blocked_tail->scheduler_links().ready_next = self;
-    } else {
-      cpu.blocked_head = self;
-    }
-    cpu.blocked_tail = self;
+    LinkTailLocked(cpu.blocked_head, cpu.blocked_tail, self);
+    cpu.has_blocked.store(true, std::memory_order_relaxed);
   }
   self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_WAITING;
   YieldToScheduler();
 }
 
 void GuestScheduler::RereadyBlocked(int cpu_index) {
-  std::lock_guard<std::mutex> lock(lock_);
-  Cpu& cpu = cpus_[cpu_index];
-  XThread* t = cpu.blocked_head;
-  while (t) {
-    auto& links = t->scheduler_links();
-    XThread* next = links.ready_next;
-    links.blocked = false;
-    links.queued = true;
-    links.ready_next = nullptr;
-    if (cpu.ready_tail) {
-      cpu.ready_tail->scheduler_links().ready_next = t;
-    } else {
-      cpu.ready_head = t;
+  uint32_t wake_mask = 0;
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    Cpu& cpu = cpus_[cpu_index];
+    XThread* t = cpu.blocked_head;
+    while (t) {
+      auto& links = t->scheduler_links();
+      XThread* next = links.ready_next;
+      links.blocked = false;
+      links.queued = true;
+      // Its current guest CPU, not the one it blocked on, since
+      // KeSetAffinityThread may have moved it while blocked.
+      int target = CpuOf(t);
+      links.cpu = target;
+      bool at_head = links.preempted;
+      links.preempted = false;
+      LinkReadyLocked(cpus_[target], t, at_head);
+      if (target != cpu_index) {
+        wake_mask |= uint32_t(1) << target;
+      }
+      t = next;
     }
-    cpu.ready_tail = t;
-    t = next;
+    cpu.blocked_head = nullptr;
+    cpu.blocked_tail = nullptr;
+    cpu.has_blocked.store(false, std::memory_order_relaxed);
   }
-  cpu.blocked_head = nullptr;
-  cpu.blocked_tail = nullptr;
+  // Wake any other dispatch thread that received a ready fiber (this one runs).
+  for (int i = 0; i < host_cpu_count_; ++i) {
+    if ((wake_mask & (uint32_t(1) << i)) && cpus_[i].ready_event) {
+      cpus_[i].ready_event->Set();
+    }
+  }
 }
 
 void GuestScheduler::RunLoop(int cpu_index) {
@@ -287,15 +726,18 @@ void GuestScheduler::RunLoop(int cpu_index) {
 
     XThread* next = DequeueReady(cpu_index);
     if (next) {
+      // A suspend landing while the thread ran or was queued takes effect here.
+      if (next->suspend_count() > 0 && ParkSuspended(next, cpu_index)) {
+        continue;
+      }
       cpu.exited_thread = nullptr;
       SwitchTo(next);
       if (cpu.exited_thread) {
-        // Safe to drop the last handle now, which may free the XThread and its
-        // fiber. We're on the idle fiber and the exited fiber is parked on its
-        // final yield, so we never free the running fiber.
+        // On the idle fiber with the exited fiber parked on its final yield, so
+        // reclaiming never frees a stack still in use.
         XThread* dead = cpu.exited_thread;
         cpu.exited_thread = nullptr;
-        dead->ReleaseHandle();
+        dead->ReclaimExited();
       }
       continue;
     }
@@ -308,13 +750,30 @@ void GuestScheduler::RunLoop(int cpu_index) {
       have_blocked = cpu.blocked_head != nullptr;
     }
     if (!have_blocked) {
-      xe::threading::Wait(cpu.ready_event.get(), false);
+      if (dispatched_any_.load()) {
+        xe::threading::Wait(cpu.ready_event.get(), false);
+        continue;
+      }
+      // Nothing has ever run, so poll instead of sleeping forever and say so.
+      xe::threading::Wait(cpu.ready_event.get(), false,
+                          std::chrono::seconds(1));
+      bool warned = false;
+      if (!dispatched_any_.load() &&
+          never_dispatched_warned_.compare_exchange_strong(warned, true)) {
+        XELOGW(
+            "GuestScheduler: no guest fiber dispatched after 1s, every guest "
+            "thread is unqueued (created suspended and never resumed?)");
+      }
       continue;
     }
     now = Clock::QueryHostUptimeMillis();
     uint64_t sleep_ms = next_repoll_ms > now ? next_repoll_ms - now : 0;
-    xe::threading::Wait(cpu.ready_event.get(), false,
-                        std::chrono::milliseconds(sleep_ms));
+    auto wait_result = xe::threading::Wait(cpu.ready_event.get(), false,
+                                           std::chrono::milliseconds(sleep_ms));
+    if (wait_result == xe::threading::WaitResult::kSuccess) {
+      // Signaled rather than timed out, so re-poll blocked waiters now.
+      next_repoll_ms = 0;
+    }
   }
   XELOGI("GuestScheduler: CPU {} dispatch loop exited (shutting_down={})",
          cpu_index, shutting_down_.load());

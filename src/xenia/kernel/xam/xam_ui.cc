@@ -12,6 +12,7 @@
 #include "xenia/base/png_utils.h"
 #include "xenia/base/system.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_content_device.h"
@@ -73,7 +74,7 @@ X_RESULT xeXamDispatchDialog(T* dialog,
         kernel_state()->emulator()->display_window()->app_context();
     if (app_context.CallInUIThreadSynchronous(
             [&dialog, &fence]() { dialog->Then(&fence); })) {
-      fence.Wait();
+      GuestScheduler::WaitOnFence(fence);
       kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
     } else {
       delete dialog;
@@ -117,7 +118,7 @@ X_RESULT xeXamDispatchDialogEx(
     xe::threading::Fence fence;
     if (display_window->app_context().CallInUIThreadSynchronous(
             [&dialog, &fence]() { dialog->Then(&fence); })) {
-      fence.Wait();
+      GuestScheduler::WaitOnFence(fence);
       kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
     } else {
       delete dialog;

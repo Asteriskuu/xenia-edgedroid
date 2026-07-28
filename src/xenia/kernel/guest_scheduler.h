@@ -11,8 +11,12 @@
 #define XENIA_KERNEL_GUEST_SCHEDULER_H_
 
 #include <atomic>
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <queue>
+#include <unordered_set>
 
 #include "xenia/base/threading.h"
 
@@ -44,18 +48,65 @@ class GuestScheduler {
   void EnsureStarted();
   void Shutdown();
 
-  // Adds |thread| to its CPU's ready queue (by guest affinity) and wakes that
-  // CPU. Idempotent and safe to call from any host thread. The thread must not
-  // be currently running on a dispatch thread.
+  // Adds |thread| to its CPU's ready queue by guest affinity and wakes that
+  // CPU. Idempotent and safe to call from any host thread. A thread already
+  // running, queued, blocked or suspended is left alone.
   void MarkReady(XThread* thread);
+
+  // Returns |thread| to its CPU's ready queue once its guest suspend count has
+  // dropped to zero. No-op for a thread suspended while running or queued,
+  // which is not parked yet and just gets dispatched again.
+  void ResumeThread(XThread* thread);
+
+  // Re-links a ready thread into its correct priority level after a priority
+  // change. No-op if not queued.
+  void RequeueForPriority(XThread* thread);
+
+  // Yields from a spin loop. On a fiber this hands the dispatch thread to the
+  // next ready fiber, since a co-resident holder can only run if we yield.
+  // Off the fiber path it yields (or briefly sleeps) the host thread.
+  static void SpinYield(std::chrono::milliseconds host_sleep = {});
+
+  // Pokes every dispatch thread with a blocked waiter so it re-polls now rather
+  // than waiting out the backoff. Call after signaling a host primitive a
+  // cooperative wait polls. Coarse, it does not track which object was
+  // signaled, and the backoff remains a backstop so a missed wake only adds
+  // latency.
+  void WakeAll();
+
+  // Runs |fn|, a blocking host call such as a disc read, without stalling the
+  // dispatch thread. On a fiber it hands |fn| to the I/O worker and parks until
+  // it finishes, otherwise it runs inline. The single worker serializes all
+  // offloaded I/O, which the vfs devices require since a zarchive reader and an
+  // STFS block file are shared across the files opened from them.
+  template <typename Fn>
+  void RunBlockingHostCall(Fn&& fn) {
+    if (!CurrentThreadOffloadsBlockingCalls()) {
+      fn();
+      return;
+    }
+    RunBlockingHostCallOffloaded(std::function<void()>(std::forward<Fn>(fn)));
+  }
+
+  // True when the calling thread is a scheduler-managed fiber, so a blocking
+  // host call would stall other fibers and should be offloaded instead.
+  static bool CurrentThreadOffloadsBlockingCalls();
+
+  // Waits on a host Fence. On a fiber it polls and parks instead of blocking
+  // the dispatch thread, so an unbounded wait such as a UI dialog does not
+  // freeze the guest threads sharing it. The Fence must have one waiter.
+  static void WaitOnFence(xe::threading::Fence& fence);
 
   // Yields the running guest fiber back to its CPU's idle fiber. Returns (on
   // the calling fiber) once the dispatcher switches back into it.
   void YieldToScheduler();
 
-  // Cooperative yield (NtYieldExecution): re-queue the current thread on its
-  // current CPU, then let that CPU pick the next ready thread.
-  void YieldCurrentThread();
+  // Cooperative yield: re-queue the current thread on its current CPU, then let
+  // that CPU pick the next ready thread. |quantum_end| decays priority, for a
+  // safepoint expiry or NtYieldExecution. |to_lower| lets the next dispatch
+  // prefer another ready thread even if lower priority, matching real
+  // NtYieldExecution, and preemption passes false to keep strict priority.
+  void YieldCurrentThread(bool quantum_end, bool to_lower = true);
 
   // Parks the running guest fiber on its CPU's blocked list and yields. Returns
   // once the dispatcher re-readies it, after a short poll backoff or sooner if
@@ -68,9 +119,11 @@ class GuestScheduler {
   // final YieldToScheduler().
   void NotifyThreadExited(XThread* thread);
 
-  // Detaches |thread| from every ready and blocked queue. Used by external
-  // Terminate so a dispatcher can't reach a soon-to-be-freed XThread.
-  void ForgetThread(XThread* thread);
+  // Detaches |thread| from every ready, blocked and suspended queue, and drops
+  // any per-CPU pointer to it. Used by external Terminate so a dispatcher can't
+  // reach a soon-to-be-freed XThread. Returns true if the thread may then be
+  // freed, meaning nothing is standing on its fiber stack.
+  bool ForgetThread(XThread* thread);
 
   KernelState* kernel_state() const { return kernel_state_; }
 
@@ -87,40 +140,102 @@ class GuestScheduler {
   // blocked fibers are intrusive FIFOs linked through
   // XThread::scheduler_links().ready_next (a thread is in at most one list).
   struct Cpu {
-    XThread* ready_head = nullptr;
-    XThread* ready_tail = nullptr;
+    // Ready fibers by priority level, ready_summary flagging the non-empty
+    // levels so the highest ready priority is one bit scan away.
+    XThread* ready_head[32] = {};
+    XThread* ready_tail[32] = {};
+    uint32_t ready_summary = 0;
+    // The fiber currently running on this CPU, for the preemption check.
+    XThread* current_thread = nullptr;
+    // Set under lock_ by a voluntary yield, so the next DequeueReady prefers
+    // any other ready thread over the yielder, even a lower-priority one.
+    XThread* yield_to_other = nullptr;
     XThread* blocked_head = nullptr;
     XThread* blocked_tail = nullptr;
+    XThread* suspended_head = nullptr;
+    XThread* suspended_tail = nullptr;
     XThread* exited_thread = nullptr;
     std::unique_ptr<xe::threading::Thread> host_thread;
     std::unique_ptr<xe::threading::Fiber> idle_fiber;
     std::unique_ptr<xe::threading::Event> ready_event;
+    // Hint read lock-free by WakeAll so it only wakes CPUs with a parked
+    // waiter. A stale value costs a spurious wake or one backoff interval.
+    std::atomic<bool> has_blocked{false};
   };
 
   // The dispatch thread a thread is pinned to: its guest current_cpu mapped
   // onto the active host_cpu_count_ dispatch threads.
   int CpuOf(XThread* thread) const;
 
-  void EnqueueReady(XThread* thread, int cpu_index);
+  // |yield_to_other| marks the thread as that CPU's yielder as it is linked.
+  void EnqueueReady(XThread* thread, int cpu_index,
+                    bool yield_to_other = false);
   XThread* DequeueReady(int cpu_index);
+  // Highest-priority ready thread on |cpu| other than |except|, or null if
+  // |except| is the only ready thread. Used to honor a voluntary yield.
+  static XThread* HighestReadyExcept(const Cpu& cpu, XThread* except);
   void SwitchTo(XThread* next);
   void RereadyBlocked(int cpu_index);
+  // Parks a thread whose suspend count is nonzero until Resume drops it.
+  // Returns false if the count already reached zero, meaning run it instead.
+  bool ParkSuspended(XThread* thread, int cpu_index);
   void RunLoop(int cpu_index);
+  // Offload path of RunBlockingHostCall: queue to the I/O worker and park.
+  void RunBlockingHostCallOffloaded(const std::function<void()>& fn);
+  // Lazily starts the single I/O worker on first RunBlockingHostCall.
+  void EnsureIoWorker();
+  void IoWorkerLoop();
   // Unlinks |thread| from a singly-linked list (ready_next), fixing up tail.
   static void UnlinkLocked(XThread*& head, XThread*& tail, XThread* thread);
+  // Appends to a singly-linked list (ready_next), fixing up tail.
+  static void LinkTailLocked(XThread*& head, XThread*& tail, XThread* thread);
+  // Prepends to a singly-linked list (ready_next), fixing up tail.
+  static void LinkHeadLocked(XThread*& head, XThread*& tail, XThread* thread);
+  // Links a thread into a CPU's ready list at its priority level, sets the
+  // summary bit, and preempts the CPU's running fiber if outranked. Caller
+  // holds lock_ and has set links.queued and links.cpu.
+  void LinkReadyLocked(Cpu& cpu, XThread* thread, bool at_head);
+  // Out-of-line so the yield fast path stays a single relaxed bool load.
+  void ReportGlobalLockHazard();
 
   KernelState* kernel_state_;
 
   // Number of active dispatch threads (guest_scheduler_cpus, 1..kMaxCpus).
   int host_cpu_count_ = kMaxCpus;
 
+  // Preemption timeslice in raw host ticks, calibrated once in EnsureStarted.
+  uint64_t quantum_ticks_ = 0;
+
   // Guards every CPU's ready and blocked lists. Never held across a fiber
   // switch.
   std::mutex lock_;
   Cpu cpus_[kMaxCpus];
 
+  // A fiber yielding while it holds the recursive global lock lets a
+  // co-resident fiber re-enter it, silently breaking mutual exclusion. Each
+  // distinct yield stack is logged once, then the check goes cold.
+  std::atomic<bool> global_lock_hazard_saturated_{false};
+  std::mutex global_lock_hazard_mutex_;
+  std::unordered_set<uint64_t> global_lock_hazard_stacks_;
+
   std::atomic<bool> started_{false};
   std::atomic<bool> shutting_down_{false};
+  // Until something has been dispatched, idle CPUs poll slowly instead of
+  // sleeping so a title that never starts can be reported.
+  std::atomic<bool> dispatched_any_{false};
+  std::atomic<bool> never_dispatched_warned_{false};
+
+  // Lives on the parked caller's fiber stack, which persists until done is set.
+  struct BlockingCall {
+    const std::function<void()>* fn = nullptr;
+    std::atomic<bool> done{false};
+  };
+  std::once_flag io_once_;
+  std::atomic<bool> io_started_{false};
+  std::mutex io_lock_;
+  std::queue<BlockingCall*> io_queue_;
+  std::unique_ptr<xe::threading::Thread> io_thread_;
+  std::unique_ptr<xe::threading::Event> io_event_;
 };
 
 }  // namespace kernel

@@ -83,6 +83,9 @@ ThreadState::ThreadState(Processor* processor, uint32_t thread_id,
   assert_true(((uint64_t)context_ & 0x3F) == 0);
   std::memset(context_, 0, sizeof(ppc::PPCContext));
 
+  // No preemption until the scheduler dispatches this thread.
+  context_->quantum_deadline = UINT64_MAX;
+
   // Stash pointers to common structures that callbacks may need.
   context_->global_mutex = &xe::global_critical_region::mutex();
   context_->virtual_membase = memory_->virtual_membase();

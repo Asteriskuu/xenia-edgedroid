@@ -603,6 +603,9 @@ object_ref<UserModule> KernelState::LoadUserModule(
     global_lock.unlock();
 
     // Module wasn't loaded, so load it.
+    // TODO: this read, decrypt and decompress stalls the calling fiber's
+    // dispatch thread. Offloading it needs care, it touches kernel state and
+    // guest-thread identity.
     module = object_ref<UserModule>(new UserModule(this));
     X_STATUS status = module->LoadFromFile(path);
     if (XFAILED(status)) {
@@ -1037,6 +1040,13 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
     listener->EnqueueNotification(kXNotificationLiveConnectionChanged,
                                   0x001510F1L);
     listener->EnqueueNotification(kXNotificationLiveLinkStateChanged, 0);
+  }
+
+  if (!has_notified_xmp_startup_ && listener->mask() & kXNotifyXmp) {
+    has_notified_xmp_startup_ = true;
+    listener->EnqueueNotification(kXNotificationXmpStateChanged, 0);
+    listener->EnqueueNotification(kXNotificationXmpPlaybackControllerChanged,
+                                  1);
   }
 }
 
