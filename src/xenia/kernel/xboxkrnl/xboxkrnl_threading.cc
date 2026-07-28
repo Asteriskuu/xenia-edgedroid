@@ -10,6 +10,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/math.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
 #include "xenia/cpu/processor.h"
@@ -391,7 +392,7 @@ dword_result_t KeQueryBasePriorityThread_entry(lpvoid_t thread_ptr) {
 
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr);
   if (thread) {
-    priority = thread->QueryPriority();
+    priority = thread->QueryBasePriority();
   }
 
   return priority;
@@ -404,8 +405,7 @@ dword_result_t KeSetBasePriorityThread_entry(lpvoid_t thread_ptr,
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr);
 
   if (thread) {
-    prev_priority = thread->QueryPriority();
-    thread->SetPriority(increment);
+    prev_priority = thread->SetBasePriority(static_cast<int32_t>(increment));
   }
 
   return prev_priority;
@@ -494,7 +494,7 @@ DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
 dword_result_t NtYieldExecution_entry() {
   SCOPE_profile_cpu_i("guestsync", "NtYieldExecution");
   if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
-    kernel_state()->guest_scheduler()->YieldCurrentThread();
+    kernel_state()->guest_scheduler()->YieldCurrentThread(true);
   } else {
     xe::threading::MaybeYield();
   }
@@ -1066,8 +1066,10 @@ dword_result_t KeWaitForMultipleObjects_entry(
   SCOPE_profile_cpu_i("guestsync", "KeWaitForMultipleObjects");
   assert_true(wait_type <= X_KWAIT_REASON::WaitAny);
 
-  assert_true(count <= 64);
   object_ref<XObject> objects[64];
+  if (count > xe::countof(objects)) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
   {
     auto crit = global_critical_region::AcquireDirect();
     for (uint32_t n = 0; n < count; n++) {
@@ -1101,8 +1103,10 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, xe::be<uint32_t>* handles,
                                       uint64_t* timeout_ptr) {
   assert_true(wait_type <= X_KWAIT_REASON::WaitAny);
 
-  assert_true(count <= 64);
   object_ref<XObject> objects[64];
+  if (count > xe::countof(objects)) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
 
   /*
         Reserving to squash the constant reallocations, in a benchmark of one
@@ -1203,6 +1207,12 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
   // Lock.
   while (
       !xe::atomic_cas(0, xe::byte_swap(our_pcr), &lock->prcb_of_owner.value)) {
+    // Under the cooperative scheduler the holder may be a fiber queued behind
+    // us on this dispatch thread, so it can only run if we yield the fiber.
+    if (XThread::GetCurrentFiberThread()) {
+      GuestScheduler::SpinYield();
+      continue;
+    }
     // On real hardware, threads sharing a Xenon HW thread are serialized by
     // the kernel scheduler — the spinner would be preempted within one
     // timeslice (~1ms) so the holder can make progress.  In the naive
@@ -1382,11 +1392,13 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
     memory->SystemHeapFree(apc_ptr);
     return X_STATUS_UNSUCCESSFUL;
   }
-  // no-op, just meant to awaken a sleeping alertable thread to process real
-  // apcs. A fiber-backed thread has no host thread; cooperative alertable
-  // wake-on-APC is handled by the scheduler in a later stage.
+  // Awaken a sleeping alertable thread to process real apcs. A host thread gets
+  // a no-op user callback to break its wait, a fiber gets a scheduler poke so
+  // its alertable poll re-runs.
   if (thread->thread()) {
     thread->thread()->QueueUserCallback([]() {});
+  } else {
+    kernelstate->guest_scheduler()->WakeAll();
   }
   return X_STATUS_SUCCESS;
 }

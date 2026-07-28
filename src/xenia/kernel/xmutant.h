@@ -42,16 +42,23 @@ class XMutant : public XObject {
                                       XThread* thread);
 
  protected:
-  xe::threading::WaitHandle* GetWaitHandle() override { return mutant_.get(); }
+  xe::threading::WaitHandle* GetWaitHandle() override {
+    return free_signal_.get();
+  }
   void WaitCallback() override;
+  bool IsReenteredByCurrentThread() override;
+  X_STATUS AcquireStatus() override;
 
  private:
   XMutant();
 
-  std::unique_ptr<xe::threading::Mutant> mutant_;
+  // Signaled while unowned. A count rather than a host mutant, whose owner is
+  // the host thread, which many guest threads share and can migrate between.
+  std::unique_ptr<xe::threading::Semaphore> free_signal_;
+  // The only source of truth for ownership.
   std::atomic<XThread*> owning_thread_{nullptr};
-  // Mutant::Release() doesn't report count-to-zero, so we track recursion
-  // ourselves. Only the current owner mutates this -- no synchronization.
+  // Recursive acquires never touch free_signal_, so count them here. Only the
+  // current owner mutates it, so no synchronization.
   uint32_t recursion_count_ = 0;
 };
 

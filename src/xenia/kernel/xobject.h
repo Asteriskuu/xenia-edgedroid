@@ -30,6 +30,7 @@ namespace kernel {
 constexpr fourcc_t kXObjSignature = make_fourcc('X', 'E', 'N', '\0');
 
 class KernelState;
+class XThread;
 
 template <typename T>
 class object_ref;
@@ -253,6 +254,35 @@ class XObject {
   // Called on successful wait.
   virtual void WaitCallback() {}
   virtual xe::threading::WaitHandle* GetWaitHandle() { return nullptr; }
+  // True when the calling guest thread already satisfies this object without
+  // consuming it, meaning a mutant it already owns.
+  virtual bool IsReenteredByCurrentThread() { return false; }
+  // Status for a successful acquire, letting a mutant report abandonment.
+  virtual X_STATUS AcquireStatus() { return X_STATUS_SUCCESS; }
+
+  // Fair FIFO wakeup for cooperative fiber waiters on fungible-permit objects.
+  // Begin/End register the waiter and MayAcquire gates the poll to the queue
+  // front. Call the Enter/Leave wrappers below rather than these directly.
+  virtual void CooperativeWaitBegin(XThread* thread) {}
+  virtual void CooperativeWaitEnd(XThread* thread) {}
+  virtual bool CooperativeMayAcquire(XThread* thread) { return true; }
+
+ public:
+  // Registers |thread| as a cooperative waiter on this object and records the
+  // registration on the thread, so a terminate that never unwinds the parked
+  // stack can still release it.
+  void EnterCooperativeWait(XThread* thread);
+  void LeaveCooperativeWait(XThread* thread);
+  // Releases whatever registration |thread| still holds, if any. Called when a
+  // thread is torn down without returning through its wait.
+  static void AbandonCooperativeWait(XThread* thread);
+
+ protected:
+  // Handle to wait on for this object on behalf of the calling guest thread.
+  // An already-owned mutant resolves to an always-signaled stand-in, so a
+  // recursive acquire succeeds without consuming the primitive. |slot| is the
+  // index in the caller's wait array, which cannot name one handle twice.
+  xe::threading::WaitHandle* GetWaitHandleForCurrentThread(size_t slot);
 
   // Creates the kernel object for guest code to use. Typically not needed.
   uint8_t* CreateNative(uint32_t size);

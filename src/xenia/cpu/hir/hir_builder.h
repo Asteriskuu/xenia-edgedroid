@@ -116,6 +116,9 @@ class HIRBuilder {
 
   void SourceOffset(uint32_t offset);
 
+  // Preemption safepoint. Returns the instr so the caller can place it.
+  Instr* CheckPreempt();
+
   // trace info/etc
   void DebugBreak();
   void DebugBreakTrue(Value* cond);

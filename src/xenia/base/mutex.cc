@@ -52,6 +52,10 @@ bool xe_global_mutex::try_lock() {
   return false;
 }
 
+bool xe_global_mutex::is_held_by_current_thread() const {
+  return owner_thread_ == GetCurrentThreadId();
+}
+
 // xe_fast_mutex: non-recursive mutex via SRWLOCK
 void xe_fast_mutex::lock() {
   DWORD self = GetCurrentThreadId();
@@ -188,6 +192,10 @@ bool xe_global_mutex::try_lock() {
   return false;
 }
 
+bool xe_global_mutex::is_held_by_current_thread() const {
+  return owner_.load(std::memory_order_relaxed) == gettid();
+}
+
 // xe_fast_mutex implementation (non-recursive)
 void xe_fast_mutex::lock() {
   // Fast path: uncontended
@@ -251,6 +259,16 @@ bool xe_fast_mutex::try_lock() {
 global_mutex_type& global_critical_region::mutex() {
   static global_mutex_type global_mutex;
   return global_mutex;
+}
+
+bool global_critical_region::is_held_by_current_thread() {
+#if (XE_PLATFORM_WIN32 == 1 && XE_ENABLE_FAST_WIN32_MUTEX == 1) || \
+    (XE_PLATFORM_LINUX == 1 && XE_ENABLE_FAST_LINUX_MUTEX == 1)
+  return mutex().is_held_by_current_thread();
+#else
+  // std::recursive_mutex exposes no owner, so we cannot tell.
+  return false;
+#endif
 }
 
 }  // namespace xe

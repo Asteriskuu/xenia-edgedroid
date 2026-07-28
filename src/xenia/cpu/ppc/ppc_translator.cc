@@ -60,6 +60,9 @@ PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
   compiler_->AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
   compiler_->AddPass(std::make_unique<passes::ControlFlowSimplificationPass>());
 
+  // Preemption safepoints for the guest scheduler. No-op when it is off.
+  compiler_->AddPass(std::make_unique<passes::PreemptCheckInjectionPass>());
+
   // Passes are executed in the order they are added. Multiple of the same
   // pass type may be used.
 

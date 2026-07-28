@@ -37,6 +37,7 @@ class alignas(4096) xe_global_mutex {
   void lock();
   void unlock();
   bool try_lock();
+  bool is_held_by_current_thread() const;
 };
 using global_mutex_type = xe_global_mutex;
 
@@ -103,6 +104,7 @@ class alignas(4096) xe_global_mutex {
   void lock();
   void unlock();
   bool try_lock();
+  bool is_held_by_current_thread() const;
 };
 using global_mutex_type = xe_global_mutex;
 
@@ -212,6 +214,10 @@ class global_critical_region {
  public:
   constexpr global_critical_region() {}
   static global_mutex_type& mutex();
+
+  // True if the calling host thread currently holds the region. Always false on
+  // the std::recursive_mutex fallback, which has no owner query.
+  static bool is_held_by_current_thread();
 
   // Acquires a lock on the global critical section.
   // Use this when keeping an instance is not possible. Otherwise, prefer

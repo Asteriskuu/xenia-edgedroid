@@ -595,6 +595,9 @@ object_ref<UserModule> KernelState::LoadUserModule(
     global_lock.unlock();
 
     // Module wasn't loaded, so load it.
+    // TODO: this read, decrypt and decompress stalls the calling fiber's
+    // dispatch thread. Offloading it needs care, it touches kernel state and
+    // guest-thread identity.
     module = object_ref<UserModule>(new UserModule(this));
     X_STATUS status = module->LoadFromFile(path);
     if (XFAILED(status)) {

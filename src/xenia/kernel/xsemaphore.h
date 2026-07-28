@@ -10,6 +10,9 @@
 #ifndef XENIA_KERNEL_XSEMAPHORE_H_
 #define XENIA_KERNEL_XSEMAPHORE_H_
 
+#include <deque>
+#include <mutex>
+
 #include "xenia/base/threading.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
@@ -42,8 +45,15 @@ class XSemaphore : public XObject {
   }
   void WaitCallback() override;
 
+  void CooperativeWaitBegin(XThread* thread) override;
+  void CooperativeWaitEnd(XThread* thread) override;
+  bool CooperativeMayAcquire(XThread* thread) override;
+
  private:
   std::unique_ptr<xe::threading::Semaphore> semaphore_;
+  // Fibers waiting cooperatively, in order, for fair permit handout.
+  std::mutex waiters_lock_;
+  std::deque<XThread*> waiters_;
   uint32_t maximum_count_ = 0;
 };
 

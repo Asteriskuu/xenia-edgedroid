@@ -429,6 +429,16 @@ typedef struct alignas(64) PPCContext_s {
   ThreadState* thread_state;
   uint8_t* virtual_membase;
 
+  // Preemption deadline in raw host ticks, set per dispatch by
+  // GuestScheduler::SwitchTo and read by the JIT safepoints. UINT64_MAX
+  // disables the check.
+  //
+  // Another host thread writes it to force an expiry, so it relies on aligned
+  // 64-bit loads and stores being atomic. Not std::atomic because this struct
+  // lives in raw memory the JIT indexes by offset and no constructor runs over,
+  // so any new writer must keep to a single naturally aligned 64-bit store.
+  uint64_t quantum_deadline;
+
   template <typename T = uint8_t*>
   inline T TranslateVirtual(uint32_t guest_address) XE_RESTRICT const {
     static_assert(std::is_pointer_v<T>);

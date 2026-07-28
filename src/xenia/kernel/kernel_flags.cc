@@ -28,3 +28,9 @@ DEFINE_uint32(
     "parallelism), 3 is one per physical core (SMT pairs share a thread), 1 is "
     "all guest threads cooperative on a single thread. Requires a restart.",
     "Kernel");
+DEFINE_uint32(
+    guest_scheduler_quantum_us, 1000,
+    "Cooperative-scheduler timeslice in microseconds. A guest fiber running "
+    "this long yields at its next JIT safepoint so co-resident fibers on the "
+    "same dispatch thread make progress. Lower is fairer but switches more.",
+    "Kernel");

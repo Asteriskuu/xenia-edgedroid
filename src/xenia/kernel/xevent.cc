@@ -11,6 +11,7 @@
 
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/memory.h"
 
@@ -70,6 +71,7 @@ int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
   event_->Set();
   memory()->TranslateVirtual<X_KEVENT*>(guest_object())->header.signal_state =
       1;
+  kernel_state()->guest_scheduler()->WakeAll();
   return 1;
 }
 
@@ -79,6 +81,7 @@ int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
   // Pulse leaves the event reset after releasing waiters.
   memory()->TranslateVirtual<X_KEVENT*>(guest_object())->header.signal_state =
       0;
+  kernel_state()->guest_scheduler()->WakeAll();
   return 1;
 }
 
