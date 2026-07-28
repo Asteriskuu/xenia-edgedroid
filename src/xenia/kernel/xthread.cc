@@ -342,7 +342,7 @@ void XThread::FreeStack() {
 }
 
 X_STATUS XThread::Create() {
-  ALOGI("XThread::Create: entered thread_id=%08X stack_size=%zu flags=0x%08X",
+  ALOGI("XThread::Create: entered thread_id=%08X stack_size=%u flags=0x%08X",
         thread_id_, creation_params_.stack_size,
         creation_params_.creation_flags);
 
