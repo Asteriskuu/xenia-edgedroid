@@ -7,8 +7,8 @@
  ******************************************************************************
  */
 
-#include <android/log.h>
 #include "xenia/kernel/xthread.h"
+#include <android/log.h>
 
 #if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID || XE_PLATFORM_MAC
 #include <pthread.h>
@@ -378,8 +378,8 @@ X_STATUS XThread::Create() {
     tls_extended_size = tls_header->data_size;
   }
 
-  ALOGI("XThread::Create: tls_slots={} tls_extended_size={}",
-        tls_slots, tls_extended_size);
+  ALOGI("XThread::Create: tls_slots={} tls_extended_size={}", tls_slots, 
+        tls_extended_size);
 
   // Allocate both the slots and the extended data.
   // Some TLS is compiled with the binary (declspec(thread)) vars. The game
