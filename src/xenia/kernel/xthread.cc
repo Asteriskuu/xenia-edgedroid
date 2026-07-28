@@ -342,8 +342,9 @@ void XThread::FreeStack() {
 }
 
 X_STATUS XThread::Create() {
-  ALOGI("XThread::Create: entered thread_id={:08X} stack_size={} flags=0x{:08X}",
-        thread_id_, creation_params_.stack_size, creation_params_.creation_flags);
+  ALOGI(
+      "XThread::Create: entered thread_id={:08X} stack_size={} flags=0x{:08X}",
+      thread_id_, creation_params_.stack_size, creation_params_.creation_flags);
 
   // Thread kernel object.
   if (!CreateNative<X_KTHREAD>()) {
@@ -378,8 +379,8 @@ X_STATUS XThread::Create() {
     tls_extended_size = tls_header->data_size;
   }
 
-  ALOGI("XThread::Create: tls_slots={} tls_extended_size={}", tls_slots, 
-        tls_extended_size);
+  ALOGI("XThread::Create: tls_slots={} tls_extended_size={}", tls_slots,
+         tls_extended_size);
 
   // Allocate both the slots and the extended data.
   // Some TLS is compiled with the binary (declspec(thread)) vars. The game
