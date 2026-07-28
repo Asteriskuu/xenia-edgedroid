@@ -380,7 +380,7 @@ X_STATUS XThread::Create() {
   }
 
   ALOGI("XThread::Create: tls_slots={} tls_extended_size={}", tls_slots,
-         tls_extended_size);
+        tls_extended_size);
 
   // Allocate both the slots and the extended data.
   // Some TLS is compiled with the binary (declspec(thread)) vars. The game
