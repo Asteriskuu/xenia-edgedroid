@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include <android/log.h>
 #include "xenia/kernel/xthread.h"
 
 #if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID || XE_PLATFORM_MAC
@@ -28,6 +29,13 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+
+#define ALOGI(...) \
+  __android_log_print(ANDROID_LOG_INFO, "XeniaAndroid", __VA_ARGS__)
+#define ALOGW(...) \
+  __android_log_print(ANDROID_LOG_WARN, "XeniaAndroid", __VA_ARGS__)
+#define ALOGE(...) \
+  __android_log_print(ANDROID_LOG_ERROR, "XeniaAndroid", __VA_ARGS__)
 
 DEFINE_bool(ignore_thread_priorities, false,
             "Ignores game-specified thread priorities.", "Kernel");
@@ -334,19 +342,28 @@ void XThread::FreeStack() {
 }
 
 X_STATUS XThread::Create() {
+  ALOGI("XThread::Create: entered thread_id={:08X} stack_size={} flags=0x{:08X}",
+        thread_id_, creation_params_.stack_size, creation_params_.creation_flags);
+
   // Thread kernel object.
   if (!CreateNative<X_KTHREAD>()) {
-    XELOGW("Unable to allocate thread object");
+    ALOGW("XThread::Create: unable to allocate thread object");
     return X_STATUS_NO_MEMORY;
   }
+  ALOGI("XThread::Create: native thread object created");
 
   // Allocate a stack.
+  ALOGI("XThread::Create: allocating stack");
   if (!AllocateStack(creation_params_.stack_size)) {
+    ALOGW("XThread::Create: stack allocation failed");
     return X_STATUS_NO_MEMORY;
   }
+  ALOGI("XThread::Create: stack allocated stack_limit={:08X} stack_base={:08X}",
+        stack_limit_, stack_base_);
 
   // Allocate TLS block.
   // Games will specify a certain number of 4b slots that each thread will get.
+  ALOGI("XThread::Create: resolving TLS header");
   xex2_opt_tls_info* tls_header = nullptr;
   auto module = kernel_state()->GetExecutableModule();
   if (module) {
@@ -361,6 +378,9 @@ X_STATUS XThread::Create() {
     tls_extended_size = tls_header->data_size;
   }
 
+  ALOGI("XThread::Create: tls_slots={} tls_extended_size={}",
+        tls_slots, tls_extended_size);
+
   // Allocate both the slots and the extended data.
   // Some TLS is compiled with the binary (declspec(thread)) vars. The game
   // will directly access those through 0(r13).
@@ -369,14 +389,17 @@ X_STATUS XThread::Create() {
   tls_static_address_ = memory()->SystemHeapAlloc(tls_total_size_);
   tls_dynamic_address_ = tls_static_address_ + tls_extended_size;
   if (!tls_static_address_) {
-    XELOGW("Unable to allocate thread local storage block");
+    ALOGW("XThread::Create: unable to allocate thread local storage block");
     return X_STATUS_NO_MEMORY;
   }
+
+  ALOGI("XThread::Create: TLS allocated static={:08X} dynamic={:08X} total={}",
+        tls_static_address_, tls_dynamic_address_, tls_total_size_);
 
   // Zero all of TLS.
   memory()->Fill(tls_static_address_, tls_total_size_, 0);
   if (tls_extended_size) {
-    // If game has extended data, copy in the default values.
+    ALOGI("XThread::Create: copying TLS default data");
     assert_not_zero(tls_header->raw_data_address);
     memory()->Copy(tls_static_address_, tls_header->raw_data_address,
                    tls_header->raw_data_size);
@@ -399,9 +422,10 @@ X_STATUS XThread::Create() {
   // structure.
   pcr_address_ = memory()->SystemHeapAlloc(0x2D8);
   if (!pcr_address_) {
-    XELOGW("Unable to allocate thread state block");
+    ALOGW("XThread::Create: unable to allocate thread state block");
     return X_STATUS_NO_MEMORY;
   }
+  ALOGI("XThread::Create: PCR allocated at {:08X}", pcr_address_);
 
   // Allocate processor thread state.
   // This is thread safe.
@@ -412,14 +436,21 @@ X_STATUS XThread::Create() {
 
   // Exports use this to get the kernel.
   thread_state_->context()->kernel_state = kernel_state_;
+  ALOGI("XThread::Create: thread state created and bound");
 
   uint8_t cpu_index = GetFakeCpuNumber(
       static_cast<uint8_t>(creation_params_.creation_flags >> 24));
+  ALOGI("XThread::Create: cpu_index={}", cpu_index);
 
   // Initialize the KTHREAD object.
   InitializeGuestObject();
+  ALOGI("XThread::Create: guest object initialized");
 
   X_KPCR* pcr = memory()->TranslateVirtual<X_KPCR*>(pcr_address_);
+  if (!pcr) {
+    ALOGE("XThread::Create: failed to translate PCR");
+    return X_STATUS_UNSUCCESSFUL;
+  }
 
   pcr->tls_ptr = tls_static_address_;
   pcr->pcr_ptr = pcr_address_;
@@ -428,57 +459,65 @@ X_STATUS XThread::Create() {
   pcr->host_stash = reinterpret_cast<uint64_t>(thread_state_->context());
   pcr->stack_base_ptr = stack_base_;
   pcr->stack_end_ptr = stack_limit_;
-
-  pcr->prcb_data.dpc_active = 0;  // DPC active bool?
+  pcr->prcb_data.dpc_active = 0;
+  ALOGI("XThread::Create: PCR initialized");
 
   // Always retain when starting - the thread owns itself until exited.
   RetainHandle();
+  ALOGI("XThread::Create: retained self handle");
 
   if (GuestScheduler::enabled() && !is_host_thread()) {
-    // Cooperative fiber path: the guest thread runs on a fiber the scheduler
-    // multiplexes onto its dispatch host thread instead of its own host OS
-    // thread. The scheduler binds our TLS (SetCurrentThread) before switching
-    // to this fiber, so the entry doesn't repeat it. Host-routine threads
-    // (XHostThread) stay real host threads, since they run host loops and
-    // blocking calls and their thread() is used elsewhere.
+    // Cooperative fiber path.
+    ALOGI("XThread::Create: using fiber path");
     fiber_exit_event_ = xe::threading::Event::CreateManualResetEvent(false);
     xe::threading::Fiber::CreationParameters fiber_params;
     fiber_params.stack_size = 16_MiB;
     fiber_ = xe::threading::Fiber::Create(fiber_params, [this]() {
+      ALOGI("XThread::Create: fiber entered");
       running_ = true;
-      // Never returns: Execute() ends in Exit(), which hands us to the
-      // scheduler and yields to the dispatcher forever.
+      ALOGI("XThread::Create: fiber about to Execute()");
       Execute();
+      ALOGI("XThread::Create: fiber returned from Execute()");
     });
     if (!fiber_) {
-      XELOGE("CreateThread failed (fiber)");
+      ALOGE("XThread::Create: CreateThread failed (fiber)");
       return X_STATUS_NO_MEMORY;
     }
     if (thread_name_.empty()) {
       set_name(fmt::format("XThread{:04X}", thread_id_));
     }
     kernel_state()->guest_scheduler()->EnsureStarted();
+    ALOGI("XThread::Create: guest scheduler ensured");
   } else {
+    ALOGI("XThread::Create: using host thread path");
     xe::threading::Thread::CreationParameters params;
-
     params.create_suspended = true;
+    params.stack_size = 16_MiB;
 
-    params.stack_size = 16_MiB;  // Allocate a big host stack.
     thread_ = xe::threading::Thread::Create(params, [this]() {
+      ALOGI("XThread::Create: host thread entered");
+
       // Set thread ID override. This is used by logging.
       xe::threading::set_current_thread_id(handle());
 
       // Set name immediately, if we have one.
       thread_->set_name(thread_name_);
+      ALOGI("XThread::Create: host thread name set to '{}'", thread_name_);
 
       // Profiler needs to know about the thread.
       xe::Profiler::ThreadEnter(thread_name_.c_str());
+      ALOGI("XThread::Create: profiler entered");
 
       // Execute user code.
       current_xthread_tls_ = this;
       current_thread_ = this;
+      ALOGI("XThread::Create: current TLS pointers set");
+
       cpu::ThreadState::Bind(this->thread_state());
+      ALOGI("XThread::Create: thread state bound");
+
       running_ = true;
+      ALOGI("XThread::Create: running=true, about to Execute()");
 
 #if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID || XE_PLATFORM_MAC
       pthread_cleanup_push(HostThreadExitCleanupThunk, this);
@@ -488,11 +527,12 @@ X_STATUS XThread::Create() {
       Execute();
       OnHostThreadExitCleanup();
 #endif
+
+      ALOGI("XThread::Create: host thread returned from Execute()");
     });
 
     if (!thread_) {
-      // TODO(benvanik): translate error?
-      XELOGE("CreateThread failed");
+      ALOGE("XThread::Create: CreateThread failed");
       return X_STATUS_NO_MEMORY;
     }
 
@@ -504,22 +544,31 @@ X_STATUS XThread::Create() {
     if (creation_params_.creation_flags & 0x60) {
       thread_->set_priority(creation_params_.creation_flags & 0x20 ? 1 : 0);
     }
+
+    ALOGI("XThread::Create: host thread created system_id={:08X}",
+          thread_->system_id());
   }
 
   // Assign the newly created thread to the logical processor, and also set up
   // the current CPU in KPCR and KTHREAD.
   SetActiveCpu(cpu_index);
+  ALOGI("XThread::Create: active CPU set");
 
   // Notify processor of our creation.
   emulator()->processor()->OnThreadCreated(handle(), thread_state_, this);
+  ALOGI("XThread::Create: processor notified");
 
   if ((creation_params_.creation_flags & X_CREATE_SUSPENDED) == 0) {
     // Start the thread now that we're all setup.
+    ALOGI("XThread::Create: starting thread now");
     if (fiber_) {
       kernel_state()->guest_scheduler()->MarkReady(this);
     } else {
       thread_->Resume();
     }
+    ALOGI("XThread::Create: thread started/resumed");
+  } else {
+    ALOGI("XThread::Create: thread created suspended");
   }
 
   if (fiber_) {
@@ -532,6 +581,7 @@ X_STATUS XThread::Create() {
         (creation_params_.creation_flags & X_CREATE_SUSPENDED) ? 1 : 0);
   }
 
+  ALOGI("XThread::Create: returning success");
   return X_STATUS_SUCCESS;
 }
 
