@@ -165,39 +165,9 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
     }
 
     ANativeWindow_acquire(native_window);
-    LOGI("[JNI] Native window acquired");
-
-    int width = 0, height = 0;
-    const int max_wait_ms = 5000;
-    int waited = 0;
-    int poll_count = 0;
-    
-    while (waited < max_wait_ms) {
-        width = ANativeWindow_getWidth(native_window);
-        height = ANativeWindow_getHeight(native_window);
-        
-        if (width > 0 && height > 0) {
-            LOGI("[JNI] Surface ready after %dms: %dx%d (poll attempt %d)", waited, width, height, poll_count);
-            break;
-        }
-        
-        int sleep_time = (waited < 500) ? 25 : 100;
-        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
-        waited += sleep_time;
-        poll_count++;
-    }
-    
-    if (width <= 0 || height <= 0) {
-        LOGE("[JNI] CRITICAL: Surface size never became valid!");
-        LOGE("[JNI] Waited %dms with %d polls", max_wait_ms, poll_count);
-        LOGE("[JNI] Final size: %dx%d", width, height);
-        LOGE("[JNI] This usually means Activity didn't wait for onLayoutChange() before calling nativeBootGame()");
-        ANativeWindow_release(native_window);
-        env->ReleaseStringUTFChars(jgame_path, game_path);
-        return;
-    }
-
-    LOGI("[JNI] Surface size confirmed: %dx%d", width, height);
+    LOGI("[JNI] Native window acquired. Size: %dx%d", 
+         ANativeWindow_getWidth(native_window), 
+         ANativeWindow_getHeight(native_window));
 
     g_native_window = native_window;
     g_emulator_running = true;
@@ -210,7 +180,6 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
         LOGI("[Emulator] Thread started, game_path: %s", game_path.c_str());
         
         try {
-            
             if (!std::filesystem::exists(game_path)) {
                 LOGE("[ERROR] Game file does not exist: %s", game_path.c_str());
                 g_emulator_running = false;
