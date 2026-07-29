@@ -118,8 +118,10 @@ class GuestScheduler {
   // wait on an epoch-bumping type is re-readied only when the epoch moves past
   // |wait_epoch|, |deadline_ms| (absolute host uptime, 0 = none) arrives, or a
   // user APC lands on an alertable waiter. Anything else re-polls every pass.
+  // |interruptible| false keeps a terminate from ending the fiber at a park
+  // whose waker holds a pointer into this stack.
   void BlockCurrentThread(uint64_t deadline_ms = 0, uint32_t wait_epoch = 0,
-                          bool alertable = false);
+                          bool alertable = false, bool interruptible = true);
 
   // Marks the running guest fiber finished so its CPU can reclaim it, dropping
   // the final handle once control is back on the idle fiber. Call before the
@@ -127,10 +129,20 @@ class GuestScheduler {
   void NotifyThreadExited(XThread* thread);
 
   // Detaches |thread| from every ready, blocked and suspended queue, and drops
-  // any per-CPU pointer to it. Used by external Terminate so a dispatcher can't
-  // reach a soon-to-be-freed XThread. Returns true if the thread may then be
+  // any per-CPU pointer to it. Used by a crashed fiber detaching itself so a
+  // dispatcher can't reach it again. Returns true if the thread may then be
   // freed, meaning nothing is standing on its fiber stack.
   bool ForgetThread(XThread* thread);
+
+  // Handles a fiber-backed thread terminated from another host thread. Returns
+  // true if the caller may reclaim it now, nothing will ever stand on its
+  // stack again. Otherwise its dispatcher runs it to a safepoint or wait
+  // resume point where it exits and is reclaimed.
+  bool TerminateThread(XThread* thread);
+
+  // Ends the calling fiber now if an external Terminate marked it, handing it
+  // to the dispatcher for reclaim. Returns otherwise.
+  void ExitIfTerminated();
 
   KernelState* kernel_state() const { return kernel_state_; }
 
@@ -256,6 +268,9 @@ class GuestScheduler {
 
   std::atomic<bool> started_{false};
   std::atomic<bool> shutting_down_{false};
+  // Set once Shutdown has joined the dispatch threads and reclaimed every
+  // leftover fiber. TerminateThread then frees threads directly.
+  std::atomic<bool> stopped_{false};
   // Until something has been dispatched, idle CPUs poll slowly instead of
   // sleeping so a title that never starts can be reported.
   std::atomic<bool> dispatched_any_{false};

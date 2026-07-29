@@ -542,6 +542,9 @@ class XThread : public XObject, public cpu::Thread {
     bool running = false;    // executing on a dispatch thread
     bool preempted = false;  // slice cut short by a higher-priority thread
     bool has_run = false;    // diagnostic: dispatched at least once
+    // Set by an external Terminate, exits the fiber at its next
+    // ExitIfTerminated check.
+    std::atomic<bool> terminate_pending{false};
     // Absolute raw-tick end of the granted timeslice, 0 = grant fresh at
     // dispatch. Preemption preserves it so the quantum end still arrives.
     uint64_t quantum_deadline_tick = 0;

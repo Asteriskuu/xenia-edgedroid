@@ -10,6 +10,7 @@
 #include "xenia/kernel/guest_scheduler.h"
 
 #include <string>
+#include <vector>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
@@ -22,6 +23,7 @@
 #include "xenia/cpu/stack_walker.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
 
 namespace xe {
@@ -155,6 +157,9 @@ void GuestScheduler::Shutdown() {
   if (!started_.load() && !io_started_.load()) {
     return;
   }
+  if (stopped_.load()) {
+    return;
+  }
   shutting_down_.store(true);
   for (Cpu& cpu : cpus_) {
     if (cpu.ready_event) {
@@ -168,11 +173,38 @@ void GuestScheduler::Shutdown() {
     watchdog_event_->Set();
   }
   for (Cpu& cpu : cpus_) {
-    if (cpu.host_thread) {
-      // Join before reset(): reset() only closes the handle.
-      xe::threading::Wait(cpu.host_thread.get(), false);
-      cpu.host_thread.reset();
+    if (!cpu.host_thread) {
+      continue;
     }
+    // Join before reset(), which only closes the handle. A spinning fiber
+    // only leaves via the preempt flag, so keep raising it until the loop
+    // drains.
+    int waited_ms = 0;
+    while (xe::threading::Wait(cpu.host_thread.get(), false,
+                               std::chrono::milliseconds(50)) ==
+           xe::threading::WaitResult::kTimeout) {
+      {
+        std::lock_guard<std::mutex> lock(lock_);
+        for (int i = 0; i < host_cpu_count_; ++i) {
+          if (XThread* running = cpus_[i].current_thread) {
+            running->thread_state()->context()->preempt_requested = 1;
+          }
+        }
+      }
+      for (int i = 0; i < host_cpu_count_; ++i) {
+        if (cpus_[i].ready_event) {
+          cpus_[i].ready_event->Set();
+        }
+      }
+      waited_ms += 50;
+      if (waited_ms % 2000 == 0) {
+        XELOGW(
+            "GuestScheduler: shutdown has waited {} ms for a dispatch thread, "
+            "its fiber is not reaching a safepoint",
+            waited_ms);
+      }
+    }
+    cpu.host_thread.reset();
   }
   if (watchdog_thread_) {
     xe::threading::Wait(watchdog_thread_.get(), false);
@@ -183,6 +215,51 @@ void GuestScheduler::Shutdown() {
     xe::threading::Wait(io_thread_.get(), false);
     io_thread_.reset();
   }
+  // Everything still linked is unreachable now that the dispatch threads are
+  // gone. Reclaim each thread so a relaunch does not leak it and its stack.
+  std::vector<XThread*> leftovers;
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    auto drain = [&leftovers](XThread*& head, XThread*& tail) {
+      for (XThread* t = head; t;) {
+        auto& links = t->scheduler_links();
+        XThread* next = links.ready_next;
+        links.queued = false;
+        links.blocked = false;
+        links.suspended = false;
+        links.ready_next = nullptr;
+        leftovers.push_back(t);
+        t = next;
+      }
+      head = nullptr;
+      tail = nullptr;
+    };
+    for (Cpu& cpu : cpus_) {
+      for (int prio = 0; prio < 32; ++prio) {
+        drain(cpu.ready_head[prio], cpu.ready_tail[prio]);
+      }
+      cpu.ready_summary = 0;
+      drain(cpu.blocked_head, cpu.blocked_tail);
+      drain(cpu.suspended_head, cpu.suspended_tail);
+      if (cpu.exited_thread) {
+        leftovers.push_back(cpu.exited_thread);
+        cpu.exited_thread = nullptr;
+      }
+      cpu.yield_to_other = nullptr;
+      cpu.current_thread = nullptr;
+      cpu.has_blocked.store(false, std::memory_order_relaxed);
+    }
+  }
+  if (!leftovers.empty()) {
+    XELOGI("GuestScheduler: reclaiming {} parked fibers on shutdown",
+           leftovers.size());
+  }
+  for (XThread* t : leftovers) {
+    // A parked waiter's registration would otherwise dangle on the object.
+    XObject::AbandonCooperativeWait(t);
+    t->ReclaimExited();
+  }
+  stopped_.store(true);
 }
 
 void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index,
@@ -251,7 +328,9 @@ bool GuestScheduler::ParkSuspended(XThread* thread, int cpu_index) {
   auto& links = thread->scheduler_links();
   // Re-read under the lock, a Resume racing the dispatcher's check would have
   // found us not yet parked and parking anyway would strand the thread.
-  if (thread->suspend_count() == 0) {
+  // Termination overrides suspension, run it so it can exit.
+  if (thread->suspend_count() == 0 ||
+      links.terminate_pending.load(std::memory_order_relaxed)) {
     return false;
   }
   // Clearing running last, so it is never both unowned and unlisted.
@@ -439,6 +518,70 @@ bool GuestScheduler::ForgetThread(XThread* thread) {
   return reclaimable;
 }
 
+bool GuestScheduler::TerminateThread(XThread* thread) {
+  int wake_cpu = -1;
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    auto& links = thread->scheduler_links();
+    links.terminate_pending.store(true, std::memory_order_relaxed);
+    if (stopped_.load() || !started_.load()) {
+      // No dispatcher will ever run it again, detach it and let the caller
+      // free the stack, parked frames and all.
+      if (links.cpu >= 0) {
+        Cpu& cpu = cpus_[links.cpu];
+        if (links.queued) {
+          int prio = links.queued_prio;
+          UnlinkLocked(cpu.ready_head[prio], cpu.ready_tail[prio], thread);
+          if (!cpu.ready_head[prio]) {
+            cpu.ready_summary &= ~(uint32_t(1) << prio);
+          }
+        } else if (links.blocked) {
+          UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
+        } else if (links.suspended) {
+          UnlinkLocked(cpu.suspended_head, cpu.suspended_tail, thread);
+        }
+      }
+      links.queued = false;
+      links.blocked = false;
+      links.suspended = false;
+      links.ready_next = nullptr;
+      assert_false(links.running);
+      return !links.running;
+    }
+    if (links.running) {
+      // Force it to a safepoint, where ExitIfTerminated ends it.
+      thread->thread_state()->context()->preempt_requested = 1;
+      return false;
+    }
+    if (links.blocked || links.suspended) {
+      // Termination overrides a wait or suspend. Dispatch it so it exits on
+      // its own stack and the idle loop reclaims it.
+      Cpu& cpu = cpus_[links.cpu];
+      if (links.blocked) {
+        UnlinkLocked(cpu.blocked_head, cpu.blocked_tail, thread);
+      } else {
+        UnlinkLocked(cpu.suspended_head, cpu.suspended_tail, thread);
+      }
+      links.blocked = false;
+      links.suspended = false;
+      links.ready_next = nullptr;
+      links.queued = true;
+      LinkReadyLocked(cpus_[links.cpu], thread, true);
+      wake_cpu = links.cpu;
+    } else if (!links.queued && !links.has_run) {
+      // Created suspended and never queued, nothing is on its stack.
+      return true;
+    }
+    // A queued thread diverts at its resume point, and one that already
+    // exited or crashed is the dispatcher's to reclaim.
+  }
+  if (wake_cpu >= 0 && cpus_[wake_cpu].parked.load() &&
+      cpus_[wake_cpu].ready_event) {
+    cpus_[wake_cpu].ready_event->Set();
+  }
+  return false;
+}
+
 void GuestScheduler::SwitchTo(XThread* next) {
   assert_not_null(next);
   assert_not_null(next->fiber());
@@ -547,10 +690,26 @@ void GuestScheduler::YieldToScheduler() {
   cpus_[t_current_cpu].idle_fiber->SwitchTo();
 }
 
+void GuestScheduler::ExitIfTerminated() {
+  XThread* self = XThread::GetCurrentFiberThread();
+  if (!self || !self->scheduler_links().terminate_pending.load(
+                   std::memory_order_relaxed)) {
+    return;
+  }
+  // The wait registration may be newer than the one Terminate abandoned.
+  XObject::AbandonCooperativeWait(self);
+  // A park or dispatch since the terminate may have overwritten this.
+  self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_TERMINATED;
+  NotifyThreadExited(self);
+  YieldToScheduler();  // never returns
+}
+
 void GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
   if (!OnDispatchThread("YieldCurrentThread")) {
     return;
   }
+  // An externally terminated thread stops here.
+  ExitIfTerminated();
   XThread* self = XThread::GetCurrentThread();
   auto& links = self->scheduler_links();
   // A slice cut short by a higher-priority thread is not a quantum end, that
@@ -566,6 +725,8 @@ void GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
   // not saved until the yield below and another CPU must not grab it yet.
   EnqueueReady(self, t_current_cpu, to_lower);
   YieldToScheduler();
+  // Terminated while queued.
+  ExitIfTerminated();
 }
 
 void GuestScheduler::SpinYield(std::chrono::milliseconds host_sleep) {
@@ -618,7 +779,9 @@ void GuestScheduler::WaitOnFence(xe::threading::Fence& fence) {
   }
   auto* scheduler = self->kernel_state()->guest_scheduler();
   while (!fence.TryWait()) {
-    scheduler->BlockCurrentThread();
+    // The signaler touches the fence on this stack, terminate must not free
+    // it.
+    scheduler->BlockCurrentThread(0, 0, false, false);
   }
 }
 
@@ -633,7 +796,8 @@ void GuestScheduler::RunBlockingHostCallOffloaded(
   }
   io_event_->Set();
   while (!call.done.load(std::memory_order_acquire)) {
-    BlockCurrentThread();
+    // The worker writes |call| on this stack, terminate must not free it.
+    BlockCurrentThread(0, 0, false, false);
   }
 }
 
@@ -713,9 +877,13 @@ void GuestScheduler::NotifyThreadExited(XThread* thread) {
 }
 
 void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
-                                        uint32_t wait_epoch, bool alertable) {
+                                        uint32_t wait_epoch, bool alertable,
+                                        bool interruptible) {
   if (!OnDispatchThread("BlockCurrentThread")) {
     return;
+  }
+  if (interruptible) {
+    ExitIfTerminated();
   }
   XThread* self = XThread::GetCurrentThread();
   int cpu_index = t_current_cpu;
@@ -770,6 +938,10 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
   }
   self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_WAITING;
   YieldToScheduler();
+  // Terminated while parked, TerminateThread re-readied us to exit here.
+  if (interruptible) {
+    ExitIfTerminated();
+  }
 }
 
 void GuestScheduler::RereadyBlocked(int cpu_index) {
