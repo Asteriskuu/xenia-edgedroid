@@ -188,8 +188,9 @@ struct GuestTrampolineGroup
   }
 };
 
-// Registered by the cooperative scheduler when it starts, null otherwise. A JIT
-// safepoint calls it with the PPCContext once a fiber's timeslice has expired.
+// Registered by the cooperative scheduler when it starts, null otherwise. A
+// JIT safepoint calls it with the PPCContext once the scheduler has raised the
+// context's preempt_requested flag.
 extern void (*preempt_yield_handler)(void* raw_context);
 
 }  // namespace backend
