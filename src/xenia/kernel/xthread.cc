@@ -720,15 +720,22 @@ void XThread::ReclaimExited() {
 }
 
 void XThread::Execute() {
-  XELOGD("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X})",
-         thread_id_, handle(), thread_name_,
-         thread_ ? thread_->system_id() : 0);
+  ALOGI("XThread::Execute: entered thid=%u handle=%08X name='%s' native=%08X",
+        thread_id_, handle(), thread_name_.c_str(),
+        thread_ ? thread_->system_id() : 0);
+
+  ALOGI("XThread::Execute: setting guest thread state to RUNNING");
   guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_RUNNING;
+
   // Let the kernel know we are starting.
+  ALOGI("XThread::Execute: calling kernel_state()->OnThreadExecute(this)");
   kernel_state()->OnThreadExecute(this);
+  ALOGI("XThread::Execute: OnThreadExecute returned");
 
   // Dispatch any APCs that were queued before the thread was created first.
+  ALOGI("XThread::Execute: calling DeliverAPCs()");
   DeliverAPCs();
+  ALOGI("XThread::Execute: DeliverAPCs returned");
 
   uint32_t address;
   std::vector<uint64_t> args;
@@ -742,12 +749,21 @@ void XThread::Execute() {
     args.push_back(creation_params_.start_address);
     args.push_back(creation_params_.start_context);
     want_exit_code = false;
+
+    ALOGI("XThread::Execute: using XAPI trampoline address=%08X start=%08X ctx=%08X",
+          address, creation_params_.start_address, creation_params_.start_context);
   } else {
     // Run user code.
     address = creation_params_.start_address;
     args.push_back(creation_params_.start_context);
     want_exit_code = true;
+
+    ALOGI("XThread::Execute: using raw thread entry address=%08X ctx=%08X",
+          address, creation_params_.start_context);
   }
+
+  ALOGI("XThread::Execute: want_exit_code=%d args_size=%zu",
+        want_exit_code ? 1 : 0, args.size());
 
   // Set up reentry mechanism for fiber-based stack switching.
   // When Reenter() is called (e.g., by KeSetCurrentStackPointers), it
@@ -760,12 +776,19 @@ void XThread::Execute() {
   // On Windows, setjmp/longjmp is used because MSVC's longjmp performs SEH
   // stack unwinding which already calls destructors.
   uint32_t next_address;
+
 #if !XE_PLATFORM_WIN32
+  ALOGI("XThread::Execute: entering Execute() path");
   try {
+    ALOGI("XThread::Execute: calling processor()->Execute(address=%08X)", address);
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
         thread_state_, address, args.data(), args.size()));
+    ALOGI("XThread::Execute: processor()->Execute returned exit_code=%d",
+          exit_code);
     next_address = 0;
   } catch (const FiberReentryException& e) {
+    ALOGW("XThread::Execute: caught FiberReentryException address=%08X",
+          e.address);
 #if XE_PLATFORM_LINUX
     // Ensure SIGRTMIN (used for thread suspend) is not left blocked.
     sigset_t set;
@@ -774,16 +797,24 @@ void XThread::Execute() {
     pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
 #endif
     next_address = e.address;
+    ALOGI("XThread::Execute: reentry next_address=%08X", next_address);
   }
 
   while (next_address != 0) {
     try {
+      ALOGI("XThread::Execute: calling ExecuteRaw(next_address=%08X)",
+            next_address);
       kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
+      ALOGI("XThread::Execute: ExecuteRaw returned");
       next_address = 0;
+
       if (want_exit_code) {
         exit_code = static_cast<int>(thread_state_->context()->r[3]);
+        ALOGI("XThread::Execute: exit_code from r3=%d", exit_code);
       }
     } catch (const FiberReentryException& e) {
+      ALOGW("XThread::Execute: caught FiberReentryException during ExecuteRaw address=%08X",
+            e.address);
 #if XE_PLATFORM_LINUX
       sigset_t set;
       sigemptyset(&set);
@@ -791,25 +822,37 @@ void XThread::Execute() {
       pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
 #endif
       next_address = e.address;
+      ALOGI("XThread::Execute: reentry next_address=%08X", next_address);
     }
   }
 #else
+  ALOGI("XThread::Execute: entering Windows setjmp/longjmp path");
   if (setjmp(reentry_jmp_buf_) != 0) {
     next_address = reentry_address_;
+    ALOGI("XThread::Execute: reentered next_address=%08X", next_address);
   } else {
+    ALOGI("XThread::Execute: calling processor()->Execute(address=%08X)", address);
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
         thread_state_, address, args.data(), args.size()));
+    ALOGI("XThread::Execute: processor()->Execute returned exit_code=%d",
+          exit_code);
     next_address = 0;
   }
 
   while (next_address != 0) {
     if (setjmp(reentry_jmp_buf_) != 0) {
       next_address = reentry_address_;
+      ALOGI("XThread::Execute: reentered next_address=%08X", next_address);
     } else {
+      ALOGI("XThread::Execute: calling ExecuteRaw(next_address=%08X)",
+            next_address);
       kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
+      ALOGI("XThread::Execute: ExecuteRaw returned");
       next_address = 0;
+
       if (want_exit_code) {
         exit_code = static_cast<int>(thread_state_->context()->r[3]);
+        ALOGI("XThread::Execute: exit_code from r3=%d", exit_code);
       }
     }
   }
@@ -817,7 +860,10 @@ void XThread::Execute() {
 
   // If we got here it means the execute completed without an exit being called.
   // Treat the return code as an implicit exit code (if desired).
+  ALOGI("XThread::Execute: calling Exit(exit_code=%d final=%d)",
+        exit_code, !want_exit_code ? 0 : exit_code);
   Exit(!want_exit_code ? 0 : exit_code);
+  ALOGI("XThread::Execute: Exit returned");
 }
 
 void XThread::Reenter(uint32_t address) {
