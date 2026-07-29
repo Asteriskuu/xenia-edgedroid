@@ -32,9 +32,11 @@ class XThread;
 // host threads (guest_scheduler_cpus: 1, 3, or 6). Each guest thread runs as a
 // host fiber pinned by its guest current_cpu to one dispatch thread. Fibers on
 // different dispatch threads run truly in parallel, while fibers sharing one
-// are cooperatively scheduled, switching only at yield points (waits, delays,
-// NtYieldExecution, exit). There is no forced preemption. A single lock guards
-// every per-CPU queue and is never held across a fiber switch.
+// are cooperatively scheduled, switching at yield points (waits, delays,
+// NtYieldExecution, exit) and at JIT safepoints, which test a per-context
+// preempt flag raised by the watchdog on slice expiry, by a priority
+// preemption or by a wake. A single lock guards every per-CPU queue and is
+// never held across a fiber switch.
 class GuestScheduler {
  public:
   explicit GuestScheduler(KernelState* kernel_state);
@@ -68,10 +70,10 @@ class GuestScheduler {
   static void SpinYield(std::chrono::milliseconds host_sleep = {});
 
   // Pokes every dispatch thread with a blocked waiter so it re-polls now rather
-  // than waiting out the backoff. Call after signaling a host primitive a
-  // cooperative wait polls. Coarse, it does not track which object was
-  // signaled, and the backoff remains a backstop so a missed wake only adds
-  // latency.
+  // than waiting out the backoff, flagging its running fiber to yield at the
+  // next safepoint. Call after signaling a host primitive a cooperative wait
+  // polls. Coarse, it does not track which object was signaled, and the
+  // backoff remains a backstop so a missed wake only adds latency.
   void WakeAll();
 
   // Runs |fn|, a blocking host call such as a disc read, without stalling the
@@ -161,6 +163,12 @@ class GuestScheduler {
     // Hint read lock-free by WakeAll so it only wakes CPUs with a parked
     // waiter. A stale value costs a spurious wake or one backoff interval.
     std::atomic<bool> has_blocked{false};
+    // Raw-tick end of the running fiber's slice, stamped by SwitchTo and
+    // compared by the watchdog. Guarded by lock_.
+    uint64_t quantum_deadline_tick = 0;
+    // Makes RunLoop re-poll blocked waiters now instead of on the backoff
+    // timer. Set by WakeAll, consumed lock-free by RunLoop.
+    std::atomic<bool> repoll_now{false};
   };
 
   // The dispatch thread a thread is pinned to: its guest current_cpu mapped
@@ -180,6 +188,9 @@ class GuestScheduler {
   // Returns false if the count already reached zero, meaning run it instead.
   bool ParkSuspended(XThread* thread, int cpu_index);
   void RunLoop(int cpu_index);
+  // Raises preempt_requested on any CPU whose running fiber outlived its
+  // slice, since a dispatch thread cannot tick while it runs a fiber.
+  void WatchdogLoop();
   // Offload path of RunBlockingHostCall: queue to the I/O worker and park.
   void RunBlockingHostCallOffloaded(const std::function<void()>& fn);
   // Lazily starts the single I/O worker on first RunBlockingHostCall.
@@ -205,6 +216,8 @@ class GuestScheduler {
 
   // Preemption timeslice in raw host ticks, calibrated once in EnsureStarted.
   uint64_t quantum_ticks_ = 0;
+  std::unique_ptr<xe::threading::Thread> watchdog_thread_;
+  std::unique_ptr<xe::threading::Event> watchdog_event_;
 
   // Guards every CPU's ready and blocked lists. Never held across a fiber
   // switch.

@@ -45,28 +45,30 @@ static int ClampPriority(int32_t priority) {
   return priority < 0 ? 0 : (priority > 31 ? 31 : priority);
 }
 
-// JIT safepoint handler, yields the fiber once its timeslice has expired. The
-// deferred cases leave the deadline expired, so the next safepoint retries.
+// JIT safepoint handler. The cold path cleared the flag, so the deferred
+// cases re-set it to retry at the next safepoint.
 static void PreemptCurrentFiber(void* /*raw_context*/) {
   XThread* self = XThread::GetCurrentFiberThread();
   if (!self) {
     return;
   }
+  auto* context = self->thread_state()->context();
   // A co-resident fiber would re-enter the recursive lock on this host thread.
   if (xe::global_critical_region::is_held_by_current_thread()) {
+    context->preempt_requested = 1;
     return;
   }
   // At DISPATCH_LEVEL and above the console masks the decrementer.
-  auto* context = self->thread_state()->context();
   auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
   if (kpcr->current_irql >= 2) {
+    context->preempt_requested = 1;
     return;
   }
   // Involuntary quantum end, so no yield to a lower-priority thread.
   self->kernel_state()->guest_scheduler()->YieldCurrentThread(true, false);
 }
 
-// Raw host ticks per us, so a quantum becomes a JIT deadline, 0 if unusable.
+// Raw host ticks per us for the watchdog's deadline math, 0 if unusable.
 static double CalibrateTicksPerUs() {
   uint64_t qpc_freq = Clock::host_tick_frequency_platform();
   uint64_t qpc0 = Clock::host_tick_count_platform();
@@ -119,16 +121,23 @@ void GuestScheduler::EnsureStarted() {
     XELOGI("GuestScheduler: preemption slice = {} us ({} ticks)",
            uint32_t(cvars::guest_scheduler_quantum_us), quantum_ticks_);
   } else {
-    // Priority preemption still works, it expires the deadline outright.
+    // Priority and wake preemption still work, they raise the flag directly.
     XELOGW(
-        "GuestScheduler: no timeslice preemption ({}), fibers only switch on "
-        "voluntary yields",
+        "GuestScheduler: no timeslice preemption ({}), a fiber that never "
+        "yields or waits can hog its CPU",
         ticks_per_us > 0.0 ? "guest_scheduler_quantum_us is 0"
                            : "host tick counter did not calibrate");
   }
 
   for (int i = 0; i < host_cpu_count_; ++i) {
     cpus_[i].ready_event = xe::threading::Event::CreateAutoResetEvent(false);
+  }
+  if (quantum_ticks_) {
+    watchdog_event_ = xe::threading::Event::CreateAutoResetEvent(false);
+    xe::threading::Thread::CreationParameters params;
+    watchdog_thread_ =
+        xe::threading::Thread::Create(params, [this]() { WatchdogLoop(); });
+    watchdog_thread_->set_name("Guest Scheduler Watchdog");
   }
   for (int i = 0; i < host_cpu_count_; ++i) {
     xe::threading::Thread::CreationParameters params;
@@ -152,12 +161,19 @@ void GuestScheduler::Shutdown() {
   if (io_event_) {
     io_event_->Set();
   }
+  if (watchdog_event_) {
+    watchdog_event_->Set();
+  }
   for (Cpu& cpu : cpus_) {
     if (cpu.host_thread) {
       // Join before reset(): reset() only closes the handle.
       xe::threading::Wait(cpu.host_thread.get(), false);
       cpu.host_thread.reset();
     }
+  }
+  if (watchdog_thread_) {
+    xe::threading::Wait(watchdog_thread_.get(), false);
+    watchdog_thread_.reset();
   }
   // After the dispatch threads, so no fiber is still watching a BlockingCall.
   if (io_thread_) {
@@ -336,13 +352,13 @@ void GuestScheduler::LinkReadyLocked(Cpu& cpu, XThread* thread, bool at_head) {
     LinkTailLocked(cpu.ready_head[prio], cpu.ready_tail[prio], thread);
   }
   cpu.ready_summary |= uint32_t(1) << prio;
-  // Outranking the running fiber expires its quantum, so its next JIT
-  // safepoint yields and the dispatcher picks us.
+  // Outranking the running fiber flags it, so its next JIT safepoint yields
+  // and the dispatcher picks us.
   XThread* running = cpu.current_thread;
   if (running && running != thread &&
       prio > ClampPriority(running->priority())) {
     running->scheduler_links().preempted = true;
-    running->thread_state()->context()->quantum_deadline = 0;
+    running->thread_state()->context()->preempt_requested = 1;
   }
 }
 
@@ -432,14 +448,14 @@ void GuestScheduler::SwitchTo(XThread* next) {
     std::lock_guard<std::mutex> lock(lock_);
     assert_true(links.running);
     cpus_[t_current_cpu].current_thread = next;
+    cpus_[t_current_cpu].quantum_deadline_tick =
+        Clock::host_tick_count_raw() + quantum_ticks_;
   }
   XThread::SetCurrentThread(next);
   next->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_RUNNING;
-  // With no slice never expire on time alone, a zero deadline would preempt at
-  // every safepoint.
-  next->thread_state()->context()->quantum_deadline =
-      quantum_ticks_ ? Clock::host_tick_count_raw() + quantum_ticks_
-                     : UINT64_MAX;
+  // A flag raised while this fiber was off-CPU is stale, the dispatcher
+  // already served it. A raise racing this clear is restored by the watchdog.
+  next->thread_state()->context()->preempt_requested = 0;
   next->fiber()->SwitchTo();
   // Back on the idle fiber.
   {
@@ -631,6 +647,23 @@ void GuestScheduler::WakeAll() {
   if (!started_.load()) {
     return;
   }
+  // Preempt each CPU with a blocked waiter so the signal is observed now, not
+  // at quantum end. preempted spares the yielder decay and a tail requeue.
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    for (int i = 0; i < host_cpu_count_; ++i) {
+      Cpu& cpu = cpus_[i];
+      if (!cpu.blocked_head) {
+        continue;
+      }
+      cpu.repoll_now.store(true, std::memory_order_relaxed);
+      XThread* running = cpu.current_thread;
+      if (running) {
+        running->scheduler_links().preempted = true;
+        running->thread_state()->context()->preempt_requested = 1;
+      }
+    }
+  }
   for (int i = 0; i < host_cpu_count_; ++i) {
     if (cpus_[i].has_blocked.load(std::memory_order_relaxed) &&
         cpus_[i].ready_event) {
@@ -717,9 +750,10 @@ void GuestScheduler::RunLoop(int cpu_index) {
   uint64_t next_repoll_ms = 0;
   while (!shutting_down_.load()) {
     // Re-poll blocked waiters on a timer even while other fibers run, or a busy
-    // fiber that rarely waits would starve them.
+    // fiber that rarely waits would starve them. A wake skips the backoff.
     uint64_t now = Clock::QueryHostUptimeMillis();
-    if (now >= next_repoll_ms) {
+    if (cpu.repoll_now.exchange(false, std::memory_order_relaxed) ||
+        now >= next_repoll_ms) {
       RereadyBlocked(cpu_index);
       next_repoll_ms = now + kPollBackoffMs;
     }
@@ -777,6 +811,28 @@ void GuestScheduler::RunLoop(int cpu_index) {
   }
   XELOGI("GuestScheduler: CPU {} dispatch loop exited (shutting_down={})",
          cpu_index, shutting_down_.load());
+}
+
+void GuestScheduler::WatchdogLoop() {
+  uint64_t period_ms = cvars::guest_scheduler_quantum_us / 1000;
+  if (!period_ms) {
+    period_ms = 1;
+  }
+  while (!shutting_down_.load()) {
+    xe::threading::Wait(watchdog_event_.get(), false,
+                        std::chrono::milliseconds(period_ms));
+    if (shutting_down_.load()) {
+      break;
+    }
+    uint64_t now = Clock::host_tick_count_raw();
+    std::lock_guard<std::mutex> lock(lock_);
+    for (int i = 0; i < host_cpu_count_; ++i) {
+      XThread* running = cpus_[i].current_thread;
+      if (running && now >= cpus_[i].quantum_deadline_tick) {
+        running->thread_state()->context()->preempt_requested = 1;
+      }
+    }
+  }
 }
 
 }  // namespace kernel

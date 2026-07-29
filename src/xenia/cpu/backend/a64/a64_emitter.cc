@@ -715,21 +715,17 @@ void A64Emitter::EmitPreemptCheck() {
   // guest value live and ForgetFpcrMode has already run, so the unannounced
   // guest->host call cannot lose a register or desync the mode tracking.
   //
-  // The deadline is only tested every 256 block entries, counted in the high
-  // byte of the backend flags, which a byte increment never carries out of.
+  // Tests the preempt flag other threads raise. The cold path clears it, a
+  // deferred yield re-sets it.
   Label& after = NewCachedLabel();
-  const uint32_t counter_offset =
-      static_cast<uint32_t>(offsetof(A64BackendContext, flags) + 3);
-  ldrb(w8, ptr(x19, counter_offset));
-  add(w8, w8, 1);
-  strb(w8, ptr(x19, counter_offset));
-  and_(w8, w8, 0xFF);
-  cbnz(w8, after);
-
-  // Cold path.
-  Label& do_yield = AddToTail([&after](A64Emitter& e, Label&) {
-    // Null until the scheduler starts, and a stale expired deadline can reach
-    // here after it shuts down, so check before calling.
+  // ldrb/strb unsigned-offset encoding caps at 4095.
+  static_assert(offsetof(ppc::PPCContext, preempt_requested) < 4096);
+  const uint32_t flag_offset =
+      static_cast<uint32_t>(offsetof(ppc::PPCContext, preempt_requested));
+  Label& do_yield = AddToTail([&after, flag_offset](A64Emitter& e, Label&) {
+    e.strb(e.wzr, ptr(e.x20, flag_offset));
+    // Null until the scheduler starts, and a stale flag can reach here after
+    // it shuts down, so check before calling.
     e.mov(e.x0,
           reinterpret_cast<uint64_t>(&xe::cpu::backend::preempt_yield_handler));
     e.ldr(e.x0, ptr(e.x0));
@@ -738,13 +734,8 @@ void A64Emitter::EmitPreemptCheck() {
     e.blr(e.x9);
     e.b(after);
   });
-
-  // CNTVCT_EL0, the same counter Clock::host_tick_count_raw reads.
-  mrs(x9, 3, 3, 14, 0, 2);
-  ldr(x10, ptr(x20, static_cast<int32_t>(
-                        offsetof(ppc::PPCContext, quantum_deadline))));
-  cmp(x9, x10);
-  b(HS, do_yield);
+  ldrb(w8, ptr(x20, flag_offset));
+  cbnz(w8, do_yield);
   L(after);
 }
 
