@@ -1900,28 +1900,45 @@ bool Emulator::ExceptionCallback(Exception* ex) {
 }
 
 void Emulator::WaitUntilExit() {
+  ALOGI("WaitUntilExit: entered");
+
   while (true) {
+    ALOGI("WaitUntilExit: loop start (main_thread_=%p, restoring_=%d, relaunching_=%d)",
+          main_thread_.get(), restoring_, relaunching_);
+
     if (main_thread_) {
       // Use wait_handle() rather than thread(): a fiber-backed main thread has
       // no host thread, only an exit event.
+      ALOGI("WaitUntilExit: waiting on main_thread_ wait_handle");
       xe::threading::Wait(main_thread_->wait_handle(), false);
+      ALOGI("WaitUntilExit: wait returned");
+    } else {
+      ALOGW("WaitUntilExit: main_thread_ is null");
     }
 
     if (restoring_) {
+      ALOGI("WaitUntilExit: restoring_ is true, waiting on restore_fence_");
       restore_fence_.Wait();
+      ALOGI("WaitUntilExit: restore_fence_ wait finished");
     } else if (relaunching_) {
+      ALOGI("WaitUntilExit: relaunching_ is true, waiting for relaunch to finish");
       // RelaunchTitle is running on another thread - wait for it to finish
       // and set the new main_thread_, then loop back to wait on it.
       while (relaunching_) {
+        ALOGI("WaitUntilExit: relaunching_ still true");
         xe::threading::Sleep(std::chrono::milliseconds(10));
       }
+      ALOGI("WaitUntilExit: relaunching_ finished");
     } else {
       // Not restoring/relaunching and the thread exited. We're finished.
+      ALOGI("WaitUntilExit: breaking out of loop");
       break;
     }
   }
 
+  ALOGI("WaitUntilExit: calling on_exit()");
   on_exit();
+  ALOGI("WaitUntilExit: finished");
 }
 
 std::string Emulator::RemountAndResolveLaunchPath(
