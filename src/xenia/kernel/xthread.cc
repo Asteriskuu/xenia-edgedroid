@@ -750,8 +750,11 @@ void XThread::Execute() {
     args.push_back(creation_params_.start_context);
     want_exit_code = false;
 
-    ALOGI("XThread::Execute: using XAPI trampoline address=%08X start=%08X ctx=%08X",
-          address, creation_params_.start_address, creation_params_.start_context);
+    ALOGI(
+        "XThread::Execute: using XAPI trampoline address=%08X start=%08X "
+        "ctx=%08X",
+        address, creation_params_.start_address,
+        creation_params_.start_context);
   } else {
     // Run user code.
     address = creation_params_.start_address;
@@ -780,7 +783,8 @@ void XThread::Execute() {
 #if !XE_PLATFORM_WIN32
   ALOGI("XThread::Execute: entering Execute() path");
   try {
-    ALOGI("XThread::Execute: calling processor()->Execute(address=%08X)", address);
+    ALOGI("XThread::Execute: calling processor()->Execute(address=%08X)",
+          address);
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
         thread_state_, address, args.data(), args.size()));
     ALOGI("XThread::Execute: processor()->Execute returned exit_code=%d",
@@ -807,14 +811,15 @@ void XThread::Execute() {
       kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
       ALOGI("XThread::Execute: ExecuteRaw returned");
       next_address = 0;
-
       if (want_exit_code) {
         exit_code = static_cast<int>(thread_state_->context()->r[3]);
         ALOGI("XThread::Execute: exit_code from r3=%d", exit_code);
       }
     } catch (const FiberReentryException& e) {
-      ALOGW("XThread::Execute: caught FiberReentryException during ExecuteRaw address=%08X",
-            e.address);
+      ALOGW(
+          "XThread::Execute: caught FiberReentryException during ExecuteRaw "
+          "address=%08X",
+          e.address);
 #if XE_PLATFORM_LINUX
       sigset_t set;
       sigemptyset(&set);
@@ -831,7 +836,8 @@ void XThread::Execute() {
     next_address = reentry_address_;
     ALOGI("XThread::Execute: reentered next_address=%08X", next_address);
   } else {
-    ALOGI("XThread::Execute: calling processor()->Execute(address=%08X)", address);
+    ALOGI("XThread::Execute: calling processor()->Execute(address=%08X)",
+          address);
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
         thread_state_, address, args.data(), args.size()));
     ALOGI("XThread::Execute: processor()->Execute returned exit_code=%d",
@@ -860,8 +866,8 @@ void XThread::Execute() {
 
   // If we got here it means the execute completed without an exit being called.
   // Treat the return code as an implicit exit code (if desired).
-  ALOGI("XThread::Execute: calling Exit(exit_code=%d final=%d)",
-        exit_code, !want_exit_code ? 0 : exit_code);
+  ALOGI("XThread::Execute: calling Exit(exit_code=%d final=%d)", exit_code,
+        !want_exit_code ? 0 : exit_code);
   Exit(!want_exit_code ? 0 : exit_code);
   ALOGI("XThread::Execute: Exit returned");
 }
