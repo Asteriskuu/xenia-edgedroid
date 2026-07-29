@@ -754,6 +754,18 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
     if (prio > cpu.max_blocked_prio) {
       cpu.max_blocked_prio = prio;
     }
+    // Timed need of this waiter: the poll cadence for ungated and alertable
+    // waits, a gated deadline, nothing for a quiet gated wait.
+    uint64_t due = gated ? deadline_ms : 0;
+    if (!gated || alertable) {
+      uint64_t cadence = Clock::QueryHostUptimeMillis() + kPollBackoffMs;
+      if (!due || cadence < due) {
+        due = cadence;
+      }
+    }
+    if (due && due < cpu.next_timed_repoll_ms) {
+      cpu.next_timed_repoll_ms = due;
+    }
     cpu.has_blocked.store(true, std::memory_order_relaxed);
   }
   self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_WAITING;
@@ -765,11 +777,15 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     Cpu& cpu = cpus_[cpu_index];
-    bool force_all = ++cpu.repoll_backstop >= kRepollBackstopTicks;
-    if (force_all) {
-      cpu.repoll_backstop = 0;
-    }
     uint64_t now_ms = Clock::QueryHostUptimeMillis();
+    bool force_all = now_ms >= cpu.next_force_repoll_ms;
+    if (force_all) {
+      cpu.next_force_repoll_ms = now_ms + kRepollBackstopMs;
+    }
+    // Earliest timed need among the waiters kept parked, the backstop bounds
+    // it. Waiters re-readied below re-park through BlockCurrentThread, which
+    // lowers it again before this CPU can sleep.
+    uint64_t next_due = cpu.next_force_repoll_ms;
     XThread* kept_head = nullptr;
     XThread* kept_tail = nullptr;
     int kept_max_prio = -1;
@@ -788,6 +804,13 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
           int prio = ClampPriority(t->priority());
           if (prio > kept_max_prio) {
             kept_max_prio = prio;
+          }
+          if (links.wait_deadline_ms && links.wait_deadline_ms < next_due) {
+            next_due = links.wait_deadline_ms;
+          }
+          if (links.wait_alertable && now_ms + kPollBackoffMs < next_due) {
+            // APCs inserted without a WakeAll are only found by polling.
+            next_due = now_ms + kPollBackoffMs;
           }
           t = next;
           continue;
@@ -810,6 +833,7 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
     cpu.blocked_head = kept_head;
     cpu.blocked_tail = kept_tail;
     cpu.max_blocked_prio = kept_max_prio;
+    cpu.next_timed_repoll_ms = next_due;
     cpu.has_blocked.store(kept_head != nullptr, std::memory_order_relaxed);
   }
   // Wake any other dispatch thread that received a ready fiber (this one runs).
@@ -828,15 +852,14 @@ void GuestScheduler::RunLoop(int cpu_index) {
   cpu.idle_fiber = xe::threading::Fiber::CreateFromThread();
   XELOGI("GuestScheduler: CPU {} dispatch loop started", cpu_index);
 
-  uint64_t next_repoll_ms = 0;
   while (!shutting_down_.load()) {
-    // Re-poll blocked waiters on a timer even while other fibers run, or a busy
-    // fiber that rarely waits would starve them. A wake skips the backoff.
+    // Re-poll blocked waiters on a timer even while other fibers run, or a
+    // busy fiber that rarely waits would starve them. The timer runs at what
+    // the parked waiters actually need, a wake skips it entirely.
     uint64_t now = Clock::QueryHostUptimeMillis();
     if (cpu.repoll_now.exchange(false, std::memory_order_relaxed) ||
-        now >= next_repoll_ms) {
+        now >= cpu.next_timed_repoll_ms) {
       RereadyBlocked(cpu_index);
-      next_repoll_ms = now + kPollBackoffMs;
     }
 
     XThread* next = DequeueReady(cpu_index);
@@ -894,14 +917,11 @@ void GuestScheduler::RunLoop(int cpu_index) {
       continue;
     }
     now = Clock::QueryHostUptimeMillis();
-    uint64_t sleep_ms = next_repoll_ms > now ? next_repoll_ms - now : 0;
-    auto wait_result = xe::threading::Wait(cpu.ready_event.get(), false,
-                                           std::chrono::milliseconds(sleep_ms));
+    uint64_t due = cpu.next_timed_repoll_ms;
+    uint64_t sleep_ms = due > now ? due - now : 0;
+    xe::threading::Wait(cpu.ready_event.get(), false,
+                        std::chrono::milliseconds(sleep_ms));
     cpu.parked.store(false);
-    if (wait_result == xe::threading::WaitResult::kSuccess) {
-      // Signaled rather than timed out, so re-poll blocked waiters now.
-      next_repoll_ms = 0;
-    }
   }
   XELOGI("GuestScheduler: CPU {} dispatch loop exited (shutting_down={})",
          cpu_index, shutting_down_.load());

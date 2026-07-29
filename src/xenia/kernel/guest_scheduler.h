@@ -137,14 +137,13 @@ class GuestScheduler {
  private:
   // Xbox 360 logical CPU count, also the maximum number of dispatch threads.
   static constexpr int kMaxCpus = 6;
-  // When no thread is ready but some are blocked, a CPU sleeps at most this
-  // long before re-polling them, so a signal from another host thread (GPU,
-  // I/O, or a fiber on another CPU) is observed promptly without spinning a
-  // core.
+  // Re-poll cadence for waiters that resolve only by polling: ungated waits
+  // and the APC check of alertable waiters. Quiet gated waiters do not tick
+  // at this rate, they wake on signals, deadlines and the backstop.
   static constexpr uint64_t kPollBackoffMs = 1;
-  // Every this many re-polls the epoch gate is ignored and every blocked
-  // fiber polls, so a missed epoch bump costs a latency blip, not a hang.
-  static constexpr uint32_t kRepollBackstopTicks = 64;
+  // At least this often every blocked fiber re-polls regardless of the epoch
+  // gate, so a missed epoch bump costs a latency blip, not a hang.
+  static constexpr uint64_t kRepollBackstopMs = 64;
 
   // Per-CPU dispatch state, each driven by its own host thread. Ready and
   // blocked fibers are intrusive FIFOs linked through
@@ -182,8 +181,13 @@ class GuestScheduler {
     // anyway. RunLoop re-checks them after setting this, so a wake that only
     // saw it false is never slept through.
     std::atomic<bool> parked{false};
-    // Re-polls since the last forced full poll. Guarded by lock_.
-    uint32_t repoll_backstop = 0;
+    // Absolute host ms of the next forced full re-poll. Guarded by lock_.
+    uint64_t next_force_repoll_ms = 0;
+    // Absolute host ms of the next timed re-poll: the earliest gated
+    // deadline, the poll cadence while ungated or alertable waiters are
+    // parked, or the backstop. Written only by this CPU's dispatch thread,
+    // which also reads it to size the idle sleep. 0 = due now.
+    uint64_t next_timed_repoll_ms = 0;
     // Highest blocked-fiber priority, so WakeAll only preempts a runner a
     // waiter could outrank. Raised on block, recomputed by RereadyBlocked.
     // Guarded by lock_.
