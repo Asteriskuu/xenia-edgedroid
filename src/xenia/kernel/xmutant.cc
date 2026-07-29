@@ -154,7 +154,7 @@ X_STATUS XMutant::ReleaseMutant(uint32_t priority_increment, bool abandon,
     owning_thread_ = nullptr;
     RemoveMutantOwned(memory(), this);
     free_signal_->Release(1, nullptr);
-    kernel_state()->guest_scheduler()->WakeAll();
+    WakeCooperativeWaiters();
   }
   return X_STATUS_SUCCESS;
 }
@@ -225,13 +225,13 @@ void XMutant::AbandonAllOwnedByThread(KernelState* ks, XThread* thread) {
         // Only the thread that held it releases, however deep its recursion.
         obj->recursion_count_ = 0;
         obj->free_signal_->Release(1, nullptr);
+        obj->WakeCooperativeWaiters();
       }
     }
     entry = next;
   }
   kthread->mutants_list.flink_ptr = head_addr;
   kthread->mutants_list.blink_ptr = head_addr;
-  ks->guest_scheduler()->WakeAll();
 }
 
 bool XMutant::IsReenteredByCurrentThread() {

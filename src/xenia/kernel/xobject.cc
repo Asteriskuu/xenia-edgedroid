@@ -231,10 +231,12 @@ void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
 // yielding to the scheduler between attempts via BlockCurrentThread, until it
 // resolves, an alertable user APC is pending, or |deadline_ms| (absolute host
 // uptime, 0 = infinite) elapses. Polling the host primitive preserves its exact
-// acquire semantics, only the blocking is made cooperative.
+// acquire semantics, only the blocking is made cooperative. |wait_object| is
+// the single object waited on, null for a multi-wait.
 template <typename PollFn>
 X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
-                         bool alertable, uint64_t deadline_ms, PollFn&& poll) {
+                         XObject* wait_object, bool alertable,
+                         uint64_t deadline_ms, PollFn&& poll) {
   while (true) {
     // Alertable waits return on a queued user APC (the cooperative equivalent
     // of a host alertable-wait wake), then the caller runs xeProcessUserApcs.
@@ -242,6 +244,10 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
       WaitExit(kthread, X_STATUS_USER_APC);
       return X_STATUS_USER_APC;
     }
+    // Sampled before polling, so a signal landing after a failed poll changes
+    // the epoch and the re-poll is not skipped.
+    uint32_t wait_epoch =
+        wait_object ? wait_object->cooperative_signal_epoch() : 0;
     std::optional<X_STATUS> resolved = poll();
     if (resolved) {
       WaitExit(kthread, *resolved);
@@ -251,7 +257,7 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
       WaitExit(kthread, X_STATUS_TIMEOUT);
       return X_STATUS_TIMEOUT;
     }
-    scheduler->BlockCurrentThread();
+    scheduler->BlockCurrentThread(deadline_ms, wait_epoch, alertable);
   }
 }
 
@@ -291,6 +297,11 @@ static xe::threading::WaitHandle* AlwaysSignaledHandle(size_t slot) {
   }();
   assert_true(slot < pool.size());
   return pool[slot < pool.size() ? slot : 0].get();
+}
+
+void XObject::WakeCooperativeWaiters() {
+  cooperative_signal_epoch_.fetch_add(1);
+  kernel_state()->guest_scheduler()->WakeAll();
 }
 
 void XObject::EnterCooperativeWait(XThread* thread) {
@@ -346,7 +357,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                                        : 0;
     EnterCooperativeWait(self);  // FIFO fairness for semaphores
     X_STATUS status = CooperativeWait(
-        scheduler, kthread, alertable != 0, deadline_ms,
+        scheduler, kthread, this, alertable != 0, deadline_ms,
         [&]() -> std::optional<X_STATUS> {
           // Only the front-of-queue fiber may take a permit (no-op for events).
           if (!CooperativeMayAcquire(self)) {
@@ -430,7 +441,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
                                        : 0;
     wait_object->EnterCooperativeWait(self);  // FIFO fairness for semaphores
     X_STATUS status = CooperativeWait(
-        scheduler, kthread, alertable != 0, deadline_ms,
+        scheduler, kthread, wait_object, alertable != 0, deadline_ms,
         [&]() -> std::optional<X_STATUS> {
           // Only the front-of-queue fiber may take a permit (no-op for events).
           if (!wait_object->CooperativeMayAcquire(self)) {
@@ -533,7 +544,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                                                  TimeoutTicksToMs(*opt_timeout))
                                        : 0;
     return CooperativeWait(
-        scheduler, kthread, alertable != 0, deadline_ms,
+        scheduler, kthread, nullptr, alertable != 0, deadline_ms,
         [&]() -> std::optional<X_STATUS> {
           resolve_handles();
           if (wait_type) {

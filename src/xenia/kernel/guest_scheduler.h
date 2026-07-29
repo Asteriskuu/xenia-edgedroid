@@ -111,10 +111,12 @@ class GuestScheduler {
   void YieldCurrentThread(bool quantum_end, bool to_lower = true);
 
   // Parks the running guest fiber on its CPU's blocked list and yields. Returns
-  // once the dispatcher re-readies it, after a short poll backoff or sooner if
-  // another thread becomes runnable, so a cooperative wait can re-poll its host
-  // primitive. The deadline is owned by the caller's poll loop.
-  void BlockCurrentThread();
+  // once the dispatcher re-readies it so the wait can re-poll. A single-object
+  // wait on an epoch-bumping type is re-readied only when the epoch moves past
+  // |wait_epoch|, |deadline_ms| (absolute host uptime, 0 = none) arrives, or a
+  // user APC lands on an alertable waiter. Anything else re-polls every pass.
+  void BlockCurrentThread(uint64_t deadline_ms = 0, uint32_t wait_epoch = 0,
+                          bool alertable = false);
 
   // Marks the running guest fiber finished so its CPU can reclaim it, dropping
   // the final handle once control is back on the idle fiber. Call before the
@@ -137,6 +139,9 @@ class GuestScheduler {
   // I/O, or a fiber on another CPU) is observed promptly without spinning a
   // core.
   static constexpr uint64_t kPollBackoffMs = 1;
+  // Every this many re-polls the epoch gate is ignored and every blocked
+  // fiber polls, so a missed epoch bump costs a latency blip, not a hang.
+  static constexpr uint32_t kRepollBackstopTicks = 64;
 
   // Per-CPU dispatch state, each driven by its own host thread. Ready and
   // blocked fibers are intrusive FIFOs linked through
@@ -174,6 +179,8 @@ class GuestScheduler {
     // anyway. RunLoop re-checks them after setting this, so a wake that only
     // saw it false is never slept through.
     std::atomic<bool> parked{false};
+    // Re-polls since the last forced full poll. Guarded by lock_.
+    uint32_t repoll_backstop = 0;
   };
 
   // The dispatch thread a thread is pinned to: its guest current_cpu mapped

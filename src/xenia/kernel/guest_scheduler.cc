@@ -684,12 +684,28 @@ void GuestScheduler::NotifyThreadExited(XThread* thread) {
   cpus_[t_current_cpu].exited_thread = thread;
 }
 
-void GuestScheduler::BlockCurrentThread() {
+void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
+                                        uint32_t wait_epoch, bool alertable) {
   if (!OnDispatchThread("BlockCurrentThread")) {
     return;
   }
   XThread* self = XThread::GetCurrentThread();
   int cpu_index = t_current_cpu;
+  // Gate only types whose every satisfying transition calls
+  // WakeCooperativeWaiters, anything else polls every pass.
+  XObject* wait_object = self->cooperative_wait_object();
+  bool gated = false;
+  if (wait_object) {
+    switch (wait_object->type()) {
+      case XObject::Type::Event:
+      case XObject::Type::Semaphore:
+      case XObject::Type::Mutant:
+        gated = true;
+        break;
+      default:
+        break;
+    }
+  }
   {
     std::lock_guard<std::mutex> lock(lock_);
     auto& links = self->scheduler_links();
@@ -698,6 +714,10 @@ void GuestScheduler::BlockCurrentThread() {
     links.preempted = false;
     links.cpu = cpu_index;
     links.ready_next = nullptr;
+    links.wait_gated = gated;
+    links.wait_alertable = alertable;
+    links.wait_epoch = wait_epoch;
+    links.wait_deadline_ms = deadline_ms;
     Cpu& cpu = cpus_[cpu_index];
     LinkTailLocked(cpu.blocked_head, cpu.blocked_tail, self);
     cpu.has_blocked.store(true, std::memory_order_relaxed);
@@ -711,10 +731,29 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     Cpu& cpu = cpus_[cpu_index];
+    bool force_all = ++cpu.repoll_backstop >= kRepollBackstopTicks;
+    if (force_all) {
+      cpu.repoll_backstop = 0;
+    }
+    uint64_t now_ms = Clock::QueryHostUptimeMillis();
+    XThread* kept_head = nullptr;
+    XThread* kept_tail = nullptr;
     XThread* t = cpu.blocked_head;
     while (t) {
       auto& links = t->scheduler_links();
       XThread* next = links.ready_next;
+      // Skip a gated waiter whose wait cannot have resolved yet.
+      if (links.wait_gated && !force_all) {
+        XObject* obj = t->cooperative_wait_object();
+        if (obj && obj->cooperative_signal_epoch() == links.wait_epoch &&
+            !(links.wait_deadline_ms && now_ms >= links.wait_deadline_ms) &&
+            !(links.wait_alertable && t->HasPendingUserApc())) {
+          links.ready_next = nullptr;
+          LinkTailLocked(kept_head, kept_tail, t);
+          t = next;
+          continue;
+        }
+      }
       links.blocked = false;
       links.queued = true;
       // Its current guest CPU, not the one it blocked on, since
@@ -729,9 +768,9 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
       }
       t = next;
     }
-    cpu.blocked_head = nullptr;
-    cpu.blocked_tail = nullptr;
-    cpu.has_blocked.store(false, std::memory_order_relaxed);
+    cpu.blocked_head = kept_head;
+    cpu.blocked_tail = kept_tail;
+    cpu.has_blocked.store(kept_head != nullptr, std::memory_order_relaxed);
   }
   // Wake any other dispatch thread that received a ready fiber (this one runs).
   for (int i = 0; i < host_cpu_count_; ++i) {
