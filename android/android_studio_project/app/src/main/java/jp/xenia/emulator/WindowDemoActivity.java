@@ -124,15 +124,10 @@ public class WindowDemoActivity extends AppCompatActivity implements SurfaceHold
 
             final String finalLaunchPath = launchPath;
 
-            if (rendererHandler != null) {
-                rendererHandler.post(() -> {
-                    Log.i(TAG, "Launching game from renderer thread: " + finalLaunchPath);
-                    nativeBootGame(finalLaunchPath, surface);
-                });
-            } else {
-                Log.e(TAG, "Renderer handler is null!");
-                nativeBootGame(finalLaunchPath, surface);
-            }
+            Log.i(TAG, "BEFORE nativeBootGame");
+            nativeBootGame(finalLaunchPath, surface);
+            Log.i(TAG, "AFTER nativeBootGame");
+            
         } catch (Exception e) {
             Log.e(TAG, "Error preparing game file: " + e.getMessage(), e);
             Toast.makeText(this, "Failed to prepare game file", Toast.LENGTH_LONG).show();
