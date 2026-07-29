@@ -94,6 +94,9 @@ class GuestScheduler {
   // host call would stall other fibers and should be offloaded instead.
   static bool CurrentThreadOffloadsBlockingCalls();
 
+  // Dispatch thread index a guest CPU maps to, for co-residency checks.
+  int DispatchCpuOf(uint8_t guest_cpu) const;
+
   // Waits on a host Fence. On a fiber it polls and parks instead of blocking
   // the dispatch thread, so an unbounded wait such as a UI dialog does not
   // freeze the guest threads sharing it. The Fence must have one waiter.

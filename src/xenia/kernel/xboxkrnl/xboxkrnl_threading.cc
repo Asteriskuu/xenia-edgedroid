@@ -1192,6 +1192,10 @@ DECLARE_XBOXKRNL_EXPORT3(NtSignalAndWaitForSingleObjectEx, kThreading,
 
 static void PrefetchForCAS(const void* value) { swcache::PrefetchW(value); }
 
+// Brief spin budget for a spinlock held on another dispatch thread, roughly
+// the cost of the fiber reschedule it avoids.
+static constexpr int kRemoteHolderSpinTries = 16;
+
 uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
                                bool change_irql) {
   SCOPE_profile_cpu_i("guestsync", "SpinLockAcquire");
@@ -1208,8 +1212,31 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
   while (
       !xe::atomic_cas(0, xe::byte_swap(our_pcr), &lock->prcb_of_owner.value)) {
     // Under the cooperative scheduler the holder may be a fiber queued behind
-    // us on this dispatch thread, so it can only run if we yield the fiber.
+    // us on this dispatch thread, so it can only run if we yield the fiber. A
+    // holder running on another dispatch thread releases in nanoseconds, so
+    // spin briefly there before paying a reschedule.
     if (XThread::GetCurrentFiberThread()) {
+      uint32_t owner_pcr_be = lock->prcb_of_owner.value;
+      if (!owner_pcr_be) {
+        continue;  // freed between the CAS and the read
+      }
+      auto* owner_kpcr =
+          ctx->TranslateVirtual<X_KPCR*>(xe::byte_swap(owner_pcr_be));
+      auto* scheduler = ctx->kernel_state->guest_scheduler();
+      if (scheduler->DispatchCpuOf(owner_kpcr->prcb_data.current_cpu) !=
+          scheduler->DispatchCpuOf(our_cpu)) {
+        volatile uint32_t* owner_raw = &lock->prcb_of_owner.value;
+        for (int i = 0; i < kRemoteHolderSpinTries && *owner_raw; ++i) {
+#if XE_ARCH_AMD64 == 1
+          _mm_pause();
+#endif
+        }
+        if (!*owner_raw) {
+          continue;
+        }
+        // Still held past the budget, e.g. a holder preempted mid-hold, so
+        // stop burning the slice.
+      }
       GuestScheduler::SpinYield();
       continue;
     }

@@ -94,14 +94,17 @@ GuestScheduler::~GuestScheduler() { Shutdown(); }
 
 bool GuestScheduler::enabled() { return cvars::guest_scheduler; }
 
-int GuestScheduler::CpuOf(XThread* thread) const {
-  uint8_t guest_cpu = thread->guest_object<X_KTHREAD>()->current_cpu;
+int GuestScheduler::DispatchCpuOf(uint8_t guest_cpu) const {
   if (guest_cpu >= kMaxCpus) {
     guest_cpu = 0;
   }
-  // Map the guest CPU onto the active dispatch threads. With 6 it is 1:1, with
-  // 3 each physical core's SMT pair shares a thread, with 1 all share thread 0.
+  // With 6 dispatch threads it is 1:1, with 3 each physical core's SMT pair
+  // shares a thread, with 1 all share thread 0.
   return guest_cpu * host_cpu_count_ / kMaxCpus;
+}
+
+int GuestScheduler::CpuOf(XThread* thread) const {
+  return DispatchCpuOf(thread->guest_object<X_KTHREAD>()->current_cpu);
 }
 
 void GuestScheduler::EnsureStarted() {
@@ -657,6 +660,18 @@ void GuestScheduler::IoWorkerLoop() {
 
 void GuestScheduler::WakeAll() {
   if (!started_.load()) {
+    return;
+  }
+  // Skip the lock when no CPU has a blocked waiter. A stale hint costs at
+  // most one backoff interval.
+  bool any_blocked = false;
+  for (int i = 0; i < host_cpu_count_; ++i) {
+    if (cpus_[i].has_blocked.load(std::memory_order_relaxed)) {
+      any_blocked = true;
+      break;
+    }
+  }
+  if (!any_blocked) {
     return;
   }
   // Ask each CPU with a blocked waiter to re-poll, preempting its runner only
