@@ -1903,8 +1903,10 @@ void Emulator::WaitUntilExit() {
   ALOGI("WaitUntilExit: entered");
 
   while (true) {
-    ALOGI("WaitUntilExit: loop start (main_thread_=%p, restoring_=%d, relaunching_=%d)",
-          main_thread_.get(), restoring_, relaunching_);
+    ALOGI(
+        "WaitUntilExit: loop start (main_thread_=%p, restoring_=%d, "
+        "relaunching_=%d)",
+        main_thread_.get(), restoring_, relaunching_);
 
     if (main_thread_) {
       // Use wait_handle() rather than thread(): a fiber-backed main thread has
@@ -1921,7 +1923,9 @@ void Emulator::WaitUntilExit() {
       restore_fence_.Wait();
       ALOGI("WaitUntilExit: restore_fence_ wait finished");
     } else if (relaunching_) {
-      ALOGI("WaitUntilExit: relaunching_ is true, waiting for relaunch to finish");
+      ALOGI(
+          "WaitUntilExit: relaunching_ is true, waiting for relaunch to "
+          "finish");
       // RelaunchTitle is running on another thread - wait for it to finish
       // and set the new main_thread_, then loop back to wait on it.
       while (relaunching_) {
