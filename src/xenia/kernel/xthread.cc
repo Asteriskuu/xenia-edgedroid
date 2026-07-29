@@ -689,27 +689,17 @@ X_STATUS XThread::Terminate(int exit_code) {
     ReleaseHandle();
 #endif
   } else {
-    // Fiber-backed guest thread terminated from another host thread. Yank it
-    // from the scheduler's queues before dropping the last handle, or the
-    // dispatcher could dereference a freed XThread.
+    // Fiber-backed guest thread terminated from another host thread. Signal
+    // the exit event first so waits on the thread object resolve.
     fiber_exit_event_->Set();
     // It may be parked mid-wait, where nothing else will unwind its
     // registration and a dead entry gates every other waiter on that object.
     XObject::AbandonCooperativeWait(this);
-    if (kernel_state()->guest_scheduler()->ForgetThread(this)) {
-      // Never dispatched, so nothing is standing on its stack.
+    if (kernel_state()->guest_scheduler()->TerminateThread(this)) {
+      // Nothing will ever run on its stack again, so free it here.
       ReclaimExited();
-    } else {
-      // The stack is live and cannot be unwound from here, so drop the guest
-      // handle but keep the object, the same as for a crashed fiber.
-      XELOGW(
-          "XThread: external terminate of live fiber tid={:08X} '{}', parking "
-          "it instead of freeing a stack still in use",
-          thread_id_, thread_name_);
-      if (!handles().empty()) {
-        ReleaseHandle();
-      }
     }
+    // Otherwise its dispatcher runs it to a safepoint where it exits.
   }
 
   return X_STATUS_SUCCESS;

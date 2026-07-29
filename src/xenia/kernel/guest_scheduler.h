@@ -94,6 +94,9 @@ class GuestScheduler {
   // host call would stall other fibers and should be offloaded instead.
   static bool CurrentThreadOffloadsBlockingCalls();
 
+  // Dispatch thread index a guest CPU maps to, for co-residency checks.
+  int DispatchCpuOf(uint8_t guest_cpu) const;
+
   // Waits on a host Fence. On a fiber it polls and parks instead of blocking
   // the dispatch thread, so an unbounded wait such as a UI dialog does not
   // freeze the guest threads sharing it. The Fence must have one waiter.
@@ -111,10 +114,14 @@ class GuestScheduler {
   void YieldCurrentThread(bool quantum_end, bool to_lower = true);
 
   // Parks the running guest fiber on its CPU's blocked list and yields. Returns
-  // once the dispatcher re-readies it, after a short poll backoff or sooner if
-  // another thread becomes runnable, so a cooperative wait can re-poll its host
-  // primitive. The deadline is owned by the caller's poll loop.
-  void BlockCurrentThread();
+  // once the dispatcher re-readies it so the wait can re-poll. A single-object
+  // wait on an epoch-bumping type is re-readied only when the epoch moves past
+  // |wait_epoch|, |deadline_ms| (absolute host uptime, 0 = none) arrives, or a
+  // user APC lands on an alertable waiter. Anything else re-polls every pass.
+  // |interruptible| false keeps a terminate from ending the fiber at a park
+  // whose waker holds a pointer into this stack.
+  void BlockCurrentThread(uint64_t deadline_ms = 0, uint32_t wait_epoch = 0,
+                          bool alertable = false, bool interruptible = true);
 
   // Marks the running guest fiber finished so its CPU can reclaim it, dropping
   // the final handle once control is back on the idle fiber. Call before the
@@ -122,21 +129,33 @@ class GuestScheduler {
   void NotifyThreadExited(XThread* thread);
 
   // Detaches |thread| from every ready, blocked and suspended queue, and drops
-  // any per-CPU pointer to it. Used by external Terminate so a dispatcher can't
-  // reach a soon-to-be-freed XThread. Returns true if the thread may then be
+  // any per-CPU pointer to it. Used by a crashed fiber detaching itself so a
+  // dispatcher can't reach it again. Returns true if the thread may then be
   // freed, meaning nothing is standing on its fiber stack.
   bool ForgetThread(XThread* thread);
+
+  // Handles a fiber-backed thread terminated from another host thread. Returns
+  // true if the caller may reclaim it now, nothing will ever stand on its
+  // stack again. Otherwise its dispatcher runs it to a safepoint or wait
+  // resume point where it exits and is reclaimed.
+  bool TerminateThread(XThread* thread);
+
+  // Ends the calling fiber now if an external Terminate marked it, handing it
+  // to the dispatcher for reclaim. Returns otherwise.
+  void ExitIfTerminated();
 
   KernelState* kernel_state() const { return kernel_state_; }
 
  private:
   // Xbox 360 logical CPU count, also the maximum number of dispatch threads.
   static constexpr int kMaxCpus = 6;
-  // When no thread is ready but some are blocked, a CPU sleeps at most this
-  // long before re-polling them, so a signal from another host thread (GPU,
-  // I/O, or a fiber on another CPU) is observed promptly without spinning a
-  // core.
+  // Re-poll cadence for waiters that resolve only by polling: ungated waits
+  // and the APC check of alertable waiters. Quiet gated waiters do not tick
+  // at this rate, they wake on signals, deadlines and the backstop.
   static constexpr uint64_t kPollBackoffMs = 1;
+  // At least this often every blocked fiber re-polls regardless of the epoch
+  // gate, so a missed epoch bump costs a latency blip, not a hang.
+  static constexpr uint64_t kRepollBackstopMs = 64;
 
   // Per-CPU dispatch state, each driven by its own host thread. Ready and
   // blocked fibers are intrusive FIFOs linked through
@@ -169,6 +188,22 @@ class GuestScheduler {
     // Makes RunLoop re-poll blocked waiters now instead of on the backoff
     // timer. Set by WakeAll, consumed lock-free by RunLoop.
     std::atomic<bool> repoll_now{false};
+    // True while RunLoop sleeps in a ready_event wait. Wakers skip the
+    // SetEvent syscall otherwise, a busy dispatch thread re-checks its queues
+    // anyway. RunLoop re-checks them after setting this, so a wake that only
+    // saw it false is never slept through.
+    std::atomic<bool> parked{false};
+    // Absolute host ms of the next forced full re-poll. Guarded by lock_.
+    uint64_t next_force_repoll_ms = 0;
+    // Absolute host ms of the next timed re-poll: the earliest gated
+    // deadline, the poll cadence while ungated or alertable waiters are
+    // parked, or the backstop. Written only by this CPU's dispatch thread,
+    // which also reads it to size the idle sleep. 0 = due now.
+    uint64_t next_timed_repoll_ms = 0;
+    // Highest blocked-fiber priority, so WakeAll only preempts a runner a
+    // waiter could outrank. Raised on block, recomputed by RereadyBlocked.
+    // Guarded by lock_.
+    int max_blocked_prio = -1;
   };
 
   // The dispatch thread a thread is pinned to: its guest current_cpu mapped
@@ -233,6 +268,9 @@ class GuestScheduler {
 
   std::atomic<bool> started_{false};
   std::atomic<bool> shutting_down_{false};
+  // Set once Shutdown has joined the dispatch threads and reclaimed every
+  // leftover fiber. TerminateThread then frees threads directly.
+  std::atomic<bool> stopped_{false};
   // Until something has been dispatched, idle CPUs poll slowly instead of
   // sleeping so a title that never starts can be reported.
   std::atomic<bool> dispatched_any_{false};

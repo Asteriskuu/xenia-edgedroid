@@ -1430,6 +1430,10 @@ void Emulator::RelaunchTitle(const std::string& host_path,
     }
   }
 
+  // Terminate only marks fiber-backed threads. Stop the scheduler so no fiber
+  // is still executing guest code when the kernel is torn down.
+  kernel_state_->guest_scheduler()->Shutdown();
+
   Shutdown();
   Setup(nullptr, nullptr, require_cpu_backend_, nullptr, nullptr, nullptr);
   MountStandardDrives();

@@ -268,6 +268,15 @@ class XObject {
   virtual bool CooperativeMayAcquire(XThread* thread) { return true; }
 
  public:
+  // Bumped by every state change that could satisfy a cooperative waiter, so
+  // the scheduler can skip re-polling a parked waiter until it moves.
+  uint32_t cooperative_signal_epoch() const {
+    return cooperative_signal_epoch_.load();
+  }
+  // Bumps the epoch, then wakes the dispatch threads. Call after the host
+  // primitive is signaled, never before.
+  void WakeCooperativeWaiters();
+
   // Registers |thread| as a cooperative waiter on this object and records the
   // registration on the thread, so a terminate that never unwinds the parked
   // stack can still release it.
@@ -304,6 +313,8 @@ class XObject {
   KernelState* kernel_state_;
 
   uint32_t priority_increment_ = 0;
+
+  std::atomic<uint32_t> cooperative_signal_epoch_{0};
 
   // Host objects are persisted through resets/etc.
   bool host_object_ = false;

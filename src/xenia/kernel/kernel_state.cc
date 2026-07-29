@@ -93,6 +93,10 @@ KernelState::~KernelState() {
 
   ShutdownDispatchThread();
 
+  // Reclaiming leftover fibers releases handles, so run this while the object
+  // table is still alive.
+  guest_scheduler_->Shutdown();
+
   executable_module_.reset();
   user_modules_.clear();
   kernel_modules_.clear();

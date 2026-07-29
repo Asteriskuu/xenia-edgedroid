@@ -542,6 +542,17 @@ class XThread : public XObject, public cpu::Thread {
     bool running = false;    // executing on a dispatch thread
     bool preempted = false;  // slice cut short by a higher-priority thread
     bool has_run = false;    // diagnostic: dispatched at least once
+    // Set by an external Terminate, exits the fiber at its next
+    // ExitIfTerminated check.
+    std::atomic<bool> terminate_pending{false};
+    // Absolute raw-tick end of the granted timeslice, 0 = grant fresh at
+    // dispatch. Preemption preserves it so the quantum end still arrives.
+    uint64_t quantum_deadline_tick = 0;
+    // Re-poll gating, written by BlockCurrentThread, read by RereadyBlocked.
+    bool wait_gated = false;        // skip re-polls until something below fires
+    bool wait_alertable = false;    // also re-poll on a pending user APC
+    uint32_t wait_epoch = 0;        // object epoch sampled before the last poll
+    uint64_t wait_deadline_ms = 0;  // absolute host uptime, 0 = none
   };
   SchedulerLinks& scheduler_links() { return scheduler_links_; }
 

@@ -63,7 +63,7 @@ bool XSemaphore::ReleaseSemaphore(int32_t release_count,
     memory()
         ->TranslateVirtual<X_KSEMAPHORE*>(guest_object())
         ->header.signal_state = previous_count + release_count;
-    kernel_state()->guest_scheduler()->WakeAll();
+    WakeCooperativeWaiters();
   }
   return success;
 }
@@ -92,7 +92,7 @@ void XSemaphore::CooperativeWaitEnd(XThread* thread) {
   }
   // Poke the new front so it re-polls now.
   if (wake_next) {
-    kernel_state()->guest_scheduler()->WakeAll();
+    WakeCooperativeWaiters();
   }
 }
 
