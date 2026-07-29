@@ -1036,6 +1036,28 @@ void GuestScheduler::RunLoop(int cpu_index) {
 
     XThread* next = DequeueReady(cpu_index);
     if (next) {
+      // Honor an affinity change that landed while it was queued or running
+      // here. Safe now, an off-CPU thread's context is saved.
+      int home = CpuOf(next);
+      auto& links = next->scheduler_links();
+      if (home != cpu_index &&
+          !links.terminate_pending.load(std::memory_order_relaxed)) {
+        {
+          std::lock_guard<std::mutex> lock(lock_);
+          links.running = false;
+          links.queued = true;
+          links.cpu = home;
+          bool at_head = links.preempted;
+          links.preempted = false;
+          LinkReadyLocked(cpus_[home], next, at_head);
+        }
+        if (cpus_[home].parked.load() && cpus_[home].ready_event) {
+          cpus_[home].ready_event->Set();
+        }
+        XELOGD("GuestScheduler: migrated tid={:08X} to CPU {}",
+               next->thread_id(), home);
+        continue;
+      }
       // A suspend landing while the thread ran or was queued takes effect here.
       if (next->suspend_count() > 0 && ParkSuspended(next, cpu_index)) {
         continue;
