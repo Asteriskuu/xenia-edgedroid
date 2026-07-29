@@ -17,8 +17,8 @@ namespace cpu {
 namespace compiler {
 namespace passes {
 
-// Prepends a preemption safepoint to every block head when the guest scheduler
-// is on. The x64 and a64 emitters lower it to the timeslice yield check.
+// Prepends a preemption safepoint to the entry block and every back-edge
+// target when the guest scheduler is on. The x64 and a64 emitters lower it.
 class PreemptCheckInjectionPass : public CompilerPass {
  public:
   PreemptCheckInjectionPass();

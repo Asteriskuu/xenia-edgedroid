@@ -9,6 +9,8 @@
 
 #include "xenia/cpu/compiler/passes/preempt_check_injection_pass.h"
 
+#include <unordered_set>
+
 #include "xenia/base/cvar.h"
 #include "xenia/cpu/hir/hir_builder.h"
 
@@ -30,15 +32,45 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
   // aborts the whole function on false.
   //
   // Read the cvar here, not in the ctor, so a per-title override applies.
-  if (cvars::guest_scheduler) {
-    for (auto block = builder->first_block(); block != nullptr;
-         block = block->next) {
-      // Skip leading fake instructions so the check lands before real code.
-      auto first = block->instr_head;
+  if (!cvars::guest_scheduler || !builder->first_block()) {
+    return true;
+  }
+  // Blocks are laid out in guest address order, so every intra-function cycle
+  // branches to an already-seen block. Calls, recursion and indirect branches
+  // (bcctr lowers to CallIndirect) re-enter at the entry block.
+  std::unordered_set<Block*> seen;
+  std::unordered_set<Block*> check_blocks;
+  check_blocks.insert(builder->first_block());
+  for (auto block = builder->first_block(); block != nullptr;
+       block = block->next) {
+    seen.insert(block);
+    auto instr = block->instr_tail;
+    while (instr && (instr->opcode->flags & OPCODE_FLAG_BRANCH) != 0) {
+      Label* label = nullptr;
+      if (instr->opcode == &OPCODE_BRANCH_info) {
+        label = instr->src1.label;
+      } else if (instr->opcode == &OPCODE_BRANCH_TRUE_info ||
+                 instr->opcode == &OPCODE_BRANCH_FALSE_info) {
+        label = instr->src2.label;
+      }
+      if (label && label->block && seen.count(label->block)) {
+        check_blocks.insert(label->block);
+      }
+      instr = instr->prev;
+    }
+  }
+  for (auto block : check_blocks) {
+    // A block holding only fake instructions falls through, so the check
+    // lands in the first real successor, still on every cycle through it.
+    for (auto b = block; b != nullptr; b = b->next) {
+      auto first = b->instr_head;
       for (; first && first->IsFake(); first = first->next) {
       }
-      if (first && first->GetOpcodeNum() != OPCODE_CHECK_PREEMPT) {
-        builder->CheckPreempt()->MoveBefore(first);
+      if (first) {
+        if (first->GetOpcodeNum() != OPCODE_CHECK_PREEMPT) {
+          builder->CheckPreempt()->MoveBefore(first);
+        }
+        break;
       }
     }
   }
