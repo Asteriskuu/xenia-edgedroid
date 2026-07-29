@@ -255,6 +255,7 @@ bool GuestScheduler::ParkSuspended(XThread* thread, int cpu_index) {
   links.suspended = true;
   links.cpu = cpu_index;
   links.ready_next = nullptr;
+  links.quantum_deadline_tick = 0;
   Cpu& cpu = cpus_[cpu_index];
   LinkTailLocked(cpu.suspended_head, cpu.suspended_tail, thread);
   links.running = false;
@@ -449,8 +450,13 @@ void GuestScheduler::SwitchTo(XThread* next) {
     std::lock_guard<std::mutex> lock(lock_);
     assert_true(links.running);
     cpus_[t_current_cpu].current_thread = next;
-    cpus_[t_current_cpu].quantum_deadline_tick =
-        Clock::host_tick_count_raw() + quantum_ticks_;
+    // Grant a fresh slice only if the previous one was consumed. A preempted
+    // thread resumes with its remainder, so its quantum end still arrives.
+    if (!links.quantum_deadline_tick) {
+      links.quantum_deadline_tick =
+          Clock::host_tick_count_raw() + quantum_ticks_;
+    }
+    cpus_[t_current_cpu].quantum_deadline_tick = links.quantum_deadline_tick;
   }
   XThread::SetCurrentThread(next);
   next->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_RUNNING;
@@ -543,10 +549,15 @@ void GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
     return;
   }
   XThread* self = XThread::GetCurrentThread();
+  auto& links = self->scheduler_links();
   // A slice cut short by a higher-priority thread is not a quantum end, that
   // thread re-runs at the head instead.
-  if (quantum_end && !self->scheduler_links().preempted) {
+  if (quantum_end && !links.preempted) {
     self->OnQuantumEnd();
+  }
+  // Only a preemption keeps the remaining slice, anything else consumed it.
+  if (!links.preempted) {
+    links.quantum_deadline_tick = 0;
   }
   // Re-queue on the current CPU, not the affinity CPU, because our context is
   // not saved until the yield below and another CPU must not grab it yet.
@@ -648,8 +659,9 @@ void GuestScheduler::WakeAll() {
   if (!started_.load()) {
     return;
   }
-  // Preempt each CPU with a blocked waiter so the signal is observed now, not
-  // at quantum end. preempted spares the yielder decay and a tail requeue.
+  // Ask each CPU with a blocked waiter to re-poll, preempting its runner only
+  // when a waiter outranks it. An equal-priority preempt would head-requeue
+  // the runner past ready threads on every signal and starve them.
   {
     std::lock_guard<std::mutex> lock(lock_);
     for (int i = 0; i < host_cpu_count_; ++i) {
@@ -659,7 +671,8 @@ void GuestScheduler::WakeAll() {
       }
       cpu.repoll_now.store(true, std::memory_order_relaxed);
       XThread* running = cpu.current_thread;
-      if (running) {
+      if (running &&
+          cpu.max_blocked_prio > ClampPriority(running->priority())) {
         running->scheduler_links().preempted = true;
         running->thread_state()->context()->preempt_requested = 1;
       }
@@ -718,8 +731,14 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
     links.wait_alertable = alertable;
     links.wait_epoch = wait_epoch;
     links.wait_deadline_ms = deadline_ms;
+    // A wait consumes the slice.
+    links.quantum_deadline_tick = 0;
     Cpu& cpu = cpus_[cpu_index];
     LinkTailLocked(cpu.blocked_head, cpu.blocked_tail, self);
+    int prio = ClampPriority(self->priority());
+    if (prio > cpu.max_blocked_prio) {
+      cpu.max_blocked_prio = prio;
+    }
     cpu.has_blocked.store(true, std::memory_order_relaxed);
   }
   self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_WAITING;
@@ -738,6 +757,7 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
     uint64_t now_ms = Clock::QueryHostUptimeMillis();
     XThread* kept_head = nullptr;
     XThread* kept_tail = nullptr;
+    int kept_max_prio = -1;
     XThread* t = cpu.blocked_head;
     while (t) {
       auto& links = t->scheduler_links();
@@ -750,6 +770,10 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
             !(links.wait_alertable && t->HasPendingUserApc())) {
           links.ready_next = nullptr;
           LinkTailLocked(kept_head, kept_tail, t);
+          int prio = ClampPriority(t->priority());
+          if (prio > kept_max_prio) {
+            kept_max_prio = prio;
+          }
           t = next;
           continue;
         }
@@ -770,6 +794,7 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
     }
     cpu.blocked_head = kept_head;
     cpu.blocked_tail = kept_tail;
+    cpu.max_blocked_prio = kept_max_prio;
     cpu.has_blocked.store(kept_head != nullptr, std::memory_order_relaxed);
   }
   // Wake any other dispatch thread that received a ready fiber (this one runs).

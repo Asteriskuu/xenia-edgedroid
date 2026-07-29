@@ -181,6 +181,10 @@ class GuestScheduler {
     std::atomic<bool> parked{false};
     // Re-polls since the last forced full poll. Guarded by lock_.
     uint32_t repoll_backstop = 0;
+    // Highest blocked-fiber priority, so WakeAll only preempts a runner a
+    // waiter could outrank. Raised on block, recomputed by RereadyBlocked.
+    // Guarded by lock_.
+    int max_blocked_prio = -1;
   };
 
   // The dispatch thread a thread is pinned to: its guest current_cpu mapped
