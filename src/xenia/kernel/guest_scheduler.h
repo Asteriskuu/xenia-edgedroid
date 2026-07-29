@@ -169,6 +169,11 @@ class GuestScheduler {
     // Makes RunLoop re-poll blocked waiters now instead of on the backoff
     // timer. Set by WakeAll, consumed lock-free by RunLoop.
     std::atomic<bool> repoll_now{false};
+    // True while RunLoop sleeps in a ready_event wait. Wakers skip the
+    // SetEvent syscall otherwise, a busy dispatch thread re-checks its queues
+    // anyway. RunLoop re-checks them after setting this, so a wake that only
+    // saw it false is never slept through.
+    std::atomic<bool> parked{false};
   };
 
   // The dispatch thread a thread is pinned to: its guest current_cpu mapped

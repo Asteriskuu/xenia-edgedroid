@@ -210,7 +210,8 @@ void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index,
       cpus_[cpu_index].yield_to_other = thread;
     }
   }
-  if (cpus_[cpu_index].ready_event) {
+  // Only a parked dispatch thread needs the syscall.
+  if (cpus_[cpu_index].parked.load() && cpus_[cpu_index].ready_event) {
     cpus_[cpu_index].ready_event->Set();
   }
 }
@@ -666,7 +667,7 @@ void GuestScheduler::WakeAll() {
   }
   for (int i = 0; i < host_cpu_count_; ++i) {
     if (cpus_[i].has_blocked.load(std::memory_order_relaxed) &&
-        cpus_[i].ready_event) {
+        cpus_[i].parked.load() && cpus_[i].ready_event) {
       cpus_[i].ready_event->Set();
     }
   }
@@ -734,7 +735,8 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
   }
   // Wake any other dispatch thread that received a ready fiber (this one runs).
   for (int i = 0; i < host_cpu_count_; ++i) {
-    if ((wake_mask & (uint32_t(1) << i)) && cpus_[i].ready_event) {
+    if ((wake_mask & (uint32_t(1) << i)) && cpus_[i].parked.load() &&
+        cpus_[i].ready_event) {
       cpus_[i].ready_event->Set();
     }
   }
@@ -778,19 +780,31 @@ void GuestScheduler::RunLoop(int cpu_index) {
 
     // Nothing ready, so sleep until the next re-poll if waiters are blocked (a
     // MarkReady wakes us sooner), otherwise idle until something is runnable.
+    // Park before re-checking the queues, so a wake that saw parked still
+    // false is caught here instead of slept through.
+    cpu.parked.store(true);
     bool have_blocked;
+    bool have_work;
     {
       std::lock_guard<std::mutex> lock(lock_);
       have_blocked = cpu.blocked_head != nullptr;
+      have_work = cpu.ready_summary != 0 ||
+                  cpu.repoll_now.load(std::memory_order_relaxed);
+    }
+    if (have_work) {
+      cpu.parked.store(false);
+      continue;
     }
     if (!have_blocked) {
       if (dispatched_any_.load()) {
         xe::threading::Wait(cpu.ready_event.get(), false);
+        cpu.parked.store(false);
         continue;
       }
       // Nothing has ever run, so poll instead of sleeping forever and say so.
       xe::threading::Wait(cpu.ready_event.get(), false,
                           std::chrono::seconds(1));
+      cpu.parked.store(false);
       bool warned = false;
       if (!dispatched_any_.load() &&
           never_dispatched_warned_.compare_exchange_strong(warned, true)) {
@@ -804,6 +818,7 @@ void GuestScheduler::RunLoop(int cpu_index) {
     uint64_t sleep_ms = next_repoll_ms > now ? next_repoll_ms - now : 0;
     auto wait_result = xe::threading::Wait(cpu.ready_event.get(), false,
                                            std::chrono::milliseconds(sleep_ms));
+    cpu.parked.store(false);
     if (wait_result == xe::threading::WaitResult::kSuccess) {
       // Signaled rather than timed out, so re-poll blocked waiters now.
       next_repoll_ms = 0;
