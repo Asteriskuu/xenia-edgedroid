@@ -7,6 +7,7 @@
  ******************************************************************************
  */
 
+#include <android/log.h>
 #include "xenia/cpu/processor.h"
 
 #include "xenia/base/assert.h"
@@ -45,6 +46,13 @@
 #else
 #define DEFAULT_DEBUG_FLAG false
 #endif
+
+#define ALOGI(...) \
+  __android_log_print(ANDROID_LOG_INFO, "XeniaAndroid", __VA_ARGS__)
+#define ALOGW(...) \
+  __android_log_print(ANDROID_LOG_WARN, "XeniaAndroid", __VA_ARGS__)
+#define ALOGE(...) \
+  __android_log_print(ANDROID_LOG_ERROR, "XeniaAndroid", __VA_ARGS__)
 
 DEFINE_bool(debug, DEFAULT_DEBUG_FLAG,
             "Allow debugging and retain debug information.", "General");
@@ -370,31 +378,49 @@ bool Processor::DemandFunction(Function* function) {
 bool Processor::Execute(ThreadState* thread_state, uint32_t address) {
   SCOPE_profile_cpu_f("cpu");
 
+  ALOGI("Processor::Execute: entered address=%08X thread_state=%p", address,
+        thread_state);
+
   // Attempt to get the function.
   auto function = ResolveFunction(address);
   if (!function) {
     // Symbol not found in any module.
+    ALOGW("Processor::Execute: ResolveFunction failed for address=%08X",
+          address);
     XELOGCPU("Execute({:08X}): failed to find function", address);
     return false;
   }
 
+  ALOGI("Processor::Execute: ResolveFunction succeeded for address=%08X",
+        address);
+
   auto context = thread_state->context();
+  ALOGI("Processor::Execute: context=%p", context);
 
   // Pad out stack a bit, as some games seem to overwrite the caller by about
   // 16 to 32b.
   context->r[1] -= 64 + 112;
+  ALOGI("Processor::Execute: stack padded r1=%08X", context->r[1]);
 
   // This could be set to anything to give us a unique identifier to track
   // re-entrancy/etc.
   uint64_t previous_lr = context->lr;
   context->lr = 0xBCBCBCBC;
+  ALOGI("Processor::Execute: lr saved=%016llX lr set=%016llX",
+        static_cast<unsigned long long>(previous_lr),
+        static_cast<unsigned long long>(context->lr));
 
   // Execute the function.
+  ALOGI("Processor::Execute: calling Function::Call()");
   auto result = function->Call(thread_state, uint32_t(context->lr));
+  ALOGI("Processor::Execute: Function::Call returned %d", result ? 1 : 0);
 
   context->lr = previous_lr;
   context->r[1] += 64 + 112;
+  ALOGI("Processor::Execute: context restored r1=%08X lr=%016llX",
+        context->r[1], static_cast<unsigned long long>(context->lr));
 
+  ALOGI("Processor::Execute: returning %d", result ? 1 : 0);
   return result;
 }
 
