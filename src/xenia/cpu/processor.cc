@@ -401,7 +401,8 @@ bool Processor::Execute(ThreadState* thread_state, uint32_t address) {
   // Pad out stack a bit, as some games seem to overwrite the caller by about
   // 16 to 32b.
   context->r[1] -= 64 + 112;
-  ALOGI("Processor::Execute: stack padded r1=%08X", context->r[1]);
+  ALOGI("Processor::Execute: stack padded r1=%08llX",
+      static_cast<unsigned long long>(context->r[1]));
 
   // This could be set to anything to give us a unique identifier to track
   // re-entrancy/etc.
@@ -418,8 +419,9 @@ bool Processor::Execute(ThreadState* thread_state, uint32_t address) {
 
   context->lr = previous_lr;
   context->r[1] += 64 + 112;
-  ALOGI("Processor::Execute: context restored r1=%08X lr=%016llX",
-        context->r[1], static_cast<unsigned long long>(context->lr));
+  ALOGI("Processor::Execute: context restored r1=%08llX lr=%016llX",
+      static_cast<unsigned long long>(context->r[1]),
+      static_cast<unsigned long long>(context->lr));
 
   ALOGI("Processor::Execute: returning %d", result ? 1 : 0);
   return result;
