@@ -512,6 +512,14 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
 #endif
   }
 
+#if XE_PLATFORM_ANDROID
+#ifdef MAP_JIT
+  if (prot & PROT_EXEC) {
+    flags |= MAP_JIT;
+  }
+#endif  // MAP_JIT
+#endif  // XE_PLATFORM_ANDROID
+
   void* result = mmap(base_address, length, prot, flags, handle, file_offset);
 
   if (result == MAP_FAILED) {
