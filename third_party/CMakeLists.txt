@@ -1350,6 +1350,27 @@ if(WIN32)
     list(APPEND _xe_s2d_ninja_targets "${_xe_ar_rel}")
   endforeach()
 
+  # Cross-building for ARM64 from an x64 host: meson defaults to a native
+  # build, compiles its sanity check with the cross cl and cannot run it. A
+  # cross file makes it link-only and skip run-time probes.
+  set(_xe_s2d_cross_args "")
+  if(XE_TARGET_AARCH64 AND NOT CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+    set(_xe_s2d_cross_file "${CMAKE_BINARY_DIR}/third_party/mesa-cross-arm64.txt")
+    file(WRITE "${_xe_s2d_cross_file}"
+"[binaries]
+c = 'cl'
+cpp = 'cl'
+ar = 'lib'
+
+[host_machine]
+system = 'windows'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+")
+    set(_xe_s2d_cross_args --cross-file "${_xe_s2d_cross_file}")
+  endif()
+
   include(ExternalProject)
   # Wipe then setup keeps the configure step idempotent across reconfigures.
   # /wd4189 overrides mesa's /we4189: Release strips asserts, leaving assert-only
@@ -1359,6 +1380,7 @@ if(WIN32)
     CONFIGURE_COMMAND
       "${CMAKE_COMMAND}" -E rm -rf "${_xe_s2d_build}"
       COMMAND "${XE_MESON_EXECUTABLE}" setup "${_xe_s2d_build}" "${_xe_mesa_dir}"
+        ${_xe_s2d_cross_args}
         --default-library=static --buildtype=release -Db_vscrt=md
         -Dc_args=/wd4189 -Dcpp_args=/wd4189
         -Dspirv-to-dxil=true
