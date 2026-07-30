@@ -53,6 +53,15 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
   auto* code = machine_code_.load(std::memory_order_acquire);
   ALOGI("A64Function::CallImpl: machine_code=%p", code);
 
+  if (code) {
+    ALOGI("A64Function: code address=%p", code);
+
+    uint32_t* instructions = reinterpret_cast<uint32_t*>(code);
+    for (int i = 0; i < 10; ++i) {
+      ALOGI("A64Function: instruction[%d]=0x%08X", i, instructions[i]);
+    }
+  }
+
   if (!thunk || !code) {
     ALOGE("A64Function::CallImpl: missing thunk or machine_code");
     return false;
