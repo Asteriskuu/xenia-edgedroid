@@ -539,6 +539,10 @@ class Fiber {
   // the thread has not been adopted via CreateFromThread()/a switch.
   static Fiber* GetCurrentFiber();
 
+  // True when |address| lies in a live fiber stack's floor page, meaning the
+  // fault is a stack overflow. For crash handlers to label the failure.
+  static bool IsStackOverflowFault(const void* address);
+
   virtual ~Fiber() = default;
 
   // Switches execution from the current fiber to this one. Returns (on the

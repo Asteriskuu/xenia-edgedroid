@@ -26,6 +26,7 @@
 #include <cstring>
 #include <ctime>
 #include <limits>
+#include <memory>
 
 #if defined(__GLIBCXX__)
 #include <cxxabi.h>
@@ -1522,6 +1523,15 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   auto start_data = static_cast<ThreadStartData*>(parameter);
   assert_not_null(start_data);
   assert_not_null(start_data->thread_obj);
+
+  // Signal handlers must be able to run when a fiber stack is exhausted, so
+  // give every thread an alternate signal stack.
+  static thread_local std::unique_ptr<uint8_t[]> signal_stack(
+      new uint8_t[64 * 1024]);
+  stack_t altstack = {};
+  altstack.ss_sp = signal_stack.get();
+  altstack.ss_size = 64 * 1024;
+  sigaltstack(&altstack, nullptr);
 
   auto thread = dynamic_cast<PosixThread*>(start_data->thread_obj);
   auto start_routine = std::move(start_data->start_routine);
