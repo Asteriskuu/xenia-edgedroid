@@ -299,6 +299,37 @@ static xe::threading::WaitHandle* AlwaysSignaledHandle(size_t slot) {
   return pool[slot < pool.size() ? slot : 0].get();
 }
 
+void CooperativeWaiterFifo::Add(XThread* thread) {
+  std::lock_guard<std::mutex> lock(lock_);
+  for (auto* w : waiters_) {
+    if (w == thread) {
+      return;  // already queued
+    }
+  }
+  waiters_.push_back(thread);
+}
+
+bool CooperativeWaiterFifo::Remove(XThread* thread) {
+  std::lock_guard<std::mutex> lock(lock_);
+  for (auto it = waiters_.begin(); it != waiters_.end(); ++it) {
+    if (*it == thread) {
+      waiters_.erase(it);
+      break;
+    }
+  }
+  return !waiters_.empty();
+}
+
+bool CooperativeWaiterFifo::MayAcquire(XThread* thread) {
+  std::lock_guard<std::mutex> lock(lock_);
+  return waiters_.empty() || waiters_.front() == thread;
+}
+
+bool CooperativeWaiterFifo::HasWaiters() {
+  std::lock_guard<std::mutex> lock(lock_);
+  return !waiters_.empty();
+}
+
 void XObject::WakeCooperativeWaiters() {
   cooperative_signal_epoch_.fetch_add(1);
   kernel_state()->guest_scheduler()->WakeAll();

@@ -271,5 +271,20 @@ void XMutant::WaitCallback() {
   signal_state = signal_state - 1;
 }
 
+void XMutant::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
+
+void XMutant::CooperativeWaitEnd(XThread* thread) {
+  // Poke the new front so it re-polls now.
+  if (waiters_.Remove(thread)) {
+    WakeCooperativeWaiters();
+  }
+}
+
+bool XMutant::CooperativeMayAcquire(XThread* thread) {
+  // The owner bypasses the queue so a recursive acquire cannot self-deadlock
+  // behind its own waiters.
+  return owning_thread_.load() == thread || waiters_.MayAcquire(thread);
+}
+
 }  // namespace kernel
 }  // namespace xe

@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <deque>
+#include <mutex>
 #include <string>
 
 #include "xenia/base/threading.h"
@@ -34,6 +36,22 @@ class XThread;
 
 template <typename T>
 class object_ref;
+
+// FIFO of cooperative fiber waiters, shared by the permit-gated types so a
+// parked waiter is not starved by a running acquirer that never parks.
+class CooperativeWaiterFifo {
+ public:
+  void Add(XThread* thread);
+  // Unregisters |thread|, returning true if a waiter remains to be woken.
+  bool Remove(XThread* thread);
+  // True when |thread| is first in line (or no one is queued).
+  bool MayAcquire(XThread* thread);
+  bool HasWaiters();
+
+ private:
+  std::mutex lock_;
+  std::deque<XThread*> waiters_;
+};
 
 enum X_DISPATCHER_FLAGS : uint8_t {
   DISPATCHER_MANUAL_RESET_EVENT = 0,
