@@ -7,8 +7,9 @@
  ******************************************************************************
  */
 
-#include <android/log.h>
 #include "xenia/cpu/processor.h"
+
+#include <android/log.h>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/atomic.h"
