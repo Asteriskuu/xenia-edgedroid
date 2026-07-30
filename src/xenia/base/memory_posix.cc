@@ -367,12 +367,16 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
   if (android_ASharedMemory_create_) {
     int sharedmem_fd = android_ASharedMemory_create_(path.c_str(), length);
-    return sharedmem_fd >= 0 ? sharedmem_fd : kFileMappingHandleInvalid;
+    if (sharedmem_fd >= 0) {
+      fcntl(sharedmem_fd, F_SETFD, FD_CLOEXEC);
+      return sharedmem_fd;
+    }
+    return kFileMappingHandleInvalid;
   }
 
   // Use /dev/ashmem on API versions below 26, which added ASharedMemory.
-  // /dev/ashmem was disabled on API 29 for apps targeting it.
-  // https://chromium.googlesource.com/chromium/src/+/master/third_party/ashmem/ashmem-dev.c
+  // /dev/ashmem was disabled on API 29 for apps targeting it; callers may
+  // need to fall back to other mechanisms on newer Androids.
   int ashmem_fd = open("/" ASHMEM_NAME_DEF, O_RDWR);
   if (ashmem_fd < 0) {
     return kFileMappingHandleInvalid;
@@ -384,6 +388,7 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
     close(ashmem_fd);
     return kFileMappingHandleInvalid;
   }
+  fcntl(ashmem_fd, F_SETFD, FD_CLOEXEC);
   return ashmem_fd;
 #else
   int oflag;
