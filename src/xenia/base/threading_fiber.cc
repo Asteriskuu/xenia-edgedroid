@@ -21,8 +21,23 @@
 #if XE_PLATFORM_WIN32
 #include <Windows.h>
 #else
+#include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
+
+// AddressSanitizer needs to be told about stack switches or it poisons and
+// unwinds against the wrong stack, making sanitized builds unusable with
+// fibers.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define XE_FIBER_ASAN 1
+#endif
+#elif defined(__SANITIZE_ADDRESS__)
+#define XE_FIBER_ASAN 1
+#endif
+#if XE_FIBER_ASAN
+#include <sanitizer/common_interface_defs.h>
 #endif
 
 // Boost.Context fcontext_t primitives. The implementation is the hand-written
@@ -232,7 +247,27 @@ class FcontextFiber : public Fiber {
 
   // Adopted fiber: wraps the calling thread's existing stack. Its context is
   // captured the first time something switches away from it.
-  FcontextFiber() = default;
+  FcontextFiber() {
+#if XE_FIBER_ASAN
+    // The sanitizer needs real bounds when fibers switch back to this stack.
+#if XE_PLATFORM_WIN32
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    stack_.base = reinterpret_cast<void*>(low);
+    stack_.usable = high - low;
+#elif XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+      pthread_attr_getstack(&attr, &stack_.base, &stack_.usable);
+      pthread_attr_destroy(&attr);
+    }
+#elif XE_PLATFORM_MAC
+    stack_.usable = pthread_get_stacksize_np(pthread_self());
+    stack_.base = static_cast<char*>(pthread_get_stackaddr_np(pthread_self())) -
+                  stack_.usable;
+#endif
+#endif  // XE_FIBER_ASAN
+  }
 
   ~FcontextFiber() override {
     if (owns_stack_) {
@@ -247,8 +282,16 @@ class FcontextFiber : public Fiber {
     assert_not_null(prev);
     assert_true(prev != this);
     current_fiber_ = this;
+#if XE_FIBER_ASAN
+    __sanitizer_start_switch_fiber(&prev->asan_fake_stack_, stack_.base,
+                                   stack_.usable);
+#endif
     // Enter this fiber, handing it |prev| so it can record where prev resumes.
     fcontext_transfer_t t = jump_fcontext(fctx_, prev);
+#if XE_FIBER_ASAN
+    // Back on |prev|'s stack.
+    __sanitizer_finish_switch_fiber(prev->asan_fake_stack_, nullptr, nullptr);
+#endif
     // Resumed: |t.data| is the fiber that switched back into us, |t.fctx| its
     // continuation point. Save it so we can return to that fiber later.
     auto* resumer = static_cast<FcontextFiber*>(t.data);
@@ -265,12 +308,20 @@ class FcontextFiber : public Fiber {
     prev->fctx_ = t.fctx;
 
     auto* self = static_cast<FcontextFiber*>(current_fiber_);
+#if XE_FIBER_ASAN
+    __sanitizer_finish_switch_fiber(self->asan_fake_stack_, nullptr, nullptr);
+#endif
     self->entry_();
     self->terminated_ = true;
 
     // The start routine returned. In normal use the guest scheduler switches
     // away before this point, so this is only a safety net: hand control back
     // to whoever last resumed us. Resuming a terminated fiber is undefined.
+#if XE_FIBER_ASAN
+    // Passing null frees this dying fiber's fake stack.
+    __sanitizer_start_switch_fiber(nullptr, prev->stack_.base,
+                                   prev->stack_.usable);
+#endif
     jump_fcontext(prev->fctx_, prev);
   }
 
@@ -279,6 +330,11 @@ class FcontextFiber : public Fiber {
   FiberStack stack_;
   bool owns_stack_ = false;
   bool terminated_ = false;
+#if XE_FIBER_ASAN
+  // Sanitizer fake-stack handle, saved when this fiber suspends and consumed
+  // when it resumes.
+  void* asan_fake_stack_ = nullptr;
+#endif
 };
 
 }  // namespace
