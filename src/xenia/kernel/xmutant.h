@@ -49,6 +49,10 @@ class XMutant : public XObject {
   bool IsReenteredByCurrentThread() override;
   X_STATUS AcquireStatus() override;
 
+  void CooperativeWaitBegin(XThread* thread) override;
+  void CooperativeWaitEnd(XThread* thread) override;
+  bool CooperativeMayAcquire(XThread* thread) override;
+
  private:
   XMutant();
 
@@ -60,6 +64,10 @@ class XMutant : public XObject {
   // Recursive acquires never touch free_signal_, so count them here. Only the
   // current owner mutates it, so no synchronization.
   uint32_t recursion_count_ = 0;
+  // Parked fibers waiting to acquire, in order. Without this a running fiber
+  // that re-acquires in a loop starves a parked waiter forever, where NT hands
+  // a released mutant to the waiter.
+  CooperativeWaiterFifo waiters_;
 };
 
 }  // namespace kernel

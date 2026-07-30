@@ -35,19 +35,16 @@ namespace x64 {
 // Only present when built with --enable-ftrace (the JIT emits the entry/return
 // hooks) and --enable-profiler.
 namespace {
-struct FtraceFrame {
-  uint32_t address;
-  MicroProfileToken token;
-  uint64_t tick;
-  bool profiled;
-};
-thread_local std::vector<FtraceFrame> t_ftrace_stack;
-thread_local uint32_t t_ftrace_open = 0;
+// Frame state lives in ThreadState (FunctionTraceState) so it follows a guest
+// thread across dispatch CPUs under the guest scheduler.
+//
 // microprofile's per-thread scope stack is MICROPROFILE_STACK_MAX (32) deep and
-// asserts on overflow. Guest call stacks go deeper, and the GPU/kernel C++
-// scopes share the same stack, so cap how many frames we hand to microprofile
-// with generous margin to spare.
+// asserts on overflow. Guest call stacks go deeper, the GPU/kernel C++ scopes
+// share the same stack, and co-resident fibers all feed one dispatch thread's
+// stack, so cap per guest thread and per host thread.
 constexpr uint32_t kFtraceMaxDepth = 16;
+constexpr uint32_t kFtraceHostMaxDepth = 24;
+thread_local uint32_t t_ftrace_host_open = 0;
 }  // namespace
 #endif
 
@@ -155,16 +152,22 @@ void TraceFunctionEntry(void* raw_context, uint64_t function_address) {
       ppc_context->r[7], ppc_context->r[8], ppc_context->r[9],
       ppc_context->r[10]);
 #if XE_OPTION_PROFILING
-  uint32_t address = static_cast<uint32_t>(function_address);
-  bool profiled = t_ftrace_open < kFtraceMaxDepth;
-  MicroProfileToken token = 0;
-  uint64_t tick = 0;
-  if (profiled) {
-    token = GetGuestFunctionToken(address);
-    tick = MicroProfileEnter(token);
-    ++t_ftrace_open;
+  auto* thread_state = ThreadState::Get();
+  if (thread_state) {
+    auto& ft = thread_state->function_trace_state();
+    uint32_t address = static_cast<uint32_t>(function_address);
+    bool profiled = ft.open_count < kFtraceMaxDepth &&
+                    t_ftrace_host_open < kFtraceHostMaxDepth;
+    MicroProfileToken token = 0;
+    uint64_t tick = 0;
+    if (profiled) {
+      token = GetGuestFunctionToken(address);
+      tick = MicroProfileEnter(token);
+      ++ft.open_count;
+      ++t_ftrace_host_open;
+    }
+    ft.stack.push_back({address, token, tick, profiled});
   }
-  t_ftrace_stack.push_back({address, token, tick, profiled});
 #endif
 }
 void TraceFunctionReturn(void* raw_context, uint64_t function_address) {
@@ -175,16 +178,25 @@ void TraceFunctionReturn(void* raw_context, uint64_t function_address) {
 #if XE_OPTION_PROFILING
   // Pop to the matching frame, closing any intermediate frames skipped by tail
   // calls so the microprofile stack stays balanced.
-  uint32_t address = static_cast<uint32_t>(function_address);
-  while (!t_ftrace_stack.empty()) {
-    FtraceFrame frame = t_ftrace_stack.back();
-    t_ftrace_stack.pop_back();
-    if (frame.profiled) {
-      MicroProfileLeave(frame.token, frame.tick);
-      --t_ftrace_open;
-    }
-    if (frame.address == address) {
-      break;
+  auto* thread_state = ThreadState::Get();
+  if (thread_state) {
+    auto& ft = thread_state->function_trace_state();
+    uint32_t address = static_cast<uint32_t>(function_address);
+    while (!ft.stack.empty()) {
+      FunctionTraceFrame frame = ft.stack.back();
+      ft.stack.pop_back();
+      if (frame.profiled) {
+        MicroProfileLeave(frame.token, frame.tick);
+        --ft.open_count;
+        // The enter may have run on another dispatch thread before a
+        // migration.
+        if (t_ftrace_host_open) {
+          --t_ftrace_host_open;
+        }
+      }
+      if (frame.address == address) {
+        break;
+      }
     }
   }
 #endif

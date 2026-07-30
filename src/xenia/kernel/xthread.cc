@@ -909,7 +909,10 @@ void XThread::EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
       xboxkrnl::xeNtQueueApcThread(this->handle(), normal_routine,
                                    normal_context, arg1, arg2, queue_context);
 
-  xenia_assert(success == X_STATUS_SUCCESS);
+  if (success != X_STATUS_SUCCESS) {
+    XELOGE("EnqueueApc: queue to tid={:08X} failed ({:08X})", handle(),
+           success);
+  }
 }
 
 bool XThread::HasPendingUserApc() {
@@ -929,6 +932,9 @@ void XThread::SetCurrentThread(XThread* thread) {
     // must be re-set on every switch, not once at host-thread start.
     xe::threading::set_current_thread_id(thread->handle());
     cpu::ThreadState::Bind(thread->thread_state());
+  } else {
+    // Back on the idle fiber, attribute logging to the host thread again.
+    xe::threading::set_current_thread_id(UINT_MAX);
   }
 }
 

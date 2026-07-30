@@ -68,37 +68,17 @@ bool XSemaphore::ReleaseSemaphore(int32_t release_count,
   return success;
 }
 
-void XSemaphore::CooperativeWaitBegin(XThread* thread) {
-  std::lock_guard<std::mutex> lock(waiters_lock_);
-  for (auto* w : waiters_) {
-    if (w == thread) {
-      return;  // already queued
-    }
-  }
-  waiters_.push_back(thread);
-}
+void XSemaphore::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
 
 void XSemaphore::CooperativeWaitEnd(XThread* thread) {
-  bool wake_next;
-  {
-    std::lock_guard<std::mutex> lock(waiters_lock_);
-    for (auto it = waiters_.begin(); it != waiters_.end(); ++it) {
-      if (*it == thread) {
-        waiters_.erase(it);
-        break;
-      }
-    }
-    wake_next = !waiters_.empty();
-  }
   // Poke the new front so it re-polls now.
-  if (wake_next) {
+  if (waiters_.Remove(thread)) {
     WakeCooperativeWaiters();
   }
 }
 
 bool XSemaphore::CooperativeMayAcquire(XThread* thread) {
-  std::lock_guard<std::mutex> lock(waiters_lock_);
-  return waiters_.empty() || waiters_.front() == thread;
+  return waiters_.MayAcquire(thread);
 }
 
 void XSemaphore::WaitCallback() {

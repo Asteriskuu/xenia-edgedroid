@@ -47,9 +47,14 @@ class XEvent : public XObject {
   xe::threading::WaitHandle* GetWaitHandle() override { return event_.get(); }
   void WaitCallback() override;
 
+  void CooperativeWaitBegin(XThread* thread) override;
+  void CooperativeWaitEnd(XThread* thread) override;
+
  private:
   bool manual_reset_ = false;
   std::unique_ptr<xe::threading::Event> event_;
+  // Parked cooperative waiters, so Pulse knows one will consume a set.
+  CooperativeWaiterFifo waiters_;
 };
 
 }  // namespace kernel
