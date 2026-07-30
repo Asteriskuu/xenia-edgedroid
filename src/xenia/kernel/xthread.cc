@@ -827,6 +827,9 @@ void XThread::SetCurrentThread(XThread* thread) {
     // must be re-set on every switch, not once at host-thread start.
     xe::threading::set_current_thread_id(thread->handle());
     cpu::ThreadState::Bind(thread->thread_state());
+  } else {
+    // Back on the idle fiber, attribute logging to the host thread again.
+    xe::threading::set_current_thread_id(UINT_MAX);
   }
 }
 
