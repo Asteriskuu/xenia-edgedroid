@@ -807,7 +807,10 @@ void XThread::EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
       xboxkrnl::xeNtQueueApcThread(this->handle(), normal_routine,
                                    normal_context, arg1, arg2, queue_context);
 
-  xenia_assert(success == X_STATUS_SUCCESS);
+  if (success != X_STATUS_SUCCESS) {
+    XELOGE("EnqueueApc: queue to tid={:08X} failed ({:08X})", handle(),
+           success);
+  }
 }
 
 bool XThread::HasPendingUserApc() {

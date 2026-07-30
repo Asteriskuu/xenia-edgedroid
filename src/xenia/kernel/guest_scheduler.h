@@ -111,7 +111,9 @@ class GuestScheduler {
   // safepoint expiry or NtYieldExecution. |to_lower| lets the next dispatch
   // prefer another ready thread even if lower priority, matching real
   // NtYieldExecution, and preemption passes false to keep strict priority.
-  void YieldCurrentThread(bool quantum_end, bool to_lower = true);
+  // Returns true if another fiber ran on this CPU during the yield, so
+  // NtYieldExecution can report NO_YIELD_PERFORMED like NT.
+  bool YieldCurrentThread(bool quantum_end, bool to_lower = true);
 
   // Parks the running guest fiber on its CPU's blocked list and yields. Returns
   // once the dispatcher re-readies it so the wait can re-poll. A single-object
@@ -193,6 +195,9 @@ class GuestScheduler {
     // anyway. RunLoop re-checks them after setting this, so a wake that only
     // saw it false is never slept through.
     std::atomic<bool> parked{false};
+    // Counts fiber dispatches on this CPU, so a yielder can tell whether
+    // anything else ran before it resumed.
+    std::atomic<uint64_t> switch_seq{0};
     // Absolute host ms of the next forced full re-poll. Guarded by lock_.
     uint64_t next_force_repoll_ms = 0;
     // Absolute host ms of the next timed re-poll: the earliest gated

@@ -464,6 +464,7 @@ uint32_t KeDelayExecutionThread(uint32_t processor_mode, uint32_t alertable,
                                 cpu::ppc::PPCContext* ctx) {
   XThread* thread = XThread::GetCurrentThread();
 
+  xeProcessKernelApcs(ctx);
   if (alertable) {
     X_STATUS stat = xeProcessUserApcs(ctx);
     if (stat == X_STATUS_USER_APC) {
@@ -493,8 +494,13 @@ DECLARE_XBOXKRNL_EXPORT3(KeDelayExecutionThread, kThreading, kImplemented,
 
 dword_result_t NtYieldExecution_entry() {
   SCOPE_profile_cpu_i("guestsync", "NtYieldExecution");
+  xeProcessKernelApcs(nullptr);
   if (GuestScheduler::enabled() && XThread::GetCurrentFiberThread()) {
-    kernel_state()->guest_scheduler()->YieldCurrentThread(true);
+    // NT reports whether anything else ran. Guests fall back to an alertable
+    // sleep on no-yield, which is where their pending APCs get pumped.
+    if (!kernel_state()->guest_scheduler()->YieldCurrentThread(true)) {
+      return X_STATUS_NO_YIELD_PERFORMED;
+    }
   } else {
     xe::threading::MaybeYield();
   }
@@ -994,6 +1000,7 @@ DECLARE_XBOXKRNL_EXPORT1(NtCancelTimer, kThreading, kImplemented);
 uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
                                  uint32_t processor_mode, uint32_t alertable,
                                  uint64_t* timeout_ptr) {
+  xeProcessKernelApcs(nullptr);
   auto object = XObject::GetNativeObject<XObject>(kernel_state(), object_ptr);
 
   if (!object) {
@@ -1027,6 +1034,7 @@ DECLARE_XBOXKRNL_EXPORT3(KeWaitForSingleObject, kThreading, kImplemented,
 
 uint32_t NtWaitForSingleObjectEx(uint32_t object_handle, uint32_t wait_mode,
                                  uint32_t alertable, uint64_t* timeout_ptr) {
+  xeProcessKernelApcs(nullptr);
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto object =
@@ -1065,6 +1073,7 @@ dword_result_t KeWaitForMultipleObjects_entry(
     lpqword_t timeout_ptr, lpvoid_t wait_block_array_ptr) {
   SCOPE_profile_cpu_i("guestsync", "KeWaitForMultipleObjects");
   assert_true(wait_type <= X_KWAIT_REASON::WaitAny);
+  xeProcessKernelApcs(nullptr);
 
   object_ref<XObject> objects[64];
   if (count > xe::countof(objects)) {
@@ -1102,6 +1111,7 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, xe::be<uint32_t>* handles,
                                       uint32_t alertable,
                                       uint64_t* timeout_ptr) {
   assert_true(wait_type <= X_KWAIT_REASON::WaitAny);
+  xeProcessKernelApcs(nullptr);
 
   object_ref<XObject> objects[64];
   if (count > xe::countof(objects)) {
@@ -1162,6 +1172,7 @@ dword_result_t NtSignalAndWaitForSingleObjectEx_entry(dword_t signal_handle,
                                                       dword_t wait_mode,
                                                       dword_t alertable,
                                                       lpqword_t timeout_ptr) {
+  xeProcessKernelApcs(nullptr);
   X_STATUS result = X_STATUS_SUCCESS;
   // pre-lock for these two handle lookups
   global_critical_region::mutex().lock();
@@ -1438,19 +1449,17 @@ dword_result_t NtQueueApcThread_entry(dword_t thread_handle,
                             arg1, arg2, context);
 }
 
-X_STATUS xeProcessUserApcs(PPCContext* ctx) {
-  if (!ctx) {
-    ctx = cpu::ThreadState::Get()->context();
-  }
-  X_STATUS alert_status = X_STATUS_SUCCESS;
-  auto kpcr = ctx->TranslateVirtualGPR<X_KPCR*>(ctx->r[13]);
-
-  auto current_thread = ctx->TranslateVirtual(kpcr->prcb_data.current_thread);
+// Runs every queued APC on |list_index| (1 = user, 0 = kernel), executing the
+// kernel and normal routines on the caller's guest context. Returns true if
+// any ran.
+static bool ProcessApcList(PPCContext* ctx, X_KTHREAD* current_thread,
+                           uint32_t list_index) {
+  bool processed_any = false;
 
   uint32_t unlocked_irql =
       xeKeKfAcquireSpinLock(ctx, &current_thread->apc_lock);
 
-  auto& user_apc_queue = current_thread->apc_lists[1];
+  auto& apc_queue = current_thread->apc_lists[list_index];
 
   // use guest stack for temporaries
   uint32_t old_stack_pointer = static_cast<uint32_t>(ctx->r[1]);
@@ -1458,10 +1467,10 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
   uint32_t scratch_address = old_stack_pointer - 16;
   ctx->r[1] = old_stack_pointer - 32;
 
-  while (!user_apc_queue.empty(ctx)) {
-    uint32_t apc_ptr = user_apc_queue.flink_ptr;
+  while (!apc_queue.empty(ctx)) {
+    uint32_t apc_ptr = apc_queue.flink_ptr;
 
-    XAPC* apc = user_apc_queue.ListEntryObject(
+    XAPC* apc = apc_queue.ListEntryObject(
         ctx->TranslateVirtual<X_LIST_ENTRY*>(apc_ptr));
 
     uint8_t* scratch_ptr = ctx->TranslateVirtual(scratch_address);
@@ -1473,7 +1482,7 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
     apc->enqueued = 0;
 
     xeKeKfReleaseSpinLock(ctx, &current_thread->apc_lock, unlocked_irql);
-    alert_status = X_STATUS_USER_APC;
+    processed_any = true;
     if (apc->kernel_routine != XAPC::kDummyKernelRoutine) {
       uint64_t kernel_args[] = {
           apc_ptr,
@@ -1505,7 +1514,43 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
   ctx->r[1] = old_stack_pointer;
 
   xeKeKfReleaseSpinLock(ctx, &current_thread->apc_lock, unlocked_irql);
-  return alert_status;
+  return processed_any;
+}
+
+X_STATUS xeProcessUserApcs(PPCContext* ctx) {
+  if (!ctx) {
+    ctx = cpu::ThreadState::Get()->context();
+  }
+  auto kpcr = ctx->TranslateVirtualGPR<X_KPCR*>(ctx->r[13]);
+  auto current_thread = ctx->TranslateVirtual(kpcr->prcb_data.current_thread);
+  return ProcessApcList(ctx, current_thread, 1) ? X_STATUS_USER_APC
+                                                : X_STATUS_SUCCESS;
+}
+
+bool xeProcessKernelApcs(PPCContext* ctx) {
+  if (!ctx) {
+    auto* thread_state = cpu::ThreadState::Get();
+    if (!thread_state) {
+      return false;
+    }
+    ctx = thread_state->context();
+  }
+  auto kpcr = ctx->TranslateVirtualGPR<X_KPCR*>(ctx->r[13]);
+  auto current_thread = ctx->TranslateVirtual(kpcr->prcb_data.current_thread);
+  // Masked at APC_LEVEL and above, and never nested.
+  if (kpcr->current_irql >= 1 || current_thread->executing_kernel_apc) {
+    return false;
+  }
+  if (current_thread->apc_lists[0].empty(ctx)) {
+    return false;
+  }
+  current_thread->executing_kernel_apc = 1;
+  bool delivered = ProcessApcList(ctx, current_thread, 0);
+  if (delivered) {
+    XELOGD("xeProcessKernelApcs: delivered");
+  }
+  current_thread->executing_kernel_apc = 0;
+  return delivered;
 }
 
 static void YankApcList(PPCContext* ctx, X_KTHREAD* current_thread,

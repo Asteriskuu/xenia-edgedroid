@@ -595,6 +595,7 @@ void GuestScheduler::SwitchTo(XThread* next) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     assert_true(links.running);
+    cpus_[t_current_cpu].switch_seq.fetch_add(1, std::memory_order_relaxed);
     cpus_[t_current_cpu].current_thread = next;
     // Grant a fresh slice only if the previous one was consumed. A preempted
     // thread resumes with its remainder, so its quantum end still arrives.
@@ -704,9 +705,9 @@ void GuestScheduler::ExitIfTerminated() {
   YieldToScheduler();  // never returns
 }
 
-void GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
+bool GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
   if (!OnDispatchThread("YieldCurrentThread")) {
-    return;
+    return false;
   }
   // An externally terminated thread stops here.
   ExitIfTerminated();
@@ -721,12 +722,21 @@ void GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
   if (!links.preempted) {
     links.quantum_deadline_tick = 0;
   }
+  int cpu_index = t_current_cpu;
+  uint64_t seq_before =
+      cpus_[cpu_index].switch_seq.load(std::memory_order_relaxed);
   // Re-queue on the current CPU, not the affinity CPU, because our context is
   // not saved until the yield below and another CPU must not grab it yet.
   EnqueueReady(self, t_current_cpu, to_lower);
   YieldToScheduler();
   // Terminated while queued.
   ExitIfTerminated();
+  // One dispatch is our own resume, more means another fiber ran in between.
+  // A migration to another CPU counts as scheduling activity outright.
+  return t_current_cpu != cpu_index ||
+         cpus_[cpu_index].switch_seq.load(std::memory_order_relaxed) -
+                 seq_before >
+             1;
 }
 
 void GuestScheduler::SpinYield(std::chrono::milliseconds host_sleep) {
