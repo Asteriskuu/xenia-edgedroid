@@ -73,7 +73,7 @@ void XMutant::Initialize(bool initial_owner) {
     CreateNative<X_KMUTANT>();
     auto* kmutant = memory()->TranslateVirtual<X_KMUTANT*>(guest_object());
     // Don't touch header.wait_list: SetNativePointer stashes the handle there.
-    kmutant->header.type = 2;  // DISPATCHER_MUTANT
+    kmutant->header.type = X_DISPATCHER_FLAGS::DISPATCHER_MUTANT;
     kmutant->header.signal_state = initial_owner ? 0 : 1;
   }
 
@@ -91,7 +91,8 @@ void XMutant::Initialize(bool initial_owner) {
   }
 }
 
-void XMutant::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
+void XMutant::InitializeNative(void* native_ptr,
+                               const X_DISPATCH_HEADER* header) {
   assert_false(free_signal_);
 
   auto* kmutant = reinterpret_cast<X_KMUTANT*>(native_ptr);

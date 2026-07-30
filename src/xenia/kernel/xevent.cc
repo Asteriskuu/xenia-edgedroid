@@ -27,10 +27,12 @@ void XEvent::Initialize(bool manual_reset, bool initial_state) {
   assert_false(event_);
 
   manual_reset_ = manual_reset;
-  this->CreateNative<X_KEVENT>();
+  CreateNative<X_KEVENT>();
   auto* kevent = memory()->TranslateVirtual<X_KEVENT*>(guest_object());
   // Don't touch header.wait_list: SetNativePointer stashes the handle there.
-  kevent->header.type = manual_reset ? 0 : 1;  // 0=notification, 1=sync
+  kevent->header.type = manual_reset
+                            ? X_DISPATCHER_FLAGS::DISPATCHER_MANUAL_RESET_EVENT
+                            : X_DISPATCHER_FLAGS::DISPATCHER_AUTO_RESET_EVENT;
   kevent->header.signal_state = initial_state ? 1 : 0;
 
   if (manual_reset) {
@@ -41,14 +43,15 @@ void XEvent::Initialize(bool manual_reset, bool initial_state) {
   assert_not_null(event_);
 }
 
-void XEvent::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
+void XEvent::InitializeNative(void* native_ptr,
+                              const X_DISPATCH_HEADER* header) {
   assert_false(event_);
 
   switch (header->type) {
-    case 0x00:  // EventNotificationObject (manual reset)
+    case X_DISPATCHER_FLAGS::DISPATCHER_MANUAL_RESET_EVENT:
       manual_reset_ = true;
       break;
-    case 0x01:  // EventSynchronizationObject (auto reset)
+    case X_DISPATCHER_FLAGS::DISPATCHER_AUTO_RESET_EVENT:
       manual_reset_ = false;
       break;
     default:
