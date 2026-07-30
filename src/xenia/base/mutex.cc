@@ -262,13 +262,7 @@ global_mutex_type& global_critical_region::mutex() {
 }
 
 bool global_critical_region::is_held_by_current_thread() {
-#if (XE_PLATFORM_WIN32 == 1 && XE_ENABLE_FAST_WIN32_MUTEX == 1) || \
-    (XE_PLATFORM_LINUX == 1 && XE_ENABLE_FAST_LINUX_MUTEX == 1)
   return mutex().is_held_by_current_thread();
-#else
-  // std::recursive_mutex exposes no owner, so we cannot tell.
-  return false;
-#endif
 }
 
 }  // namespace xe
