@@ -304,8 +304,8 @@ class X64Emitter : public Xbyak::CodeGenerator {
   Xbyak::Label& AddToTail(TailEmitCallback callback, uint32_t alignment = 0);
   Xbyak::Label& NewCachedLabel();
 
-  // Emits a cooperative-scheduler preemption safepoint. Throttled to every
-  // 256th block, it yields the fiber once its timeslice deadline has passed.
+  // Emits a cooperative-scheduler preemption safepoint: yields the fiber once
+  // the context's preempt_requested flag is raised. Only valid at a block head.
   void EmitPreemptCheck();
 
   void PushStackpoint();

@@ -153,8 +153,8 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
                                   uint32_t alignment = 0);
   Xbyak_aarch64::Label& NewCachedLabel();
 
-  // Emits a cooperative-scheduler preemption safepoint. Throttled to every
-  // 256th block, it yields the fiber once its timeslice deadline has passed.
+  // Emits a cooperative-scheduler preemption safepoint: yields the fiber once
+  // the context's preempt_requested flag is raised. Only valid at a block head.
   void EmitPreemptCheck();
 
   // ARM64 conditional branches (cbz/cbnz: ±1 MiB, tbz/tbnz: ±32 KiB,
