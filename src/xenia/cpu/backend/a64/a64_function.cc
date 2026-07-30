@@ -7,11 +7,20 @@
  ******************************************************************************
  */
 
+#include <android/log.h>
+
 #include "xenia/cpu/backend/a64/a64_function.h"
 
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/thread_state.h"
+
+#define ALOGI(...) \
+  __android_log_print(ANDROID_LOG_INFO, "XeniaAndroid", __VA_ARGS__)
+#define ALOGW(...) \
+  __android_log_print(ANDROID_LOG_WARN, "XeniaAndroid", __VA_ARGS__)
+#define ALOGE(...) \
+  __android_log_print(ANDROID_LOG_ERROR, "XeniaAndroid", __VA_ARGS__)
 
 namespace xe {
 namespace cpu {
@@ -31,15 +40,29 @@ void A64Function::Setup(uint8_t* machine_code, size_t machine_code_length) {
 }
 
 bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
+  ALOGI("A64Function::CallImpl: entered address=%08X return_address=%08X",
+        address(), return_address);
+
   auto backend =
       reinterpret_cast<A64Backend*>(thread_state->processor()->backend());
-  auto thunk = backend->host_to_guest_thunk();
+  ALOGI("A64Function::CallImpl: backend=%p", backend);
+
+  auto thunk = backend ? backend->host_to_guest_thunk() : nullptr;
+  ALOGI("A64Function::CallImpl: thunk=%p", thunk);
+
   auto* code = machine_code_.load(std::memory_order_acquire);
+  ALOGI("A64Function::CallImpl: machine_code=%p", code);
+
   if (!thunk || !code) {
+    ALOGE("A64Function::CallImpl: missing thunk or machine_code");
     return false;
   }
+
+  ALOGI("A64Function::CallImpl: jumping to guest code");
   thunk(code, thread_state->context(),
         reinterpret_cast<void*>(uintptr_t(return_address)));
+  ALOGI("A64Function::CallImpl: guest code returned");
+
   return true;
 }
 
