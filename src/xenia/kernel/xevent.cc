@@ -77,12 +77,27 @@ int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
 
 int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
   set_priority_increment(priority_increment);
+  auto* kevent = memory()->TranslateVirtual<X_KEVENT*>(guest_object());
+  // KePulseEvent returns the pre-pulse signal state.
+  int32_t old_signal_state = kevent->header.signal_state;
+  // A parked cooperative waiter re-polls only after a host pulse has already
+  // reset the event, so every pulse would be lost. Deliver as a set the first
+  // waiter consumes, which for an auto-reset event with a waiter is exactly
+  // pulse semantics.
+  if (!manual_reset_ && waiters_.HasWaiters()) {
+    Set(priority_increment, wait);
+    return old_signal_state;
+  }
+  if (manual_reset_ && waiters_.HasWaiters()) {
+    // Satisfy-all-then-reset is not emulated cooperatively, those waiters
+    // miss this pulse.
+    XELOGW("XEvent::Pulse: manual-reset pulse with parked fiber waiters");
+  }
   event_->Pulse();
   // Pulse leaves the event reset after releasing waiters.
-  memory()->TranslateVirtual<X_KEVENT*>(guest_object())->header.signal_state =
-      0;
+  kevent->header.signal_state = 0;
   WakeCooperativeWaiters();
-  return 1;
+  return old_signal_state;
 }
 
 int32_t XEvent::Reset() {
@@ -99,6 +114,10 @@ void XEvent::WaitCallback() {
         0;
   }
 }
+
+void XEvent::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
+
+void XEvent::CooperativeWaitEnd(XThread* thread) { waiters_.Remove(thread); }
 void XEvent::Query(uint32_t* out_type, uint32_t* out_state) {
   auto [type, state] = event_->Query();
 
