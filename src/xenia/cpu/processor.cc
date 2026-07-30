@@ -5,7 +5,7 @@
  * Copyright 2020 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
 ******************************************************************************
- */ 
+ */
 
 #include "xenia/cpu/processor.h"
 
@@ -402,7 +402,7 @@ bool Processor::Execute(ThreadState* thread_state, uint32_t address) {
   // 16 to 32b.
   context->r[1] -= 64 + 112;
   ALOGI("Processor::Execute: stack padded r1=%08llX",
-      static_cast<unsigned long long>(context->r[1]));
+        static_cast<unsigned long long>(context->r[1]));
 
   // This could be set to anything to give us a unique identifier to track
   // re-entrancy/etc.
@@ -420,8 +420,8 @@ bool Processor::Execute(ThreadState* thread_state, uint32_t address) {
   context->lr = previous_lr;
   context->r[1] += 64 + 112;
   ALOGI("Processor::Execute: context restored r1=%08llX lr=%016llX",
-      static_cast<unsigned long long>(context->r[1]),
-      static_cast<unsigned long long>(context->lr));
+        static_cast<unsigned long long>(context->r[1]),
+        static_cast<unsigned long long>(context->lr));
 
   ALOGI("Processor::Execute: returning %d", result ? 1 : 0);
   return result;
