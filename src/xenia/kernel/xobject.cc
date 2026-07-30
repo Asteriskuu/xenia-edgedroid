@@ -424,8 +424,24 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                   : std::chrono::milliseconds::max();
 
   X_KTHREAD* kthread = WaitEnter(wait_reason, processor_mode, alertable);
-  auto result =
-      xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
+  xe::threading::WaitResult result;
+  if (timeout_ms == std::chrono::milliseconds::max()) {
+    // Infinite host wait, e.g. guest code running on the kernel dispatch
+    // thread. Tripwire in slices so a deadlock names itself in the log.
+    int waited_s = 0;
+    while ((result = xe::threading::Wait(wait_handle, alertable ? true : false,
+                                         std::chrono::seconds(30))) ==
+           xe::threading::WaitResult::kTimeout) {
+      waited_s += 30;
+      XELOGW(
+          "XObject::Wait: host thread has waited {}s on a {} (tid={:08X})",
+          waited_s, static_cast<uint32_t>(type()),
+          XThread::IsInThread() ? XThread::GetCurrentThread()->thread_id() : 0);
+    }
+  } else {
+    result =
+        xe::threading::Wait(wait_handle, alertable ? true : false, timeout_ms);
+  }
 
   switch (result) {
     case xe::threading::WaitResult::kSuccess:
