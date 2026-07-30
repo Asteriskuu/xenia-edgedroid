@@ -7,9 +7,10 @@
  ******************************************************************************
  */
 
-#include <ranges>
-#include <android/log.h>
 #include "xenia/emulator.h"
+
+#include <android/log.h>
+#include <ranges>
 
 #include <algorithm>
 #if XE_PLATFORM_LINUX && !XE_PLATFORM_ANDROID
