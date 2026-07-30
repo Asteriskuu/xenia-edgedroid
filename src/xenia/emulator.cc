@@ -8,7 +8,7 @@
  */
 
 #include <ranges>
-
+#include <android/log.h>
 #include "xenia/emulator.h"
 
 #include <algorithm>
@@ -65,7 +65,6 @@
 #include "xenia/vfs/entry.h"
 #include "xenia/vfs/file.h"
 #include "xenia/vfs/virtual_file_system.h"
-#include <android/log.h>
 
 #if XE_ARCH_AMD64
 #include "xenia/cpu/backend/x64/x64_backend.h"
