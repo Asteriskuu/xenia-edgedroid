@@ -476,8 +476,8 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
 
 #if XE_ARCH_ARM64
     snprintf(line, sizeof(line), "PC: 0x%016llx SP: 0x%016llx LR: 0x%016llx\n",
-             (unsigned long long)ctx->pc, 
-             (unsigned long long)ctx->sp, (unsigned long long)ctx->x[30]);
+             (unsigned long long)ctx->pc, (unsigned long long)ctx->sp,
+             (unsigned long long)ctx->x[30]);
     safe_write(line);
     for (int i = 0; i <= 30; ++i) {
       snprintf(line, sizeof(line), "x%02d = 0x%016llx\n", i,
