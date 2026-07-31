@@ -7,13 +7,18 @@ target_include_directories(xenia-gpu-vulkan PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
   ${PROJECT_SOURCE_DIR}/third_party/glslang
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+  target_compile_definitions(xenia-gpu-vulkan PRIVATE VK_USE_PLATFORM_ANDROID_KHR)
+endif()
+
 if(WIN32 AND DEFINED ENV{VULKAN_SDK})
   target_include_directories(xenia-gpu-vulkan PRIVATE "$ENV{VULKAN_SDK}/Include")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   target_link_libraries(xenia-gpu-vulkan PUBLIC
-    fmt glslang-spirv xxhash xenia-base xenia-gpu
+    fmt glslang-spirv xxhash xenia-base xenia-gpu xenia-ui-vulkan
   )
 else()
   target_link_libraries(xenia-gpu-vulkan PUBLIC
