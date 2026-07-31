@@ -70,12 +70,12 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
     time_t t = time(nullptr);
     struct tm tm;
     localtime_r(&t, &tm);
-    int n = snprintf(buf, sizeof(buf),
-                     "A64Function::CallImpl dump: %04d-%02d-%02d %02d:%02d:%02d "
-                     "addr=%08X return_address=%08X backend=%p thunk=%p machine_code=%p\n",
-                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
-                     tm.tm_min, tm.tm_sec, address(), return_address, backend,
-                     thunk, code);
+    int n = snprintf(
+        buf, sizeof(buf),
+        "A64Function::CallImpl dump: %04d-%02d-%02d %02d:%02d:%02d "
+        "addr=%08X return_address=%08X backend=%p thunk=%p machine_code=%p\n",
+        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
+        tm.tm_sec, address(), return_address, backend, thunk, code);
     if (code) {
       uint32_t* instructions = reinterpret_cast<uint32_t*>(code);
       n += snprintf(buf + n, sizeof(buf) - n, "instructions:");
@@ -86,8 +86,7 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
     }
     const char* paths[] = {"./xenia_a64_dump.txt",
                            "/data/local/tmp/xenia_a64_dump.txt",
-                           "/sdcard/xenia_a64_dump.txt",
-                           nullptr};
+                           "/sdcard/xenia_a64_dump.txt", nullptr};
     for (const char** p = paths; *p; ++p) {
       FILE* f = fopen(*p, "a");
       if (f) {
@@ -100,7 +99,8 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
   }
 
   if (code && thunk && code == reinterpret_cast<uint8_t*>(thunk)) {
-    ALOGE("A64Function::CallImpl: machine_code equals thunk — refusing to call");
+    ALOGE(
+        "A64Function::CallImpl: machine_code equals thunk — refusing to call");
     return false;
   }
 
