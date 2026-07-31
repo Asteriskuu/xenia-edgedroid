@@ -1,4 +1,4 @@
-name: Build (reusable)
+name: Android Build
 
 on:
   #push:
