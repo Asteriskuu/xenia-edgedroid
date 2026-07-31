@@ -229,12 +229,6 @@ class SharedMemory {
   // writes only copy the chunks that changed.
   uint32_t dirty_blocks_ = 0;
 
-  // Per-page bitmap (sized like the valid flags) of pages the write watch can't
-  // cover - not writable in any physical window, so their CPU writes never
-  // fault. They are re-invalidated every frame to force a fresh re-upload.
-  std::vector<uint64_t> watch_blind_pages_;
-  bool has_watch_blind_pages_ = false;
-
   unsigned num_system_page_flags_ = 0;
 
   static std::pair<uint32_t, uint32_t> MemoryInvalidationCallbackThunk(

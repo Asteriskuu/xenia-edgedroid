@@ -775,24 +775,6 @@ void Memory::SetPhysicalAliasSkipHostProtect(bool skip) {
   heaps_.physical.set_skip_host_protect(skip);
 }
 
-xe::memory::PageAccess Memory::GetPhysicalPageWindowAccess(
-    uint32_t physical_address) {
-  bool readonly = false;
-  for (PhysicalHeap* heap :
-       {&heaps_.vA0000000, &heaps_.vC0000000, &heaps_.vE0000000}) {
-    xe::memory::PageAccess access = heap->GetPageAccess(physical_address);
-    if (access != xe::memory::PageAccess::kNoAccess &&
-        access != xe::memory::PageAccess::kReadOnly) {
-      return xe::memory::PageAccess::kReadWrite;
-    }
-    if (access == xe::memory::PageAccess::kReadOnly) {
-      readonly = true;
-    }
-  }
-  return readonly ? xe::memory::PageAccess::kReadOnly
-                  : xe::memory::PageAccess::kNoAccess;
-}
-
 uint32_t Memory::SystemHeapAlloc(uint32_t size, uint32_t alignment,
                                  uint32_t system_heap_flags) {
   // TODO(benvanik): lightweight pool.
@@ -2112,31 +2094,6 @@ bool PhysicalHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
   }
 
   return BaseHeap::Protect(address, size, protect);
-}
-
-uint32_t PhysicalHeap::GetPageProtect(uint32_t physical_address) {
-  uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
-  if (physical_address < physical_address_offset) {
-    return 0;
-  }
-  uint32_t heap_relative_address = physical_address - physical_address_offset;
-  if (heap_relative_address >= heap_size_) {
-    return 0;
-  }
-  uint32_t system_page =
-      (heap_relative_address + host_address_offset()) >> system_page_shift_;
-  if (system_page >= system_page_count_) {
-    return 0;
-  }
-  uint32_t guest_page = SystemPagenumToGuestPagenum(system_page);
-  if (guest_page >= page_table_.size()) {
-    return 0;
-  }
-  return page_table_[guest_page].current_protect;
-}
-
-xe::memory::PageAccess PhysicalHeap::GetPageAccess(uint32_t physical_address) {
-  return ToPageAccess(GetPageProtect(physical_address));
 }
 
 void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address,
