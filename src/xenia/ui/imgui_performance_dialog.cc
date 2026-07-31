@@ -19,7 +19,6 @@
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/ui/imgui_host_notification.h"
 
-DECLARE_bool(clear_memory_page_state);
 DECLARE_string(readback_resolve);
 DECLARE_bool(guest_display_refresh_cap);
 DECLARE_string(occlusion_query);
@@ -74,9 +73,6 @@ void ImGuiPerformanceDialog::LoadCurrentSettings() {
 
   // Load Memexport Fence Wait setting
   memexport_await_fences_ = cvars::memexport_await_fences;
-
-  // Load Clear Memory Page State setting
-  clear_memory_page_state_ = cvars::clear_memory_page_state;
 
   // Load Frame Rate Limit (FPS, 0 = unlimited)
   framerate_limit_ = static_cast<int>(cvars::framerate_limit);
@@ -180,13 +176,6 @@ void ImGuiPerformanceDialog::OnOcclusionQueryChanged(int value) {
 
   const char* mode_names[] = {"Fake", "Fast", "Fast-Alt", "Strict"};
   ShowNotification("Occlusion Query Mode", mode_names[static_cast<int>(mode)]);
-}
-
-void ImGuiPerformanceDialog::OnClearMemoryPageStateChanged(bool enabled) {
-  gpu::SaveGPUSetting(gpu::GPUSetting::ClearMemoryPageState, enabled);
-  config::SaveGameConfigSetting(emulator_window_->emulator(), "GPU",
-                                "clear_memory_page_state", enabled);
-  ShowNotification("Clear Memory Page State", enabled ? "Enabled" : "Disabled");
 }
 
 void ImGuiPerformanceDialog::OnFramerateLimitChanged(int value) {
@@ -354,24 +343,6 @@ void ImGuiPerformanceDialog::OnDraw(ImGuiIO& io) {
     ImGui::SameLine();
     if (ImGui::Button("Set##framerate_limit")) {
       OnFramerateLimitChanged(framerate_limit_);
-    }
-
-    ImGui::Unindent(10);
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Other section
-    ImGui::PushStyleColor(ImGuiCol_Text, xbox_green);
-    ImGui::Text("Other");
-    ImGui::PopStyleColor();
-
-    ImGui::Indent(10);
-
-    if (ImGui::Checkbox("Clear memory page state on GPU cache invalidation",
-                        &clear_memory_page_state_)) {
-      OnClearMemoryPageStateChanged(clear_memory_page_state_);
     }
 
     ImGui::Unindent(10);

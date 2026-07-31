@@ -52,7 +52,6 @@ class ImGuiPerformanceDialog : public ImGuiGamepadDialog {
   void OnMemexportAwaitFencesChanged(bool enabled);
   void OnOcclusionQueryChanged(int value);
   void OnEmulatedDisplayUncappedChanged(bool uncapped);
-  void OnClearMemoryPageStateChanged(bool enabled);
   void OnFramerateLimitChanged(int value);
 
   app::EmulatorWindow* emulator_window_;
@@ -64,7 +63,6 @@ class ImGuiPerformanceDialog : public ImGuiGamepadDialog {
   bool memexport_await_fences_ = true;
   int occlusion_query_mode_ = 0;  // 0=Fake, 1=Fast, 2=Fast-Alt, 3=Strict
   bool display_uncapped_ = false;
-  bool clear_memory_page_state_ = false;
   int framerate_limit_ = 0;  // FPS, 0 = unlimited
 
   // Highlight positions for navigation

@@ -112,6 +112,7 @@ class ImGuiDebugDialog : public ImGuiGamepadDialog {
   bool force_convert_quad_lists_to_triangle_lists_;
   bool force_convert_line_loops_to_strips_;
   // Memory / Boot Hacks
+  bool clear_memory_page_state_;
   bool scribble_heap_;
   int32_t scribble_heap_value_;
   // Diagnostics / Logging

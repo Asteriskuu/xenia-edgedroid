@@ -48,11 +48,12 @@ DEFINE_bool(
     "of the guest thread that wrote the new read position.",
     "GPU");
 
-DEFINE_bool(clear_memory_page_state, true,
+DEFINE_bool(clear_memory_page_state, false,
             "Refresh state of memory pages to enable gpu written data. "
             "Uses mostly lock-free double-buffering for minimal overhead. "
-            "(Disable for minor performance boost, but may break rendering)",
+            "(Enable if rendering breaks, at a minor performance cost)",
             "GPU");
+UPDATE_from_bool(clear_memory_page_state, 2026, 8, 1, 12, true);
 
 DEFINE_string(
     occlusion_query, "fast",
