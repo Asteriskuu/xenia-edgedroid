@@ -1,7 +1,7 @@
 name: Build (reusable)
 
 on:
-  push:
+  #push:
   workflow_call:
   workflow_dispatch:
   pull_request: 
