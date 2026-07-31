@@ -9,9 +9,9 @@
 
 #include "xenia/cpu/backend/a64/a64_code_cache.h"
 
+#include <dlfcn.h>
 #include <cstring>
 #include <vector>
-#include <dlfcn.h>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
@@ -34,27 +34,35 @@ static deregister_frame_fn g_deregister_frame = nullptr;
 static bool g_unwind_resolved = false;
 
 static void ResolveUnwindSymbols() {
-  if (g_unwind_resolved) return;
+  if (g_unwind_resolved) {
+    return;
+  }
   g_unwind_resolved = true;
 
-  g_register_frame =
-      reinterpret_cast<register_frame_fn>(dlsym(RTLD_DEFAULT, "__register_frame"));
-  g_deregister_frame =
-      reinterpret_cast<deregister_frame_fn>(dlsym(RTLD_DEFAULT, "__deregister_frame"));
+  g_register_frame = reinterpret_cast<register_frame_fn>(
+      dlsym(RTLD_DEFAULT, "__register_frame"));
+  g_deregister_frame = reinterpret_cast<deregister_frame_fn>(
+      dlsym(RTLD_DEFAULT, "__deregister_frame"));
 
   if (g_register_frame && g_deregister_frame) {
     return;
   }
-  
-  const char* candidates[] = {"libunwind.so", "libgcc.so", "libgcc_unwind.so", nullptr};
-  for (const char** p = candidates; *p && (!g_register_frame || !g_deregister_frame); ++p) {
+
+  const char* candidates[] = {"libunwind.so", "libgcc.so", "libgcc_unwind.so",
+                              nullptr};
+  for (const char** p = candidates;
+       *p && (!g_register_frame || !g_deregister_frame); ++p) {
     void* lib = dlopen(*p, RTLD_LAZY | RTLD_LOCAL);
-    if (!lib) continue;
+    if (!lib) {
+      continue;
+    }
     if (!g_register_frame) {
-      g_register_frame = reinterpret_cast<register_frame_fn>(dlsym(lib, "__register_frame"));
+      g_register_frame =
+          reinterpret_cast<register_frame_fn>(dlsym(lib, "__register_frame"));
     }
     if (!g_deregister_frame) {
-      g_deregister_frame = reinterpret_cast<deregister_frame_fn>(dlsym(lib, "__deregister_frame"));
+      g_deregister_frame = reinterpret_cast<deregister_frame_fn>(
+          dlsym(lib, "__deregister_frame"));
     }
   }
 }
@@ -64,7 +72,9 @@ static void RegisterFrameRuntime(void* addr) {
   if (g_register_frame) {
     g_register_frame(addr);
   } else {
-    XELOGW("PosixA64CodeCache: __register_frame not available, skipping unwind registration.");
+    XELOGW(
+        "PosixA64CodeCache: __register_frame not available, skipping unwind "
+        "registration.");
   }
 }
 
