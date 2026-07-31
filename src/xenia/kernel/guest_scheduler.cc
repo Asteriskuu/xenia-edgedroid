@@ -97,12 +97,7 @@ GuestScheduler::~GuestScheduler() { Shutdown(); }
 bool GuestScheduler::enabled() { return cvars::guest_scheduler; }
 
 int GuestScheduler::DispatchCpuOf(uint8_t guest_cpu) const {
-  if (guest_cpu >= kMaxCpus) {
-    guest_cpu = 0;
-  }
-  // With 6 dispatch threads it is 1:1, with 3 each physical core's SMT pair
-  // shares a thread, with 1 all share thread 0.
-  return guest_cpu * host_cpu_count_ / kMaxCpus;
+  return guest_cpu >= kMaxCpus ? 0 : guest_cpu;
 }
 
 int GuestScheduler::CpuOf(XThread* thread) const {
@@ -114,11 +109,8 @@ void GuestScheduler::EnsureStarted() {
   if (!started_.compare_exchange_strong(expected, true)) {
     return;
   }
-  // Not in the ctor, which runs before per-title cvar overrides are applied.
-  int n = static_cast<int>(cvars::guest_scheduler_cpus);
-  host_cpu_count_ = n < 1 ? 1 : (n > kMaxCpus ? kMaxCpus : n);
-
   xe::cpu::backend::preempt_yield_handler = &PreemptCurrentFiber;
+  // Not in the ctor, which runs before per-title cvar overrides are applied.
   double ticks_per_us = CalibrateTicksPerUs();
   quantum_ticks_ =
       static_cast<uint64_t>(ticks_per_us * cvars::guest_scheduler_quantum_us);
@@ -134,7 +126,7 @@ void GuestScheduler::EnsureStarted() {
                            : "host tick counter did not calibrate");
   }
 
-  for (int i = 0; i < host_cpu_count_; ++i) {
+  for (int i = 0; i < kMaxCpus; ++i) {
     cpus_[i].ready_event = xe::threading::Event::CreateAutoResetEvent(false);
   }
   if (quantum_ticks_) {
@@ -144,7 +136,7 @@ void GuestScheduler::EnsureStarted() {
         xe::threading::Thread::Create(params, [this]() { WatchdogLoop(); });
     watchdog_thread_->set_name("Guest Scheduler Watchdog");
   }
-  for (int i = 0; i < host_cpu_count_; ++i) {
+  for (int i = 0; i < kMaxCpus; ++i) {
     xe::threading::Thread::CreationParameters params;
     cpus_[i].host_thread =
         xe::threading::Thread::Create(params, [this, i]() { RunLoop(i); });
@@ -185,13 +177,13 @@ void GuestScheduler::Shutdown() {
            xe::threading::WaitResult::kTimeout) {
       {
         std::lock_guard<std::mutex> lock(lock_);
-        for (int i = 0; i < host_cpu_count_; ++i) {
+        for (int i = 0; i < kMaxCpus; ++i) {
           if (XThread* running = cpus_[i].current_thread) {
             running->thread_state()->context()->preempt_requested = 1;
           }
         }
       }
-      for (int i = 0; i < host_cpu_count_; ++i) {
+      for (int i = 0; i < kMaxCpus; ++i) {
         if (cpus_[i].ready_event) {
           cpus_[i].ready_event->Set();
         }
@@ -839,7 +831,7 @@ void GuestScheduler::WakeAll() {
   // Skip the lock when no CPU has a blocked waiter. A stale hint costs at
   // most one backoff interval.
   bool any_blocked = false;
-  for (int i = 0; i < host_cpu_count_; ++i) {
+  for (int i = 0; i < kMaxCpus; ++i) {
     if (cpus_[i].has_blocked.load(std::memory_order_relaxed)) {
       any_blocked = true;
       break;
@@ -853,7 +845,7 @@ void GuestScheduler::WakeAll() {
   // the runner past ready threads on every signal and starve them.
   {
     std::lock_guard<std::mutex> lock(lock_);
-    for (int i = 0; i < host_cpu_count_; ++i) {
+    for (int i = 0; i < kMaxCpus; ++i) {
       Cpu& cpu = cpus_[i];
       if (!cpu.blocked_head) {
         continue;
@@ -867,7 +859,7 @@ void GuestScheduler::WakeAll() {
       }
     }
   }
-  for (int i = 0; i < host_cpu_count_; ++i) {
+  for (int i = 0; i < kMaxCpus; ++i) {
     if (cpus_[i].has_blocked.load(std::memory_order_relaxed) &&
         cpus_[i].parked.load() && cpus_[i].ready_event) {
       cpus_[i].ready_event->Set();
@@ -1019,7 +1011,7 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
     cpu.has_blocked.store(kept_head != nullptr, std::memory_order_relaxed);
   }
   // Wake any other dispatch thread that received a ready fiber (this one runs).
-  for (int i = 0; i < host_cpu_count_; ++i) {
+  for (int i = 0; i < kMaxCpus; ++i) {
     if ((wake_mask & (uint32_t(1) << i)) && cpus_[i].parked.load() &&
         cpus_[i].ready_event) {
       cpus_[i].ready_event->Set();
@@ -1144,7 +1136,7 @@ void GuestScheduler::WatchdogLoop() {
     }
     uint64_t now = Clock::host_tick_count_raw();
     std::lock_guard<std::mutex> lock(lock_);
-    for (int i = 0; i < host_cpu_count_; ++i) {
+    for (int i = 0; i < kMaxCpus; ++i) {
       XThread* running = cpus_[i].current_thread;
       if (running && now >= cpus_[i].quantum_deadline_tick) {
         running->thread_state()->context()->preempt_requested = 1;
