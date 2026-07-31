@@ -11,6 +11,7 @@
 
 #include <cstring>
 #include <vector>
+#include <dlfcn.h>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
@@ -22,8 +23,59 @@
 // libgcc takes a pointer to a [CIE | FDEs | terminator] section and walks it.
 // Apple/LLVM libunwind takes a single FDE pointer and must be called once
 // per FDE, so on XE_PLATFORM_MAC we walk the buffer ourselves.
-extern "C" void __register_frame(void*);
-extern "C" void __deregister_frame(void*);
+// extern "C" void __register_frame(void*);
+// extern "C" void __deregister_frame(void*);
+
+using register_frame_fn = void (*)(void*);
+using deregister_frame_fn = void (*)(void*);
+
+static register_frame_fn g_register_frame = nullptr;
+static deregister_frame_fn g_deregister_frame = nullptr;
+static bool g_unwind_resolved = false;
+
+static void ResolveUnwindSymbols() {
+  if (g_unwind_resolved) return;
+  g_unwind_resolved = true;
+
+  g_register_frame =
+      reinterpret_cast<register_frame_fn>(dlsym(RTLD_DEFAULT, "__register_frame"));
+  g_deregister_frame =
+      reinterpret_cast<deregister_frame_fn>(dlsym(RTLD_DEFAULT, "__deregister_frame"));
+
+  if (g_register_frame && g_deregister_frame) {
+    return;
+  }
+  
+  const char* candidates[] = {"libunwind.so", "libgcc.so", "libgcc_unwind.so", nullptr};
+  for (const char** p = candidates; *p && (!g_register_frame || !g_deregister_frame); ++p) {
+    void* lib = dlopen(*p, RTLD_LAZY | RTLD_LOCAL);
+    if (!lib) continue;
+    if (!g_register_frame) {
+      g_register_frame = reinterpret_cast<register_frame_fn>(dlsym(lib, "__register_frame"));
+    }
+    if (!g_deregister_frame) {
+      g_deregister_frame = reinterpret_cast<deregister_frame_fn>(dlsym(lib, "__deregister_frame"));
+    }
+  }
+}
+
+static void RegisterFrameRuntime(void* addr) {
+  ResolveUnwindSymbols();
+  if (g_register_frame) {
+    g_register_frame(addr);
+  } else {
+    XELOGW("PosixA64CodeCache: __register_frame not available, skipping unwind registration.");
+  }
+}
+
+static void DeregisterFrameRuntime(void* addr) {
+  ResolveUnwindSymbols();
+  if (g_deregister_frame) {
+    g_deregister_frame(addr);
+  } else {
+    // nothing to do
+  }
+}
 
 namespace xe {
 namespace cpu {
@@ -128,7 +180,7 @@ PosixA64CodeCache::PosixA64CodeCache() = default;
 
 PosixA64CodeCache::~PosixA64CodeCache() {
   for (auto frame : registered_frames_) {
-    __deregister_frame(frame);
+    DeregisterFrameRuntime(frame);
   }
 }
 
@@ -179,14 +231,14 @@ void PosixA64CodeCache::PlaceCode(uint32_t guest_address, void* machine_code,
     }
     uint32_t cie_id_or_ptr = *reinterpret_cast<const uint32_t*>(p + 4);
     if (cie_id_or_ptr != 0) {
-      __register_frame(p_execute);
+      RegisterFrameRuntime(p_execute);
       registered_frames_.push_back(p_execute);
     }
     p += 4 + length;
     p_execute += 4 + length;
   }
 #else
-  __register_frame(unwind_execute_address);
+  RegisterFrameRuntime(unwind_execute_address);
   registered_frames_.push_back(unwind_execute_address);
 #endif
 
