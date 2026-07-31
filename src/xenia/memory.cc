@@ -2338,15 +2338,11 @@ bool PhysicalHeap::TriggerCallbacks(
       }
     }
     if (!any_read_watched) {
-      // No read watch here. If the guest page is accessible this is a race with
-      // another thread that cleared the watch, so retry. If it is no-access it
-      // is a genuine access violation, so propagate. Checked via the page table
-      // to stay signal safe.
-      uint32_t guest_page_number =
-          xe::sat_sub(system_page_first << system_page_shift_,
-                      host_address_offset()) >>
-          page_size_shift_;
-      return ToPageAccess(page_table_[guest_page_number].current_protect) !=
+      // No read watch here. If the guest mapping is accessible this is a race
+      // with another thread that cleared the watch, so retry. If it is
+      // no-access it is a genuine access violation, so propagate. Checked via
+      // the page table to stay signal safe.
+      return SystemPageGuestAccess(system_page_first) !=
              xe::memory::PageAccess::kNoAccess;
     }
     uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
@@ -2423,8 +2419,11 @@ bool PhysicalHeap::TriggerCallbacks(
     // so the faulting instruction retries; the page is now unprotected and the
     // access will succeed. This is the signal-safe equivalent of the
     // QueryProtect check in the non-Linux path of
-    // MMIOHandler::ExceptionCallback.
-    return true;
+    // MMIOHandler::ExceptionCallback. If the guest doesn't permit the write
+    // either, retrying it faults forever, so report it unhandled and let the
+    // violation surface.
+    return SystemPageGuestAccess(system_page_first) ==
+           xe::memory::PageAccess::kReadWrite;
   }
 
   // Trigger callbacks.
