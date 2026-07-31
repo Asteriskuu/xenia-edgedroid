@@ -8,6 +8,9 @@
  */
 
 #include <android/log.h>
+#include <stdio.h>
+#include <time.h>
+#include <algorithm>
 
 #include "xenia/cpu/backend/a64/a64_function.h"
 
@@ -60,6 +63,45 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
     for (int i = 0; i < 10; ++i) {
       ALOGI("A64Function: instruction[%d]=0x%08X", i, instructions[i]);
     }
+  }
+
+  {
+    char buf[1024];
+    time_t t = time(nullptr);
+    struct tm tm;
+    localtime_r(&t, &tm);
+    int n = snprintf(buf, sizeof(buf),
+                     "A64Function::CallImpl dump: %04d-%02d-%02d %02d:%02d:%02d "
+                     "addr=%08X return_address=%08X backend=%p thunk=%p machine_code=%p\n",
+                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+                     tm.tm_min, tm.tm_sec, address(), return_address, backend,
+                     thunk, code);
+    if (code) {
+      uint32_t* instructions = reinterpret_cast<uint32_t*>(code);
+      n += snprintf(buf + n, sizeof(buf) - n, "instructions:");
+      for (int i = 0; i < 10; ++i) {
+        n += snprintf(buf + n, sizeof(buf) - n, " 0x%08X", instructions[i]);
+      }
+      n += snprintf(buf + n, sizeof(buf) - n, "\n");
+    }
+    const char* paths[] = {"./xenia_a64_dump.txt",
+                           "/data/local/tmp/xenia_a64_dump.txt",
+                           "/sdcard/xenia_a64_dump.txt",
+                           nullptr};
+    for (const char** p = paths; *p; ++p) {
+      FILE* f = fopen(*p, "a");
+      if (f) {
+        fwrite(buf, 1, (size_t)std::max(0, n), f);
+        fflush(f);
+        fclose(f);
+        break;
+      }
+    }
+  }
+
+  if (code && thunk && code == reinterpret_cast<uint8_t*>(thunk)) {
+    ALOGE("A64Function::CallImpl: machine_code equals thunk — refusing to call");
+    return false;
   }
 
   if (!thunk || !code) {
