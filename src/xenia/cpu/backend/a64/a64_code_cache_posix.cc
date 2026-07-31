@@ -189,6 +189,11 @@ void PosixA64CodeCache::PlaceCode(uint32_t guest_address, void* machine_code,
   __register_frame(unwind_execute_address);
   registered_frames_.push_back(unwind_execute_address);
 #endif
+
+  // whatthefuck
+  __builtin___clear_cache(reinterpret_cast<char*>(code_execute_address),
+                          reinterpret_cast<char*>(code_execute_address) +
+                              static_cast<size_t>(func_info.code_size.total));
 }
 
 void PosixA64CodeCache::InitializeUnwindEntry(
