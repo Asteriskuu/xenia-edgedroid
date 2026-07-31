@@ -296,6 +296,9 @@ class XObject {
   uint32_t cooperative_signal_epoch() const {
     return cooperative_signal_epoch_.load();
   }
+  // Bumped by a release-everyone-then-reset transition (a manual-reset pulse),
+  // which is gone from the host primitive before any parked fiber re-polls it.
+  virtual uint32_t cooperative_pulse_epoch() const { return 0; }
   // Bumps the epoch, then wakes the dispatch threads. Call after the host
   // primitive is signaled, never before.
   void WakeCooperativeWaiters();
