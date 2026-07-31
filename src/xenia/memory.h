@@ -321,11 +321,15 @@ class PhysicalHeap : public BaseHeap {
       const uint32_t system_page_first, const uint32_t system_page_last,
       xe::memory::PageAccess protect_access) XE_RESTRICT;
 
-  // Returns true if any page in the range was watched.
+  // Returns true if any page in the range was watched. With
+  // invalidate_unwatched the callbacks are raised even when no watch is armed,
+  // for a caller that knows the range is about to change rather than one
+  // reacting to a fault.
   bool TriggerCallbacks(global_unique_lock_type global_lock_locked_once,
                         uint32_t virtual_address, uint32_t length,
                         bool is_write, bool unwatch_exact_range,
-                        bool unprotect = true);
+                        bool unprotect = true,
+                        bool invalidate_unwatched = false);
 
   uint32_t GetPhysicalAddress(uint32_t address) const;
 
