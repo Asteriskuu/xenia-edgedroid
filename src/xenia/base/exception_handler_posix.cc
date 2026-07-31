@@ -433,7 +433,12 @@ void ExceptionHandler::Install(Handler fn, void* data) {
     signal_handler.sa_sigaction = ExceptionHandlerCallback;
     // SA_ONSTACK: an exhausted fiber stack cannot host the handler frame, run
     // on the per-thread sigaltstack instead.
-    signal_handler.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    // SA_NODEFER: the handler faults on guest memory it protects itself, and a
+    // nested fault is undeliverable while the kernel blocks the signal - it
+    // retries forever on macOS, kills the process on Linux. Re-entry is safe:
+    // the handler only touches the context it is given, and the global critical
+    // region is recursive.
+    signal_handler.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
 
     if (sigaction(SIGILL, &signal_handler, &original_sigill_handler_) != 0) {
       assert_always("Failed to install new SIGILL handler");
