@@ -386,10 +386,19 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                                              Clock::ScaleGuestDurationMillis(
                                                  TimeoutTicksToMs(*opt_timeout))
                                        : 0;
+    const uint32_t entry_pulse_epoch = cooperative_pulse_epoch();
     EnterCooperativeWait(self);  // FIFO fairness for semaphores
     X_STATUS status = CooperativeWait(
         scheduler, kthread, this, alertable != 0, deadline_ms,
         [&]() -> std::optional<X_STATUS> {
+          // Released by a pulse that already reset the host primitive.
+          if (cooperative_pulse_epoch() != entry_pulse_epoch) {
+            if (self) {
+              self->BoostOnWake(priority_increment());
+            }
+            WaitCallback();
+            return AcquireStatus();
+          }
           // Only the front-of-queue fiber may take a permit (no-op for events).
           if (!CooperativeMayAcquire(self)) {
             return std::nullopt;
@@ -486,10 +495,19 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
                                              Clock::ScaleGuestDurationMillis(
                                                  TimeoutTicksToMs(*opt_timeout))
                                        : 0;
+    const uint32_t entry_pulse_epoch = wait_object->cooperative_pulse_epoch();
     wait_object->EnterCooperativeWait(self);  // FIFO fairness for semaphores
     X_STATUS status = CooperativeWait(
         scheduler, kthread, wait_object, alertable != 0, deadline_ms,
         [&]() -> std::optional<X_STATUS> {
+          // Released by a pulse that already reset the host primitive.
+          if (wait_object->cooperative_pulse_epoch() != entry_pulse_epoch) {
+            if (self) {
+              self->BoostOnWake(wait_object->priority_increment());
+            }
+            wait_object->WaitCallback();
+            return wait_object->AcquireStatus();
+          }
           // Only the front-of-queue fiber may take a permit (no-op for events).
           if (!wait_object->CooperativeMayAcquire(self)) {
             return std::nullopt;
@@ -590,11 +608,29 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                                              Clock::ScaleGuestDurationMillis(
                                                  TimeoutTicksToMs(*opt_timeout))
                                        : 0;
+    uint32_t entry_pulse_epochs[kMaxWaitHandles];
+    for (size_t i = 0; i < count; ++i) {
+      entry_pulse_epochs[i] = objects[i]->cooperative_pulse_epoch();
+    }
     return CooperativeWait(
         scheduler, kthread, nullptr, alertable != 0, deadline_ms,
         [&]() -> std::optional<X_STATUS> {
           resolve_handles();
           if (wait_type) {
+            // WaitAny only: WaitAll needs every object signaled at once, which
+            // a pulse this waiter already missed cannot give it.
+            for (uint32_t i = 0; i < count; ++i) {
+              if (objects[i]->cooperative_pulse_epoch() !=
+                  entry_pulse_epochs[i]) {
+                objects[i]->WaitCallback();
+                if (auto* current = XThread::GetCurrentThread()) {
+                  current->BoostOnWake(objects[i]->priority_increment());
+                }
+                return objects[i]->AcquireStatus() == X_STATUS_SUCCESS
+                           ? X_STATUS(i)
+                           : X_STATUS(X_STATUS_ABANDONED_WAIT_0 + i);
+              }
+            }
             auto r = xe::threading::WaitAny(wait_handles, count,
                                             alertable ? true : false,
                                             std::chrono::milliseconds(0));
