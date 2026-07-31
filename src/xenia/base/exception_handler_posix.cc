@@ -9,13 +9,13 @@
 
 #include "xenia/base/exception_handler.h"
 
+#include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
-#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <fcntl.h>
 #include <time.h>
-#include <limits.h>
+#include <unistd.h>
 #ifdef HAVE_EXECINFO_H
 #include <execinfo.h>
 #endif
@@ -417,8 +417,10 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
 
   // Unhandled: restore the original disposition so the kernel re-delivers
   // the signal to it on instruction retry, otherwise we loop forever.
-  auto write_crash_dump = [&](int sig, HostThreadContext* ctx, uint64_t fault_addr) {
-    const char* dirs[] = {"/sdcard/Downloads/xenia", "/data/local/tmp/xenia", nullptr};
+  auto write_crash_dump = [&](int sig, HostThreadContext* ctx,
+                              uint64_t fault_addr) {
+    const char* dirs[] = {"/sdcard/Downloads/xenia", "/data/local/tmp/xenia",
+                          nullptr};
     char chosen_dir[PATH_MAX] = {0};
     for (const char** d = dirs; *d; ++d) {
       const char* p = *d;
@@ -448,13 +450,15 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     struct tm tm;
     localtime_r(&t, &tm);
     if (chosen_dir[0]) {
-      snprintf(filename, sizeof(filename), "%s/tombstone_%04d%02d%02d_%02d%02d%02d.txt",
-               chosen_dir, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-               tm.tm_hour, tm.tm_min, tm.tm_sec);
+      snprintf(filename, sizeof(filename),
+               "%s/tombstone_%04d%02d%02d_%02d%02d%02d.txt", chosen_dir,
+               tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+               tm.tm_min, tm.tm_sec);
     } else {
-      snprintf(filename, sizeof(filename), "/data/local/tmp/xenia_tombstone_%ld.txt", (long)t);
+      snprintf(filename, sizeof(filename),
+               "/data/local/tmp/xenia_tombstone_%ld.txt", (long)t);
     }
-    
+
     int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) {
       return;
@@ -466,13 +470,12 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     };
 
     char line[512];
-    snprintf(line, sizeof(line), "Signal: %d\nFault address: 0x%016llx\n",
-             sig, (unsigned long long)fault_addr);
+    snprintf(line, sizeof(line), "Signal: %d\nFault address: 0x%016llx\n", sig,
+             (unsigned long long)fault_addr);
     safe_write(line);
 
 #if XE_ARCH_ARM64
-    snprintf(line, sizeof(line),
-             "PC: 0x%016llx SP: 0x%016llx LR: 0x%016llx\n",
+    snprintf(line, sizeof(line), "PC: 0x%016llx SP: 0x%016llx LR: 0x%016llx\n",
              (unsigned long long)ctx->pc, (unsigned long long)ctx->sp,
              (unsigned long long)ctx->lr);
     safe_write(line);
@@ -513,7 +516,8 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
     close(fd);
   };
 
-  write_crash_dump(signal_number, &thread_context, reinterpret_cast<uint64_t>(signal_info->si_addr));
+  write_crash_dump(signal_number, &thread_context,
+                   reinterpret_cast<uint64_t>(signal_info->si_addr));
 
   struct sigaction* original_handler = nullptr;
   switch (signal_number) {
