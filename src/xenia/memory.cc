@@ -131,18 +131,6 @@ static inline bool ShouldSkipHostCommit(const BaseHeap& heap) {
   return false;
 }
 
-xe::memory::PageAccess ToPageAccess(uint32_t protect) {
-  bool is_writable = IsWritableProtect(protect);
-
-  if ((protect & kMemoryProtectRead) && !is_writable) {
-    return xe::memory::PageAccess::kReadOnly;
-  } else if ((protect & kMemoryProtectRead) && is_writable) {
-    return xe::memory::PageAccess::kReadWrite;
-  } else {
-    return xe::memory::PageAccess::kNoAccess;
-  }
-}
-
 void RandomizeMemory(void* range_start, uint32_t size) {
   if (!cvars::scribble_heap) {
     return;
@@ -2207,19 +2195,11 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
   uint32_t protect_system_page_first = UINT32_MAX;
 
   SystemPageFlagsBlock* XE_RESTRICT sys_page_flags = system_page_flags_.data();
-  PageEntry* XE_RESTRICT page_table_ptr = page_table_.data();
 
   // chrispy: a lot of time is spent in this loop, and i think some of the work
   // may be avoidable and repetitive profiling shows quite a bit of time spent
   // in this loop, but very little spent actually calling Protect
   uint32_t i = system_page_first;
-
-  uint32_t first_guest_page = SystemPagenumToGuestPagenum(system_page_first);
-  uint32_t last_guest_page = SystemPagenumToGuestPagenum(system_page_last);
-
-  uint32_t guest_one = SystemPagenumToGuestPagenum(1);
-
-  uint32_t system_one = GuestPagenumToSystemPagenum(1);
   for (; i <= system_page_last; ++i) {
     // Check if need to enable callbacks for the page and raise its protection.
     //
@@ -2259,8 +2239,7 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
           i, guest_page_number, host_address_offset());
       assert_always();
     }
-    xe::memory::PageAccess current_page_access =
-        ToPageAccess(page_table_ptr[guest_page_number].current_protect);
+    xe::memory::PageAccess current_page_access = SystemPageGuestAccess(i);
     bool protect_system_page = false;
     // Don't do anything with inaccessible pages - don't protect, don't enable
     // callbacks - because real access violations are needed there. And don't
@@ -2396,11 +2375,7 @@ bool PhysicalHeap::TriggerCallbacks(
         if (!(flags.notify_on_read & bit)) {
           continue;
         }
-        uint32_t guest_page_number =
-            xe::sat_sub(i << system_page_shift_, host_address_offset()) >>
-            page_size_shift_;
-        xe::memory::PageAccess guest_access =
-            ToPageAccess(page_table_[guest_page_number].current_protect);
+        xe::memory::PageAccess guest_access = SystemPageGuestAccess(i);
         xe::memory::PageAccess target;
         if (guest_access == xe::memory::PageAccess::kNoAccess) {
           target = xe::memory::PageAccess::kNoAccess;
@@ -2526,11 +2501,7 @@ bool PhysicalHeap::TriggerCallbacks(
             system_page_flags_[i >> 6].notify_on_read) &
            (uint64_t(1) << (i & 63))) != 0;
       if (unprotect_page) {
-        uint32_t guest_page_number =
-            xe::sat_sub(i << system_page_shift_, host_address_offset()) >>
-            page_size_shift_;
-        if (ToPageAccess(page_table_[guest_page_number].current_protect) !=
-            xe::memory::PageAccess::kReadWrite) {
+        if (SystemPageGuestAccess(i) != xe::memory::PageAccess::kReadWrite) {
           unprotect_page = false;
         }
       }
