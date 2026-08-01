@@ -9,7 +9,9 @@
 
 #include "xenia/cpu/function.h"
 
+#if !XE_PLATFORM_ANDROID
 #include <execinfo.h>
+#endif
 #include <fcntl.h>
 #include <unistd.h>
 #include "xenia/base/logging.h"
@@ -175,6 +177,7 @@ bool GuestFunction::Call(ThreadState* thread_state, uint32_t return_address) {
               return_address);
       close(fd);
     }
+#if !XE_PLATFORM_ANDROID
     void* bt[32];
     int bt_size = backtrace(bt, (int)std::size(bt));
     int bfd = open(bt_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -185,6 +188,7 @@ bool GuestFunction::Call(ThreadState* thread_state, uint32_t return_address) {
       dprintf(bfd, "\n");
       close(bfd);
     }
+#endif
   }
 
   bool result = CallImpl(thread_state, return_address);
