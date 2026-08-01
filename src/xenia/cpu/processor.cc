@@ -407,10 +407,15 @@ bool Processor::Execute(ThreadState* thread_state, uint32_t address) {
   // This could be set to anything to give us a unique identifier to track
   // re-entrancy/etc.
   uint64_t previous_lr = context->lr;
-  context->lr = 0xBCBCBCBC;
-  ALOGI("Processor::Execute: lr saved=%016llX lr set=%016llX",
-        static_cast<unsigned long long>(previous_lr),
-        static_cast<unsigned long long>(context->lr));
+  auto* backend = thread_state->processor()->backend();
+  uint32_t guest_return =
+      backend ? backend->guest_return_trampoline() : 0xBCBCBCBCu;
+  context->lr = static_cast<uint64_t>(guest_return);
+  ALOGI(
+      "Processor::Execute: lr saved=%016llX lr set=%016llX "
+      "(guest_return=0x%08X)",
+      static_cast<unsigned long long>(previous_lr),
+      static_cast<unsigned long long>(context->lr), guest_return);
 
   // Execute the function.
   ALOGI("Processor::Execute: calling Function::Call()");

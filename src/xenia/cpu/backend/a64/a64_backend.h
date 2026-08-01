@@ -124,6 +124,9 @@ class A64Backend : public Backend {
   void* synchronize_guest_and_host_stack_helper() const {
     return synchronize_guest_and_host_stack_helper_;
   }
+  uint32_t guest_return_trampoline() const override {
+    return guest_return_trampoline_;
+  }
 
   bool Initialize(Processor* processor) override;
 
@@ -187,6 +190,7 @@ class A64Backend : public Backend {
   GuestToHostThunk guest_to_host_thunk_ = nullptr;
   ResolveFunctionThunk resolve_function_thunk_ = nullptr;
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
+  uint32_t guest_return_trampoline_ = 0;
 
  public:
   void* try_acquire_reservation_helper_ = nullptr;
