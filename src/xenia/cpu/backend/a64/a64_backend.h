@@ -124,6 +124,9 @@ class A64Backend : public Backend {
   void* synchronize_guest_and_host_stack_helper() const {
     return synchronize_guest_and_host_stack_helper_;
   }
+  uint32_t guest_return_trampoline() const override {
+    return guest_return_trampoline_;
+  }
 
   bool Initialize(Processor* processor) override;
 
