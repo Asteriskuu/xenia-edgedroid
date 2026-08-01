@@ -118,6 +118,7 @@ class ImGuiDebugDialog : public ImGuiGamepadDialog {
   // Diagnostics / Logging
   int32_t log_level_;
   uint32_t log_mask_;
+  bool log_high_frequency_kernel_calls_;
   bool occlusion_query_log_;
   bool gpu_debug_markers_;
   bool disassemble_pm4_;

@@ -59,6 +59,7 @@ DECLARE_bool(force_convert_quad_lists_to_triangle_lists);
 DECLARE_bool(force_convert_line_loops_to_strips);
 DECLARE_int32(log_level);
 DECLARE_uint32(log_mask);
+DECLARE_bool(log_high_frequency_kernel_calls);
 DECLARE_bool(clear_memory_page_state);
 DECLARE_bool(scribble_heap);
 DECLARE_int32(scribble_heap_value);
@@ -336,6 +337,7 @@ void ImGuiDebugDialog::LoadCurrentSettings() {
 
   log_level_ = cvars::log_level;
   log_mask_ = cvars::log_mask;
+  log_high_frequency_kernel_calls_ = cvars::log_high_frequency_kernel_calls;
   occlusion_query_log_ = cvars::occlusion_query_log;
   gpu_debug_markers_ = cvars::gpu_debug_markers;
   disassemble_pm4_ = cvars::disassemble_pm4;
@@ -655,6 +657,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
   bool show_logging = AnyMatchesFilter({
       "log_level",
       "log_mask",
+      "log_high_frequency_kernel_calls",
       "occlusion_query_log",
       "gpu_debug_markers",
       "disassemble_pm4",
@@ -1265,6 +1268,18 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
               ApplyLogMask();
             } else if (ImGui::IsItemDeactivatedAfterEdit()) {
               ApplyLogMask();
+            }
+          }
+
+          if (MatchesFilter("log_high_frequency_kernel_calls")) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            DrawLabelCell("log_high_frequency_kernel_calls");
+            ImGui::TableSetColumnIndex(1);
+            if (RightAlignedCheckbox("##log_high_frequency_kernel_calls",
+                                     &log_high_frequency_kernel_calls_)) {
+              ApplyBoolSetting("Logging", "log_high_frequency_kernel_calls",
+                               log_high_frequency_kernel_calls_);
             }
           }
 
