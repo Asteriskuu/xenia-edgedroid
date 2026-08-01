@@ -8,15 +8,15 @@
  */
 
 #include <android/log.h>
-#include <stdio.h>
-#include <time.h>
-#include <algorithm>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <sys/types.h>
+#include <stdio.h>
 #include <sys/stat.h>
-#include <fcntl.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+#include <algorithm>
 
 #include "xenia/cpu/backend/a64/a64_function.h"
 
@@ -116,7 +116,8 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
       uint8_t bytes[16] = {0};
       memcpy(bytes, reinterpret_cast<void*>(addr), sizeof(bytes));
       size_t n = 0;
-      for (size_t i = 0; i < sizeof(bytes) && n + 3 < out_first_bytes_len; ++i) {
+      for (size_t i = 0; i < sizeof(bytes) && n + 3 < out_first_bytes_len;
+           ++i) {
         n += snprintf(out_first_bytes + n, out_first_bytes_len - n, "%02X ",
                       bytes[i]);
       }
@@ -135,18 +136,17 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
   bool thunk_mapped = false;
   bool code_mapped = false;
   if (thunk_addr) {
-    thunk_mapped =
-        addr_in_maps_and_dump(thunk_addr, thunk_first_bytes, sizeof(thunk_first_bytes),
-                              maps_path);
+    thunk_mapped = addr_in_maps_and_dump(thunk_addr, thunk_first_bytes,
+                                         sizeof(thunk_first_bytes), maps_path);
     ALOGI("A64Function: thunk %p mapped=%d first_bytes=%s maps_dump=%s", thunk,
           thunk_mapped, thunk_first_bytes, maps_path[0] ? maps_path : "(none)");
   }
   if (code_addr) {
-    code_mapped =
-        addr_in_maps_and_dump(code_addr, code_first_bytes, sizeof(code_first_bytes),
-                              maps_path);
-    ALOGI("A64Function: machine_code %p mapped=%d first_bytes=%s maps_dump=%s", code,
-          code_mapped, code_first_bytes, maps_path[0] ? maps_path : "(none)");
+    code_mapped = addr_in_maps_and_dump(code_addr, code_first_bytes,
+                                        sizeof(code_first_bytes), maps_path);
+    ALOGI("A64Function: machine_code %p mapped=%d first_bytes=%s maps_dump=%s",
+          code, code_mapped, code_first_bytes,
+          maps_path[0] ? maps_path : "(none)");
   }
 
   uintptr_t sp_val = 0;
@@ -199,8 +199,10 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
   }
 
   if (!thunk_mapped || !code_mapped) {
-    ALOGE("A64Function::CallImpl: thunk_mapped=%d code_mapped=%d - refusing to call",
-          thunk_mapped ? 1 : 0, code_mapped ? 1 : 0);
+    ALOGE(
+        "A64Function::CallImpl: thunk_mapped=%d code_mapped=%d - refusing to "
+        "call",
+        thunk_mapped ? 1 : 0, code_mapped ? 1 : 0);
     return false;
   }
 
