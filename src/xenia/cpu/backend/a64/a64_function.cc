@@ -272,8 +272,21 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
 
   ALOGI("A64Function::CallImpl: jumping to guest code (ret=0x%08X)",
         return_address);
+
+  uintptr_t sp_val_call = 0;
+  asm volatile("mov %0, sp" : "=r"(sp_val_call));
+  uintptr_t misalign = sp_val_call & 0xF;
+  if (misalign) {
+    asm volatile("sub sp, sp, %0" :: "r"(misalign) : "memory");
+  }
+
   thunk(code, thread_state->context(),
         reinterpret_cast<void*>(uintptr_t(return_address)));
+
+  if (misalign) {
+    asm volatile("add sp, sp, %0" :: "r"(misalign) : "memory");
+  }
+
   ALOGI("A64Function::CallImpl: guest code returned");
 
   return true;
