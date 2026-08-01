@@ -408,7 +408,7 @@ bool Processor::Execute(ThreadState* thread_state, uint32_t address) {
   // re-entrancy/etc.
   uint64_t previous_lr = context->lr;
   auto* backend = thread_state->processor()->backend();
-  uint32_t guest_return = 
+  uint32_t guest_return =
       backend ? backend->guest_return_trampoline() : 0xBCBCBCBCu;
   context->lr = static_cast<uint64_t>(guest_return);
   ALOGI(
