@@ -13,6 +13,9 @@
 #include "xenia/base/profiling.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
+#include <execinfo.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace xe {
 namespace cpu {
@@ -156,6 +159,31 @@ bool GuestFunction::Call(ThreadState* thread_state, uint32_t return_address) {
   ThreadState* original_thread_state = ThreadState::Get();
   if (original_thread_state != thread_state) {
     ThreadState::Bind(thread_state);
+  }
+
+  {
+    void* host_ret = __builtin_return_address(0);
+    const char* callers_path = "/data/local/tmp/guest_callers.txt";
+    const char* bt_path = "/data/local/tmp/guest_backtrace.txt";
+    int fd = open(callers_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+      dprintf(fd,
+              "GuestCall: guest_addr=0x%08X host_ret=%p thread=%u return_addr=0x%08X\n",
+              address(), host_ret,
+              ThreadState::Get() ? ThreadState::Get()->thread_id() : 0,
+              return_address);
+      close(fd);
+    }
+    void* bt[32];
+    int bt_size = backtrace(bt, (int)std::size(bt));
+    int bfd = open(bt_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (bfd >= 0) {
+      dprintf(bfd, "Backtrace for guest_addr=0x%08X (host_ret=%p):\n", address(),
+              host_ret);
+      backtrace_symbols_fd(bt, bt_size, bfd);
+      dprintf(bfd, "\n");
+      close(bfd);
+    }
   }
 
   bool result = CallImpl(thread_state, return_address);
