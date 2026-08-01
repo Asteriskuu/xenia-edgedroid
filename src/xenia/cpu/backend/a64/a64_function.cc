@@ -11,6 +11,12 @@
 #include <stdio.h>
 #include <time.h>
 #include <algorithm>
+#include <inttypes.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include "xenia/cpu/backend/a64/a64_function.h"
 
@@ -65,6 +71,89 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
     }
   }
 
+  auto addr_in_maps_and_dump = [](uintptr_t addr, char* out_first_bytes,
+                                  size_t out_first_bytes_len,
+                                  char* out_maps_path) -> bool {
+    FILE* mapsf = fopen("/proc/self/maps", "r");
+    if (!mapsf) {
+      return false;
+    }
+    FILE* dumpf = fopen("/sdcard/xenia_maps.txt", "a");
+    if (dumpf) {
+      char mapsbuf[1024];
+      while (fgets(mapsbuf, sizeof(mapsbuf), mapsf)) {
+        fputs(mapsbuf, dumpf);
+      }
+      fputc('\n', dumpf);
+      fclose(dumpf);
+      fclose(mapsf);
+      mapsf = fopen("/proc/self/maps", "r");
+      if (!mapsf) {
+        return false;
+      }
+    }
+
+    bool found = false;
+    char line[512];
+    while (fgets(line, sizeof(line), mapsf)) {
+      unsigned long long start = 0, end = 0;
+      if (sscanf(line, "%llx-%llx", &start, &end) == 2) {
+        if (addr >= start && addr < end) {
+          found = true;
+          FILE* notef = fopen("/sdcard/xenia_maps.txt", "a");
+          if (notef) {
+            fprintf(notef, "Address %p found in maps range %llx-%llx: %s\n",
+                    (void*)addr, start, end, line);
+            fclose(notef);
+          }
+          break;
+        }
+      }
+    }
+    fclose(mapsf);
+
+    if (found) {
+      uint8_t bytes[16] = {0};
+      memcpy(bytes, reinterpret_cast<void*>(addr), sizeof(bytes));
+      size_t n = 0;
+      for (size_t i = 0; i < sizeof(bytes) && n + 3 < out_first_bytes_len; ++i) {
+        n += snprintf(out_first_bytes + n, out_first_bytes_len - n, "%02X ",
+                      bytes[i]);
+      }
+      if (out_maps_path) {
+        strncpy(out_maps_path, "/sdcard/xenia_maps.txt", 256);
+      }
+    }
+    return found;
+  };
+
+  uintptr_t thunk_addr = reinterpret_cast<uintptr_t>(thunk);
+  uintptr_t code_addr = reinterpret_cast<uintptr_t>(code);
+  char thunk_first_bytes[128] = {0};
+  char code_first_bytes[128] = {0};
+  char maps_path[256] = {0};
+  bool thunk_mapped = false;
+  bool code_mapped = false;
+  if (thunk_addr) {
+    thunk_mapped =
+        addr_in_maps_and_dump(thunk_addr, thunk_first_bytes, sizeof(thunk_first_bytes),
+                              maps_path);
+    ALOGI("A64Function: thunk %p mapped=%d first_bytes=%s maps_dump=%s", thunk,
+          thunk_mapped, thunk_first_bytes, maps_path[0] ? maps_path : "(none)");
+  }
+  if (code_addr) {
+    code_mapped =
+        addr_in_maps_and_dump(code_addr, code_first_bytes, sizeof(code_first_bytes),
+                              maps_path);
+    ALOGI("A64Function: machine_code %p mapped=%d first_bytes=%s maps_dump=%s", code,
+          code_mapped, code_first_bytes, maps_path[0] ? maps_path : "(none)");
+  }
+
+  uintptr_t sp_val = 0;
+  asm volatile("mov %0, sp" : "=r"(sp_val));
+  ALOGI("A64Function: current SP=%p, aligned16=%d", (void*)sp_val,
+        int((sp_val & 0xF) == 0));
+
   {
     char buf[1024];
     time_t t = time(nullptr);
@@ -106,6 +195,12 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
 
   if (!thunk || !code) {
     ALOGE("A64Function::CallImpl: missing thunk or machine_code");
+    return false;
+  }
+
+  if (!thunk_mapped || !code_mapped) {
+    ALOGE("A64Function::CallImpl: thunk_mapped=%d code_mapped=%d - refusing to call",
+          thunk_mapped ? 1 : 0, code_mapped ? 1 : 0);
     return false;
   }
 
