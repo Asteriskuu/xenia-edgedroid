@@ -28,11 +28,11 @@ class XThread;
 
 // Cooperative, in-kernel scheduler for guest threads.
 //
-// The 360's 6 logical CPUs are spread across a configurable number of dispatch
-// host threads (guest_scheduler_cpus: 1, 3, or 6). Each guest thread runs as a
-// host fiber pinned by its guest current_cpu to one dispatch thread. Fibers on
-// different dispatch threads run truly in parallel, while fibers sharing one
-// are cooperatively scheduled, switching at yield points (waits, delays,
+// Each of the 360's 6 logical CPUs has its own dispatch host thread. Each
+// guest thread runs as a host fiber pinned by its guest current_cpu to one
+// dispatch thread. Fibers on different dispatch threads run truly in
+// parallel, while fibers sharing one are cooperatively scheduled, switching
+// at yield points (waits, delays,
 // NtYieldExecution, exit) and at JIT safepoints, which test a per-context
 // preempt flag raised by the watchdog on slice expiry, by a priority
 // preemption or by a wake. A single lock guards every per-CPU queue and is
@@ -211,8 +211,7 @@ class GuestScheduler {
     int max_blocked_prio = -1;
   };
 
-  // The dispatch thread a thread is pinned to: its guest current_cpu mapped
-  // onto the active host_cpu_count_ dispatch threads.
+  // The dispatch thread a thread is pinned to by its guest current_cpu.
   int CpuOf(XThread* thread) const;
 
   // |yield_to_other| marks the thread as that CPU's yielder as it is linked.
@@ -250,9 +249,6 @@ class GuestScheduler {
   void ReportGlobalLockHazard();
 
   KernelState* kernel_state_;
-
-  // Number of active dispatch threads (guest_scheduler_cpus, 1..kMaxCpus).
-  int host_cpu_count_ = kMaxCpus;
 
   // Preemption timeslice in raw host ticks, calibrated once in EnsureStarted.
   uint64_t quantum_ticks_ = 0;

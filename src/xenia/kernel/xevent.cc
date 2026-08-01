@@ -120,6 +120,12 @@ void XEvent::WaitCallback() {
 void XEvent::CooperativeWaitBegin(XThread* thread) { waiters_.Add(thread); }
 
 void XEvent::CooperativeWaitEnd(XThread* thread) { waiters_.Remove(thread); }
+
+// An auto-reset set with a parked waiter belongs to the front of the queue.
+// NT wakes the first waiter directly, so a later poller must not steal it.
+bool XEvent::CooperativeMayAcquire(XThread* thread) {
+  return manual_reset_ || waiters_.MayAcquire(thread);
+}
 void XEvent::Query(uint32_t* out_type, uint32_t* out_state) {
   auto [type, state] = event_->Query();
 

@@ -53,6 +53,7 @@ class XEvent : public XObject {
 
   void CooperativeWaitBegin(XThread* thread) override;
   void CooperativeWaitEnd(XThread* thread) override;
+  bool CooperativeMayAcquire(XThread* thread) override;
 
  private:
   bool manual_reset_ = false;

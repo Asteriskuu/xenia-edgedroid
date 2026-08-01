@@ -46,9 +46,6 @@ bool SharedMemory::InitializeCommon() {
   memset(system_page_flags_valid_and_gpu_written_, 0,
          8 * num_system_page_flags_entries);
 
-  watch_blind_pages_.assign(num_system_page_flags_, 0);
-  has_watch_blind_pages_ = false;
-
   memory_invalidation_callback_handle_ =
       memory_.RegisterPhysicalMemoryInvalidationCallback(
           MemoryInvalidationCallbackThunk, this);
@@ -112,9 +109,6 @@ void SharedMemory::ShutdownCommon() {
 
   system_page_flags_valid_and_gpu_written_ = nullptr;
   num_system_page_flags_ = 0;
-
-  watch_blind_pages_ = {};
-  has_watch_blind_pages_ = false;
 }
 
 void SharedMemory::InvalidateAllPages() {
@@ -179,17 +173,6 @@ void SharedMemory::SetSystemPageBlocksValidWithGpuDataWritten() {
                     &system_page_flags_valid_and_gpu_written_[entry_offset],
                     64 * sizeof(uint64_t));
       }
-    }
-  }
-
-  // Pages the write watch can't cover never get invalidated by a fault, so
-  // re-invalidate them every frame to force a fresh re-upload. Skip any that
-  // became GPU-written (their GPU copy is authoritative).
-  if (has_watch_blind_pages_) {
-    for (uint32_t i = 0; i < num_system_page_flags_; ++i) {
-      uint64_t blind_cpu =
-          watch_blind_pages_[i] & ~system_page_flags_valid_and_gpu_written_[i];
-      system_page_flags_valid_[i] &= ~blind_cpu;
     }
   }
 }
@@ -358,7 +341,7 @@ void SharedMemory::RangeWrittenByGpu(uint32_t start, uint32_t length,
   // CPU) and watch it so the CPU can reuse it and this will be caught.
   // written_to_buffer also marks it GPU-authoritative, which must not happen
   // when the write went to guest RAM instead - that would keep the buffer's
-  // stale copy across cache clears and skip the watch-blind refresh.
+  // stale copy across cache clears.
   MakeRangeValid(start, length, written_to_buffer);
 }
 
@@ -404,27 +387,12 @@ void SharedMemory::MakeRangeValid(uint32_t start, uint32_t length,
         system_page_flags_valid_and_gpu_written_[i] &= ~valid_bits;
       }
     }
-
-    // Flag CPU pages the access-callback watch can't catch, so the frame-end
-    // clear keeps re-reading them. Simple heuristic: any page not writable
-    // (no-access or read-only) in the physical windows, since the watch can
-    // only arm on a window-writable page.
-    if (!written_by_gpu) {
-      for (uint32_t page = valid_page_first; page <= valid_page_last; ++page) {
-        uint64_t page_bit = uint64_t(1) << (page & 63);
-        uint32_t phys = page << page_size_log2_;
-        if (memory_.GetPhysicalPageWindowAccess(phys) !=
-            xe::memory::PageAccess::kReadWrite) {
-          watch_blind_pages_[page >> 6] |= page_bit;
-          has_watch_blind_pages_ = true;
-        } else {
-          watch_blind_pages_[page >> 6] &= ~page_bit;
-        }
-      }
-    }
   }
 
   if (memory_invalidation_callback_handle_) {
+    // A page that isn't writable here gets no watch. A later guest
+    // protect-to-writable invalidates it unconditionally, so its writes are
+    // still caught.
     memory().EnablePhysicalMemoryAccessCallbacks(
         valid_page_first << page_size_log2_,
         (valid_page_last - valid_page_first + 1) << page_size_log2_, true,
