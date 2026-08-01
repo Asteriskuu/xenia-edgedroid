@@ -200,27 +200,38 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
       uintptr_t thunk_addr = reinterpret_cast<uintptr_t>(thunk);
       uintptr_t code_addr = reinterpret_cast<uintptr_t>(code);
       if (out) {
-        fprintf(out, "=== /proc/self/maps dump at time %ld ===\n", time(nullptr));
+        fprintf(out, "=== /proc/self/maps dump at time %ld ===\n",
+                time(nullptr));
       }
       while (fgets(line, sizeof(line), mapsf)) {
-        if (out) fputs(line, out);
+        if (out) {
+          fputs(line, out);
+        }
         unsigned long long start = 0, end = 0;
         if (sscanf(line, "%llx-%llx", &start, &end) == 2) {
-          if (thunk_addr && thunk_addr >= start && thunk_addr < end) thunk_found = true;
-          if (code_addr && code_addr >= start && code_addr < end) code_found = true;
+          if (thunk_addr && thunk_addr >= start && thunk_addr < end) {
+            thunk_found = true;
+          }
+          if (code_addr && code_addr >= start && code_addr < end) {
+            code_found = true;
+          }
         }
       }
       if (out) {
-        fprintf(out, "thunk=%p mapped=%d code=%p mapped=%d\n",
-                thunk, thunk_found ? 1 : 0, code, code_found ? 1 : 0);
+        fprintf(out, "thunk=%p mapped=%d code=%p mapped=%d\n", thunk,
+                thunk_found ? 1 : 0, code, code_found ? 1 : 0);
         fputc('\n', out);
         fflush(out);
         fsync(fileno(out));
       }
       fclose(mapsf);
-      if (out) fclose(out);
-      ALOGI("A64Function: wrote /proc/self/maps to %s (thunk_mapped=%d code_mapped=%d)",
-            maps_out, thunk_found ? 1 : 0, code_found ? 1 : 0);
+      if (out) {
+        fclose(out);
+      }
+      ALOGI(
+          "A64Function: wrote /proc/self/maps to %s (thunk_mapped=%d "
+          "code_mapped=%d)",
+          maps_out, thunk_found ? 1 : 0, code_found ? 1 : 0);
     } else {
       ALOGE("A64Function: failed to open /proc/self/maps for reading");
       if (out) {
