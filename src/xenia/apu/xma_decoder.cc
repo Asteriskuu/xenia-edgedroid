@@ -202,6 +202,12 @@ void XmaDecoder::WorkerThreadMain() {
     bool did_work = false;
     for (uint32_t n = 0; n < kContextCount; n++) {
       bool worked = contexts_[n]->Work();
+      if (!worked && contexts_[n]->is_enabled() &&
+          !contexts_[n]->is_allocated()) {
+        // Consume a kick on an unallocated context so its kicker is released.
+        contexts_[n]->set_is_enabled(false);
+        worked = true;
+      }
       if (worked) {
         contexts_[n]->SignalWorkDone();
       }
@@ -370,9 +376,14 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     while (value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
+      // The disable may consume a pending kick's enable, release its kicker.
+      const bool consumed_kick = context.is_enabled();
       context.Disable();
       // Ensure the worker isn't mid-processing this context.
       context.Block(false);
+      if (consumed_kick) {
+        context.SignalWorkDone();
+      }
       value &= value - 1;
     }
   } else if (r >= XmaRegister::Context0Clear &&
