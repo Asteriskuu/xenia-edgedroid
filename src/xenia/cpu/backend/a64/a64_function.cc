@@ -155,7 +155,7 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
         int((sp_val & 0xF) == 0));
 
   {
-    char buf[1024];
+    char buf[2048];
     time_t t = time(nullptr);
     struct tm tm;
     localtime_r(&t, &tm);
@@ -173,16 +173,59 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
       }
       n += snprintf(buf + n, sizeof(buf) - n, "\n");
     }
-    const char* paths[] = {"./xenia_a64_dump.txt",
-                           "/data/local/tmp/xenia_a64_dump.txt",
-                           "/sdcard/xenia_a64_dump.txt", nullptr};
-    for (const char** p = paths; *p; ++p) {
-      FILE* f = fopen(*p, "a");
-      if (f) {
-        fwrite(buf, 1, (size_t)std::max(0, n), f);
-        fflush(f);
-        fclose(f);
-        break;
+    const char* dump_path = "/data/local/tmp/xenia_a64_dump.txt";
+    FILE* f = fopen(dump_path, "a");
+    if (f) {
+      fwrite(buf, 1, (size_t)std::max(0, n), f);
+      fflush(f);
+      fsync(fileno(f));
+      fclose(f);
+      ALOGI("A64Function: wrote diagnostic dump to %s", dump_path);
+    } else {
+      ALOGE("A64Function: failed to open %s for write", dump_path);
+    }
+  }
+
+  {
+    const char* maps_out = "/data/local/tmp/xenia_maps.txt";
+    FILE* mapsf = fopen("/proc/self/maps", "r");
+    FILE* out = fopen(maps_out, "a");
+    if (!out) {
+      ALOGE("A64Function: failed to open %s for maps output", maps_out);
+    }
+    if (mapsf) {
+      char line[512];
+      bool thunk_found = false;
+      bool code_found = false;
+      uintptr_t thunk_addr = reinterpret_cast<uintptr_t>(thunk);
+      uintptr_t code_addr = reinterpret_cast<uintptr_t>(code);
+      if (out) {
+        fprintf(out, "=== /proc/self/maps dump at time %ld ===\n", time(nullptr));
+      }
+      while (fgets(line, sizeof(line), mapsf)) {
+        if (out) fputs(line, out);
+        unsigned long long start = 0, end = 0;
+        if (sscanf(line, "%llx-%llx", &start, &end) == 2) {
+          if (thunk_addr && thunk_addr >= start && thunk_addr < end) thunk_found = true;
+          if (code_addr && code_addr >= start && code_addr < end) code_found = true;
+        }
+      }
+      if (out) {
+        fprintf(out, "thunk=%p mapped=%d code=%p mapped=%d\n",
+                thunk, thunk_found ? 1 : 0, code, code_found ? 1 : 0);
+        fputc('\n', out);
+        fflush(out);
+        fsync(fileno(out));
+      }
+      fclose(mapsf);
+      if (out) fclose(out);
+      ALOGI("A64Function: wrote /proc/self/maps to %s (thunk_mapped=%d code_mapped=%d)",
+            maps_out, thunk_found ? 1 : 0, code_found ? 1 : 0);
+    } else {
+      ALOGE("A64Function: failed to open /proc/self/maps for reading");
+      if (out) {
+        fprintf(out, "failed to open /proc/self/maps\n");
+        fclose(out);
       }
     }
   }
