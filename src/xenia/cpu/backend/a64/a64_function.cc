@@ -260,7 +260,18 @@ bool A64Function::CallImpl(ThreadState* thread_state, uint32_t return_address) {
     return false;
   }
 
-  ALOGI("A64Function::CallImpl: jumping to guest code");
+  static constexpr uint32_t kForceReturnAddress = 0x9FFF0000u;
+  if (return_address == 0xBCBCBCBCu || return_address == 0xCDCDCDCDu ||
+      return_address == 0xFFFFFFFFu || return_address == 0u) {
+    ALOGW(
+        "A64Function::CallImpl: sanitizing invalid return_address=0x%08X -> "
+        "0x%08X",
+        return_address, kForceReturnAddress);
+    return_address = kForceReturnAddress;
+  }
+
+  ALOGI("A64Function::CallImpl: jumping to guest code (ret=0x%08X)",
+        return_address);
   thunk(code, thread_state->context(),
         reinterpret_cast<void*>(uintptr_t(return_address)));
   ALOGI("A64Function::CallImpl: guest code returned");
