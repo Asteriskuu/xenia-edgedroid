@@ -107,6 +107,9 @@ class Backend {
                                          bool long_term = false) {
     return 0;
   }
+
+  virtual uint32_t guest_return_trampoline() const { return 0xBCBCBCBCu; }
+
   uint32_t CreateGuestTrampoline(void (*func)(ppc::PPCContext*),
                                  bool long_term = false) {
     return CreateGuestTrampoline(
