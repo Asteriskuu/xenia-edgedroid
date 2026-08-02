@@ -223,7 +223,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
             auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
                 LOGI("[Emulator] Graphics factory invoked: probing Vulkan provider...");
-                auto probe = xe::ui::vulkan::VulkanProvider::Create(false, false);
+                auto probe = xe::ui::vulkan::VulkanProvider::Create(false, true);
                 if (!probe) {
                     LOGE("[ERROR] Vulkan provider probe failed - Vulkan not available on this device");
                     return nullptr;
