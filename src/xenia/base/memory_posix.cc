@@ -13,8 +13,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
-#include <sys/syscall.h>
 #include <linux/memfd.h>
+#include <sys/syscall.h>
 #endif
 #include <algorithm>
 #include <cerrno>
@@ -369,16 +369,19 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
                                           bool commit) {
 #if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
   int fd = -1;
-# if defined(__NR_memfd_create)
-  fd = syscall(__NR_memfd_create, path.filename().string().c_str(), MFD_CLOEXEC);
-# else
+#if defined(__NR_memfd_create)
+  fd =
+      syscall(__NR_memfd_create, path.filename().string().c_str(), MFD_CLOEXEC);
+#else
   fd = memfd_create(path.filename().string().c_str(), MFD_CLOEXEC);
-# endif
+#endif
   if (fd < 0) {
-    XELOGW("memfd_create failed (%s), falling back to shm_open", strerror(errno));
+    XELOGW("memfd_create failed (%s), falling back to shm_open",
+           strerror(errno));
   } else {
     if (ftruncate(fd, (off_t)length) != 0) {
-      XELOGE("CreateFileMappingHandle: ftruncate(memfd) failed: %s", strerror(errno));
+      XELOGE("CreateFileMappingHandle: ftruncate(memfd) failed: %s",
+             strerror(errno));
       close(fd);
       return kFileMappingHandleInvalid;
     }
