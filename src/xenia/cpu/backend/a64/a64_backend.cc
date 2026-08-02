@@ -520,6 +520,12 @@ extern "C" uint64_t TryAcquireReservationHelper(void* raw_context,
   return 1;
 }
 
+static void GuestReturnHandler(ppc::PPCContext* ctx, void* u1, void* u2) {
+  (void)ctx;
+  (void)u1;
+  (void)u2;
+}
+
 template <typename T>
 T ReservedLoadImpl(ppc::PPCContext* context, uint32_t address) {
   T* host_address = context->TranslateVirtual<T*>(address);
@@ -819,14 +825,8 @@ bool A64Backend::Initialize(Processor* processor) {
         thunk_emitter.EmitGuestAndHostSynchronizeStackHelper();
   }
 
-  auto guest_return_handler = [](ppc::PPCContext* ctx, void* u1, void* u2) {
-    (void)ctx;
-    (void)u1;
-    (void)u2;
-  };
-  guest_return_trampoline_ = CreateGuestTrampoline(
-      reinterpret_cast<GuestTrampolineProc>(guest_return_handler), nullptr,
-      nullptr, true);
+  guest_return_trampoline_ =
+      CreateGuestTrampoline(GuestReturnHandler, nullptr, nullptr, true);
 
   // Wire up reservation helpers used by RESERVED_LOAD/STORE codegen.
   try_acquire_reservation_helper_ =
