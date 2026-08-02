@@ -12,6 +12,10 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
+#include <sys/syscall.h>
+#include <linux/memfd.h>
+#endif
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
@@ -363,6 +367,25 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
                                           size_t length, PageAccess access,
                                           bool commit) {
+#if XE_PLATFORM_LINUX || XE_PLATFORM_ANDROID
+  int fd = -1;
+# if defined(__NR_memfd_create)
+  fd = syscall(__NR_memfd_create, path.filename().string().c_str(), MFD_CLOEXEC);
+# else
+  fd = memfd_create(path.filename().string().c_str(), MFD_CLOEXEC);
+# endif
+  if (fd < 0) {
+    XELOGW("memfd_create failed (%s), falling back to shm_open", strerror(errno));
+  } else {
+    if (ftruncate(fd, (off_t)length) != 0) {
+      XELOGE("CreateFileMappingHandle: ftruncate(memfd) failed: %s", strerror(errno));
+      close(fd);
+      return kFileMappingHandleInvalid;
+    }
+    return fd;
+  }
+#endif
+
 #if XE_PLATFORM_ANDROID
   // TODO(Triang3l): Check if memfd can be used instead on API 30+.
   if (android_ASharedMemory_create_) {
@@ -532,6 +555,15 @@ void* MapFileView(FileMappingHandle handle, void* base_address, size_t length,
   if (base_address != nullptr && result != base_address) {
     munmap(result, length);
     return nullptr;
+  }
+
+  if (prot & PROT_EXEC) {
+#if XE_PLATFORM_ANDROID
+    if (mprotect(result, length, prot) != 0) {
+      XELOGW("MapFileView: mprotect(PROT_EXEC) failed err=%d (%s)", errno,
+             strerror(errno));
+    }
+#endif
   }
 
   std::lock_guard guard(g_mapped_file_ranges_mutex);
