@@ -29,7 +29,6 @@
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_render_target_cache.h"
-#include "xenia/gpu/d3d12/spirv_to_dxil_compiler.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/pipeline_util.h"
@@ -37,6 +36,7 @@
 #include "xenia/gpu/spirv_builtin_geometry_shader.h"
 #include "xenia/gpu/spirv_shader.h"
 #include "xenia/gpu/spirv_shader_translator.h"
+#include "xenia/gpu/spirv_to_dxil_compiler.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
 

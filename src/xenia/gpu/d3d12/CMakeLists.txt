@@ -8,10 +8,8 @@ target_link_libraries(xenia-gpu-d3d12 PUBLIC
 xe_target_defaults(xenia-gpu-d3d12)
 
 # Guest shaders are sourced exclusively from Mesa spirv_to_dxil (SPIR-V emitted
-# by SpirvShaderTranslator); there is no HLSL guest shader path. spirv_to_dxil
-# is built and linked unconditionally (the D3D12 backend is Windows-only, the
-# only place the Mesa tree is built - see third_party/CMakeLists.txt).
-target_link_libraries(xenia-gpu-d3d12 PUBLIC spirv_to_dxil)
+# by SpirvShaderTranslator); there is no HLSL guest shader path. The wrapper and
+# the spirv_to_dxil link come from xenia-gpu, which shares them with Metal.
 # spirv_shader_translator.h pulls in glslang's SpvBuilder, like the Vulkan and
 # Metal backends, so it needs glslang's include root and symbols.
 target_include_directories(xenia-gpu-d3d12 PRIVATE

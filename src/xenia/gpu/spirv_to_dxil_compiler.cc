@@ -7,91 +7,43 @@
  ******************************************************************************
  */
 
-#include "xenia/gpu/d3d12/spirv_to_dxil_compiler.h"
+#include "xenia/gpu/spirv_to_dxil_compiler.h"
 
+#include "xenia/base/platform.h"
+
+// Mesa is only built where a backend consumes DXIL: D3D12 on Windows, and the
+// Metal Shader Converter path on macOS (see third_party/CMakeLists.txt).
+#if XE_PLATFORM_WIN32 || XE_PLATFORM_MAC
+
+#include <cstring>
+#include <string>
+
+#include "third_party/dxbc/DXBCChecksum.h"
+#include "xenia/base/logging.h"
+
+#if XE_PLATFORM_WIN32
+// Windows, wrl/client.h and the DXC validator interfaces (IDxcValidator,
+// IDxcVersionInfo) used to sign the converted DXIL.
+#include "xenia/base/platform_win.h"
+
+#include <wrl/client.h>
 #include <algorithm>
 #include <filesystem>
 #include <mutex>
-#include <string>
 
+#include "third_party/DirectXShaderCompiler/include/dxc/dxcapi.h"
 #include "xenia/base/filesystem.h"
-#include "xenia/base/logging.h"
-// Windows, wrl/client.h and the DXC validator interfaces (IDxcValidator,
-// IDxcVersionInfo) used to sign the converted DXIL.
-#include "xenia/ui/d3d12/d3d12_api.h"
+#endif
 
 // Mesa C ABI. The header carries its own extern "C" guards.
 #include "spirv_to_dxil.h"
 
 namespace xe {
 namespace gpu {
-namespace d3d12 {
 
 namespace {
-// The SPIR-V to DXIL conversion itself is thread safe: Mesa's glsl_type cache
-// (its only shared global) locks internally, so conversions run in parallel
-// across the main thread and the pipeline creation threads. Only the DXIL.dll
-// validator is a shared, non-thread-safe instance, so its creation and the
-// signing pass are serialized by this mutex.
-std::mutex dxil_validator_mutex;
-
-// DXC validator from DXIL.dll, created lazily and reused. Never destroyed: it
-// keeps DXIL.dll loaded for the process lifetime. Guarded by
-// dxil_validator_mutex. validator_version is what DXIL.dll stamps. It is passed
-// to spirv_to_dxil so the container header matches the signer.
-IDxcValidator* dxil_validator_singleton = nullptr;
-dxil_validator_version validator_version_value = NO_DXIL_VALIDATION;
-
-// Minimal IDxcBlob over a caller-owned buffer so the validator can sign in
-// place without copying. Not reference counted: it lives on the stack for the
-// Validate call, which does not retain it.
-class InPlaceBlob : public IDxcBlob {
- public:
-  InPlaceBlob(void* data, size_t size) : data_(data), size_(size) {}
-  LPVOID STDMETHODCALLTYPE GetBufferPointer() override { return data_; }
-  SIZE_T STDMETHODCALLTYPE GetBufferSize() override { return size_; }
-  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override {
-    return E_NOINTERFACE;
-  }
-  ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
-  ULONG STDMETHODCALLTYPE Release() override { return 0; }
-
- private:
-  void* data_;
-  size_t size_;
-};
-
 void SpirvToDxilLog(void* priv, const char* message) {
   XELOGE("spirv_to_dxil: {}", message);
-}
-
-// Signs a DXIL container in place. spirv_to_dxil emits UNSIGNED DXIL (it only
-// records the validator version in the header). D3D12 rejects unsigned DXIL
-// with E_INVALIDARG, so the DXIL.dll validator must rewrite the container hash,
-// the same way DXC signs its own output. dxil_validator_mutex must be held and
-// the validator must exist.
-bool SignDxilLocked(std::vector<uint8_t>& dxil, const char* stage) {
-  InPlaceBlob blob(dxil.data(), dxil.size());
-  Microsoft::WRL::ComPtr<IDxcOperationResult> result;
-  HRESULT hr = dxil_validator_singleton->Validate(
-      &blob, DxcValidatorFlags_InPlaceEdit, &result);
-  if (SUCCEEDED(hr) && result) {
-    result->GetStatus(&hr);
-  }
-  if (FAILED(hr)) {
-    std::string message;
-    Microsoft::WRL::ComPtr<IDxcBlobEncoding> error_blob;
-    if (result && SUCCEEDED(result->GetErrorBuffer(&error_blob)) &&
-        error_blob && error_blob->GetBufferSize()) {
-      message.assign(
-          reinterpret_cast<const char*>(error_blob->GetBufferPointer()),
-          error_blob->GetBufferSize());
-    }
-    XELOGE("spirv_to_dxil: DXIL validation/signing failed for {} shader: {}",
-           stage, message.empty() ? "(no message)" : message.c_str());
-    return false;
-  }
-  return true;
 }
 
 dxil_spirv_shader_stage ToDxilStage(SpirvToDxilCompiler::Stage stage_in,
@@ -150,6 +102,41 @@ dxil_spirv_runtime_conf MakeRuntimeConf(bool lower_to_bindless,
   conf.input_clip_size = input_clip_size;
   return conf;
 }
+
+#if XE_PLATFORM_WIN32
+
+// The SPIR-V to DXIL conversion itself is thread safe: Mesa's glsl_type cache
+// (its only shared global) locks internally, so conversions run in parallel
+// across the main thread and the pipeline creation threads. Only the DXIL.dll
+// validator is a shared, non-thread-safe instance, so its creation and the
+// signing pass are serialized by this mutex.
+std::mutex dxil_validator_mutex;
+
+// DXC validator from DXIL.dll, created lazily and reused. Never destroyed: it
+// keeps DXIL.dll loaded for the process lifetime. Guarded by
+// dxil_validator_mutex. validator_version is what DXIL.dll stamps. It is passed
+// to spirv_to_dxil so the container header matches the signer.
+IDxcValidator* dxil_validator_singleton = nullptr;
+dxil_validator_version validator_version_value = NO_DXIL_VALIDATION;
+
+// Minimal IDxcBlob over a caller-owned buffer so the validator can sign in
+// place without copying. Not reference counted: it lives on the stack for the
+// Validate call, which does not retain it.
+class InPlaceBlob : public IDxcBlob {
+ public:
+  InPlaceBlob(void* data, size_t size) : data_(data), size_(size) {}
+  LPVOID STDMETHODCALLTYPE GetBufferPointer() override { return data_; }
+  SIZE_T STDMETHODCALLTYPE GetBufferSize() override { return size_; }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override {
+    return E_NOINTERFACE;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+  ULONG STDMETHODCALLTYPE Release() override { return 0; }
+
+ private:
+  void* data_;
+  size_t size_;
+};
 
 // Returns DXIL.dll's DxcCreateInstance, or null. The provider preloads DXIL.dll
 // by full path during setup, so the plain-name load here resolves to that
@@ -226,6 +213,66 @@ bool AcquireValidatorVersion(enum dxil_validator_version* out_version) {
   *out_version = validator_version_value;
   return true;
 }
+
+// Signs a DXIL container in place. spirv_to_dxil emits UNSIGNED DXIL (it only
+// records the validator version in the header). D3D12 rejects unsigned DXIL
+// with E_INVALIDARG, so the DXIL.dll validator must rewrite the container hash,
+// the same way DXC signs its own output.
+bool SignDxil(std::vector<uint8_t>& dxil, const char* stage) {
+  // The shared validator is not thread safe.
+  std::lock_guard<std::mutex> lock(dxil_validator_mutex);
+  InPlaceBlob blob(dxil.data(), dxil.size());
+  Microsoft::WRL::ComPtr<IDxcOperationResult> result;
+  HRESULT hr = dxil_validator_singleton->Validate(
+      &blob, DxcValidatorFlags_InPlaceEdit, &result);
+  if (SUCCEEDED(hr) && result) {
+    result->GetStatus(&hr);
+  }
+  if (FAILED(hr)) {
+    std::string message;
+    Microsoft::WRL::ComPtr<IDxcBlobEncoding> error_blob;
+    if (result && SUCCEEDED(result->GetErrorBuffer(&error_blob)) &&
+        error_blob && error_blob->GetBufferSize()) {
+      message.assign(
+          reinterpret_cast<const char*>(error_blob->GetBufferPointer()),
+          error_blob->GetBufferSize());
+    }
+    XELOGE("spirv_to_dxil: DXIL validation/signing failed for {} shader: {}",
+           stage, message.empty() ? "(no message)" : message.c_str());
+    return false;
+  }
+  return true;
+}
+
+#else
+
+// Offset of the 16-byte container digest, right after the DXBC magic.
+constexpr size_t kDxilContainerHashOffset = 4;
+
+// DXIL.dll is Windows only, so there is no validator to stamp a version from.
+// Mesa falls back to the newest version it can emit.
+bool AcquireValidatorVersion(enum dxil_validator_version* out_version) {
+  *out_version = NO_DXIL_VALIDATION;
+  return true;
+}
+
+// Stamps the container digest that spirv_to_dxil leaves zeroed. This is the
+// same MD5 variant over everything past the digest that DXC's validator writes
+// as its retail hash, and that Xenia's DXBC translator already uses for its own
+// containers.
+bool SignDxil(std::vector<uint8_t>& dxil, const char* stage) {
+  if (dxil.size() <= kDxilContainerHashOffset + sizeof(uint32_t) * 4) {
+    XELOGE("spirv_to_dxil: {} shader container is too small to sign", stage);
+    return false;
+  }
+  unsigned int hash[4];
+  CalculateDXBCChecksum(dxil.data(), static_cast<unsigned int>(dxil.size()),
+                        hash);
+  std::memcpy(dxil.data() + kDxilContainerHashOffset, hash, sizeof(hash));
+  return true;
+}
+
+#endif  // XE_PLATFORM_WIN32
 }  // namespace
 
 uint64_t SpirvToDxilCompiler::version() { return spirv_to_dxil_get_version(); }
@@ -251,8 +298,6 @@ std::vector<uint8_t> SpirvToDxilCompiler::Translate(const uint32_t* spirv_words,
     return {};
   }
 
-  // Conversion runs without the lock - it is thread safe and the expensive
-  // step.
   dxil_spirv_object object = {};
   if (!spirv_to_dxil(spirv_words, spirv_word_count, nullptr, 0, stage, "main",
                      validator_version, &debug_options, &conf, &logger,
@@ -265,9 +310,7 @@ std::vector<uint8_t> SpirvToDxilCompiler::Translate(const uint32_t* spirv_words,
   std::vector<uint8_t> dxil(bytes, bytes + object.binary.size);
   spirv_to_dxil_free(&object);
 
-  // Signing uses the shared validator, which is not thread safe.
-  std::lock_guard<std::mutex> lock(dxil_validator_mutex);
-  if (!SignDxilLocked(dxil, stage_name)) {
+  if (!SignDxil(dxil, stage_name)) {
     return {};
   }
   return dxil;
@@ -302,7 +345,6 @@ std::vector<std::vector<uint8_t>> SpirvToDxilCompiler::TranslateLinked(
     return {};
   }
 
-  // Conversion (all stages, linked) runs without the lock.
   std::vector<dxil_spirv_object> objects(stages.size());
   if (!spirv_to_dxil_link(link_stages.data(), link_stages.size(),
                           validator_version, &debug_options, &conf, &logger,
@@ -312,8 +354,7 @@ std::vector<std::vector<uint8_t>> SpirvToDxilCompiler::TranslateLinked(
     return {};
   }
 
-  // Copy out and free every Mesa object first, then sign under the lock (the
-  // shared validator is not thread safe).
+  // Copy out and free every Mesa object before signing.
   std::vector<std::vector<uint8_t>> result(stages.size());
   for (size_t i = 0; i < stages.size(); ++i) {
     const uint8_t* bytes =
@@ -321,15 +362,15 @@ std::vector<std::vector<uint8_t>> SpirvToDxilCompiler::TranslateLinked(
     result[i].assign(bytes, bytes + objects[i].binary.size);
     spirv_to_dxil_free(&objects[i]);
   }
-  std::lock_guard<std::mutex> lock(dxil_validator_mutex);
   for (size_t i = 0; i < stages.size(); ++i) {
-    if (!SignDxilLocked(result[i], stage_names[i])) {
+    if (!SignDxil(result[i], stage_names[i])) {
       return {};
     }
   }
   return result;
 }
 
-}  // namespace d3d12
 }  // namespace gpu
 }  // namespace xe
+
+#endif  // XE_PLATFORM_WIN32 || XE_PLATFORM_MAC

@@ -6,6 +6,12 @@ target_include_directories(xenia-gpu PRIVATE
 )
 target_link_libraries(xenia-gpu PUBLIC dxbc fmt snappy xxhash xenia-base xenia-ui)
 target_link_libraries(xenia-gpu PRIVATE glslang-spirv)
+# spirv_to_dxil_compiler.cc wraps Mesa for the backends that take the guest
+# SPIR-V to DXIL: D3D12 on Windows, and Metal (by way of the Metal Shader
+# Converter) on macOS. Mesa is built on those two platforms only.
+if(WIN32 OR APPLE)
+  target_link_libraries(xenia-gpu PUBLIC spirv_to_dxil)
+endif()
 xe_target_defaults(xenia-gpu)
 
 if(XENIA_BUILD_MISC)
