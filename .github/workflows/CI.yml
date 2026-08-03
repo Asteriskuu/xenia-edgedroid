@@ -117,8 +117,11 @@ jobs:
           fi
 
           # lipo invalidates the linker-applied ad-hoc signature; arm64 will
-          # refuse to launch unsigned, so re-sign ad-hoc.
-          codesign --force --sign - "$arm64_bundle"
+          # refuse to launch unsigned, so re-sign ad-hoc. Re-signing replaces
+          # entitlements rather than preserving them, so pass them again or the
+          # universal build ships without the JIT ones the per-arch builds got.
+          codesign --force --sign - \
+            --entitlements xenia.entitlements "$arm64_bundle"
 
           mkdir -p dmg_contents
           cp -R "$arm64_bundle" dmg_contents/
