@@ -1291,17 +1291,16 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Android")
         $<$<CONFIG:Release>:wxDEBUG_LEVEL=0>)
 endif()
 
-# spirv_to_dxil (Mesa, NIR based SPIR-V to DXIL) is the sole D3D12 guest shader
+# spirv_to_dxil (Mesa, NIR based SPIR-V to DXIL) is the D3D12 guest shader
 # backend. Mesa is meson only, so it is built out of tree by meson and linked
-# statically into the exe (no runtime DLL, matching the rest of xenia).
-# libspirv_to_dxil.a does not bundle its deps, so we link the whole archive set
-# (nir, vtn, compiler, dxil_compiler, util, blake3, zlib). Built once as release
-# to match xenia's /MD CRT in every config. Only the D3D12 backend (Windows)
-# consumes it, so the build is gated on WIN32.
+# statically (no runtime DLL, matching the rest of xenia). libspirv_to_dxil.a
+# does not bundle its deps, so we link the whole archive set (nir, vtn,
+# compiler, dxil_compiler, util, blake3, and on Windows the bundled zlib wrap).
 #
-# The meson setup must run in an MSVC environment so meson detects cl. Verify the
-# archive paths below against the real build output if Mesa is restructured.
-if(WIN32)
+# Built on WIN32 and APPLE. The Windows build runs release with /MD to match
+# xenia's CRT under an MSVC environment so meson detects cl. Verify the archive
+# paths below against the real build output if Mesa is restructured.
+if(WIN32 OR APPLE)
   # Mesa source tree built for spirv_to_dxil. Defaults to the third_party/mesa
   # submodule (our fork with the barycentric, linking, keep_io_vars and FSI->ROV
   # changes). Repoint this cache variable to build a different Mesa checkout.
@@ -1312,8 +1311,8 @@ if(WIN32)
   set(_xe_mesa_dir "${XENIA_MESA_SOURCE_DIR}")
   if(NOT EXISTS "${_xe_mesa_dir}/meson.build")
     message(FATAL_ERROR
-      "The D3D12 backend requires a Mesa tree at ${_xe_mesa_dir} for "
-      "spirv_to_dxil. Run: git submodule update --init third_party/mesa "
+      "spirv_to_dxil requires a Mesa tree at ${_xe_mesa_dir}. Run: "
+      "git submodule update --init third_party/mesa "
       "(or set XENIA_MESA_SOURCE_DIR to your Mesa checkout).")
   endif()
   find_program(XE_MESON_EXECUTABLE meson)
@@ -1335,8 +1334,12 @@ if(WIN32)
     "${_xe_s2d_build}/src/util/libmesa_util.a"
     "${_xe_s2d_build}/src/util/libmesa_util_simd.a"
     "${_xe_s2d_build}/src/c11/impl/libmesa_util_c11.a"
-    "${_xe_s2d_build}/src/util/blake3/libblake3.a"
-    "${_xe_s2d_build}/subprojects/zlib-1.3.1/libz.a")
+    "${_xe_s2d_build}/src/util/blake3/libblake3.a")
+  # Windows has no system zlib, so meson builds the bundled wrap subproject.
+  # macOS finds the system zlib, so that archive is never emitted there.
+  if(WIN32)
+    list(APPEND _xe_s2d_deps "${_xe_s2d_build}/subprojects/zlib-1.3.1/libz.a")
+  endif()
 
   # We only static-link the archives above; spirv_to_dxil is a both_libraries()
   # target, so a full "meson compile" also links spirv_to_dxil.dll and builds
@@ -1350,13 +1353,41 @@ if(WIN32)
     list(APPEND _xe_s2d_ninja_targets "${_xe_ar_rel}")
   endforeach()
 
-  # Cross-building for ARM64 from an x64 host: meson defaults to a native
-  # build, compiles its sanity check with the cross cl and cannot run it. A
-  # cross file makes it link-only and skip run-time probes.
-  set(_xe_s2d_cross_args "")
-  if(XE_TARGET_AARCH64 AND NOT CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
-    set(_xe_s2d_cross_file "${CMAKE_BINARY_DIR}/third_party/mesa-cross-arm64.txt")
-    file(WRITE "${_xe_s2d_cross_file}"
+  # Meson takes [host_machine] from the build machine, so an off-arch target
+  # needs a cross file - which also drops its run-the-sanity-binary probe.
+  set(_xe_s2d_host_aarch64 FALSE)
+  if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64|arm64")
+    set(_xe_s2d_host_aarch64 TRUE)
+  endif()
+  set(_xe_s2d_cross FALSE)
+  if((XE_TARGET_AARCH64 AND NOT _xe_s2d_host_aarch64) OR
+     (_xe_s2d_host_aarch64 AND NOT XE_TARGET_AARCH64))
+    set(_xe_s2d_cross TRUE)
+  endif()
+  if(XE_TARGET_AARCH64)
+    set(_xe_s2d_cpu "aarch64")
+  else()
+    set(_xe_s2d_cpu "x86_64")
+  endif()
+
+  # Common meson feature toggles. MSVC also needs the CRT selector and a warning
+  # override; clang (macOS) rejects the MSVC /wd flag, so those are MSVC only.
+  set(_xe_s2d_meson_args
+    --default-library=static --buildtype=release
+    -Dspirv-to-dxil=true
+    -Dgallium-drivers= -Dvulkan-drivers= -Dplatforms=
+    -Dglx=disabled -Degl=disabled -Dgbm=disabled
+    -Dopengl=false -Dgles1=disabled -Dgles2=disabled
+    -Dllvm=disabled -Dvideo-codecs=)
+  if(MSVC)
+    # /MD matches xenia's CRT; /wd4189 overrides mesa's /we4189: Release strips
+    # asserts, leaving assert-only locals that would trip the promoted warning.
+    list(APPEND _xe_s2d_meson_args
+      -Db_vscrt=md -Dc_args=/wd4189 -Dcpp_args=/wd4189)
+    if(_xe_s2d_cross)
+      set(_xe_s2d_cross_file
+        "${CMAKE_CURRENT_BINARY_DIR}/mesa-windows-cross-${_xe_s2d_cpu}.ini")
+      file(WRITE "${_xe_s2d_cross_file}"
 "[binaries]
 c = 'cl'
 cpp = 'cl'
@@ -1364,30 +1395,71 @@ ar = 'lib'
 
 [host_machine]
 system = 'windows'
-cpu_family = 'aarch64'
-cpu = 'aarch64'
+cpu_family = '${_xe_s2d_cpu}'
+cpu = '${_xe_s2d_cpu}'
 endian = 'little'
 ")
-    set(_xe_s2d_cross_args --cross-file "${_xe_s2d_cross_file}")
+      list(APPEND _xe_s2d_meson_args --cross-file "${_xe_s2d_cross_file}")
+    endif()
+  endif()
+  if(APPLE)
+    # Extend the Apple ar/ranlib "has no symbols" quieting we apply to CMake
+    # targets (root CMakeLists.txt) to meson's mesa build. Several util/nir
+    # sources compile to empty objects on macOS (futex is Linux-only,
+    # strndup/u_string/u_atomic/bitscan are libc or inline, nir_validate is
+    # NDEBUG-gated). Meson's rule is `ar csr ... && ranlib -c ...` and both
+    # steps warn. Meson hardcodes the `csr` args, so route ar through a wrapper
+    # that creates with `Scr` (capital S skips the symtab, keeping ar quiet) and
+    # override ranlib with -no_warning_for_no_symbols (it writes the symtab) via
+    # a native file - the same recipe as CMAKE_*_ARCHIVE_CREATE/FINISH. Written
+    # outside _xe_s2d_build, which configure wipes.
+    set(_xe_s2d_ar "${CMAKE_CURRENT_BINARY_DIR}/mesa-macos-ar.sh")
+    file(WRITE "${_xe_s2d_ar}" [=[#!/bin/sh
+# Create static archives with 'Scr' (capital S skips the symbol table, so Apple
+# ar stays quiet on zero-symbol objects); the ranlib step writes it afterward.
+# Pass meson's `ar --version` linker probe straight through for detection.
+case "$1" in
+  c*) shift; exec /usr/bin/ar Scr "$@" ;;
+  *) exec /usr/bin/ar "$@" ;;
+esac
+]=])
+    file(CHMOD "${_xe_s2d_ar}"
+      PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ WORLD_READ)
+    set(_xe_s2d_ar_ini
+      "ar = '${_xe_s2d_ar}'\nranlib = ['/usr/bin/ranlib', '-no_warning_for_no_symbols']\n")
+    set(_xe_s2d_native "${CMAKE_CURRENT_BINARY_DIR}/mesa-macos-native.ini")
+    file(WRITE "${_xe_s2d_native}" "[binaries]\n${_xe_s2d_ar_ini}")
+    list(APPEND _xe_s2d_meson_args --native-file "${_xe_s2d_native}")
+
+    if(_xe_s2d_cross)
+      # meson spells it aarch64, clang -arch spells it arm64.
+      string(REPLACE "aarch64" "arm64" _xe_s2d_clang_arch "${_xe_s2d_cpu}")
+      set(_xe_s2d_cross_file
+        "${CMAKE_CURRENT_BINARY_DIR}/mesa-macos-cross-${_xe_s2d_cpu}.ini")
+      file(WRITE "${_xe_s2d_cross_file}"
+"[binaries]
+c = ['${CMAKE_C_COMPILER}', '-arch', '${_xe_s2d_clang_arch}']
+cpp = ['${CMAKE_CXX_COMPILER}', '-arch', '${_xe_s2d_clang_arch}']
+objc = ['${CMAKE_C_COMPILER}', '-arch', '${_xe_s2d_clang_arch}']
+${_xe_s2d_ar_ini}
+[host_machine]
+system = 'darwin'
+cpu_family = '${_xe_s2d_cpu}'
+cpu = '${_xe_s2d_cpu}'
+endian = 'little'
+")
+      list(APPEND _xe_s2d_meson_args --cross-file "${_xe_s2d_cross_file}")
+    endif()
   endif()
 
   include(ExternalProject)
   # Wipe then setup keeps the configure step idempotent across reconfigures.
-  # /wd4189 overrides mesa's /we4189: Release strips asserts, leaving assert-only
-  # locals that would otherwise trip the promoted warning as an error.
   ExternalProject_Add(mesa_spirv_to_dxil
     SOURCE_DIR "${_xe_mesa_dir}"
     CONFIGURE_COMMAND
       "${CMAKE_COMMAND}" -E rm -rf "${_xe_s2d_build}"
       COMMAND "${XE_MESON_EXECUTABLE}" setup "${_xe_s2d_build}" "${_xe_mesa_dir}"
-        ${_xe_s2d_cross_args}
-        --default-library=static --buildtype=release -Db_vscrt=md
-        -Dc_args=/wd4189 -Dcpp_args=/wd4189
-        -Dspirv-to-dxil=true
-        -Dgallium-drivers= -Dvulkan-drivers= -Dplatforms=
-        -Dglx=disabled -Degl=disabled -Dgbm=disabled
-        -Dopengl=false -Dgles1=disabled -Dgles2=disabled
-        -Dllvm=disabled -Dvideo-codecs=
+        ${_xe_s2d_meson_args}
     BUILD_COMMAND "${XE_NINJA_EXECUTABLE}" -C "${_xe_s2d_build}"
       ${_xe_s2d_ninja_targets}
     INSTALL_COMMAND ""
@@ -1399,13 +1471,17 @@ endian = 'little'
 
   add_library(spirv_to_dxil STATIC IMPORTED GLOBAL)
   add_dependencies(spirv_to_dxil mesa_spirv_to_dxil)
-  # Built release once. synchronization/version are the only non-default system
-  # libs Mesa needs.
+  # synchronization/version are the only non-default system libs Mesa needs, and
+  # only on Windows (mesa's meson resolves both to nothing off Windows).
+  set(_xe_s2d_link ${_xe_s2d_deps})
+  if(WIN32)
+    list(APPEND _xe_s2d_link synchronization version)
+  endif()
   set_target_properties(spirv_to_dxil PROPERTIES
     IMPORTED_LOCATION "${_xe_s2d_main}"
     INTERFACE_INCLUDE_DIRECTORIES
       "${_xe_mesa_dir}/src/microsoft/spirv_to_dxil;${_xe_mesa_dir}/src/microsoft/compiler"
-    INTERFACE_LINK_LIBRARIES "${_xe_s2d_deps};synchronization;version")
+    INTERFACE_LINK_LIBRARIES "${_xe_s2d_link}")
   # Multi-Config evaluates every config, so point each at the same archive.
   foreach(_xe_cfg IN LISTS CMAKE_CONFIGURATION_TYPES)
     string(TOUPPER "${_xe_cfg}" _xe_cfg_u)
