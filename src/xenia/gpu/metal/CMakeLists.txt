@@ -1,6 +1,11 @@
 add_library(xenia-gpu-metal STATIC
+  dxil_shader.cc
+  dxil_shader.h
+  ir_runtime_impl.cc
   metal_command_processor.cc
   metal_command_processor.h
+  metal_dxil_binder.cc
+  metal_dxil_binder.h
   metal_graphics_system.cc
   metal_graphics_system.h
   metal_heap_pool.cc
@@ -11,6 +16,8 @@ add_library(xenia-gpu-metal STATIC
   metal_render_target_cache.h
   metal_shader_cache.cc
   metal_shader_cache.h
+  metal_shader_converter.cc
+  metal_shader_converter.h
   metal_shared_memory.cc
   metal_shared_memory.h
   metal_texture_cache.cc
@@ -28,6 +35,7 @@ target_link_libraries(xenia-gpu-metal PUBLIC
   xenia-gpu
   xenia-ui-metal
   spirv-cross
+  xenia-third-party-metal-shader-converter
   "-framework Foundation"
   "-framework Metal"
   "-framework MetalKit"

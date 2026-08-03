@@ -29,8 +29,11 @@
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/metal/dxil_shader.h"
+#include "xenia/gpu/metal/metal_dxil_binder.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
+#include "xenia/gpu/metal/metal_shader_converter.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/metal/msl_bindings.h"
@@ -96,6 +99,13 @@ class MetalCommandProcessor : public CommandProcessor {
                                 MTL::ResourceUsage usage);
   void EnsureCommandBufferAutoreleasePool();
   void DrainCommandBufferAutoreleasePool();
+  // Sub-allocates from a command-buffer scoped pool, recycled once the GPU is
+  // done with it.
+  bool AcquireSpirvArgumentBufferSlice(uint32_t bytes, uint32_t alignment,
+                                       MTL::Buffer** buffer_out,
+                                       NS::UInteger* offset_out);
+  MTL::Buffer* null_buffer() const { return null_buffer_; }
+  MTL::SamplerState* null_sampler() const { return null_sampler_; }
 
   // Get current render pass descriptor (for render target binding)
   MTL::RenderPassDescriptor* GetCurrentRenderPassDescriptor();
@@ -143,6 +153,13 @@ class MetalCommandProcessor : public CommandProcessor {
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
       bool primitive_polygonal, bool is_rasterization_done, bool memexport_used,
       uint32_t normalized_color_mask, const RegisterFile& regs);
+  // SPIR-V -> DXIL -> AIR draw path. Resources go through the Metal Shader
+  // Converter argument buffer MetalDxilBinder builds instead of Metal slots.
+  bool IssueDrawDxil(
+      Shader* vertex_shader, Shader* pixel_shader,
+      const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+      bool primitive_polygonal, bool memexport_used,
+      uint32_t normalized_color_mask, const RegisterFile& regs);
   bool IssueCopy() override;
   void WriteRegister(uint32_t index, uint32_t value) override;
 
@@ -169,9 +186,6 @@ class MetalCommandProcessor : public CommandProcessor {
   bool EnsureSpirvUniformBuffer();
   bool EnsureSpirvUniformBufferCapacity();
   void ScheduleSpirvUniformBufferRelease(MTL::CommandBuffer* command_buffer);
-  bool AcquireSpirvArgumentBufferSlice(uint32_t bytes, uint32_t alignment,
-                                       MTL::Buffer** buffer_out,
-                                       NS::UInteger* offset_out);
   void ScheduleSpirvArgumentBufferRelease(MTL::CommandBuffer* command_buffer);
 
   // Fixed-function depth/stencil state (mirrors Vulkan/D3D12 dynamic state).
@@ -179,11 +193,52 @@ class MetalCommandProcessor : public CommandProcessor {
                               reg::RB_DEPTHCONTROL normalized_depth_control);
   void ApplyRasterizerState(bool primitive_polygonal);
 
-  // Constants shared between MSC and SPIRV-Cross paths.
+  // Draw setup shared by both guest shader paths.
+
+  // Makes the vertex fetch and memexport ranges the draw touches resident in
+  // shared memory.
+  bool RequestDrawSharedMemoryRanges(const Shader& vertex_shader,
+                                     const RegisterFile& regs);
+  void ComputeDrawViewportInfo(const RegisterFile& regs,
+                               const Shader* pixel_shader,
+                               reg::RB_DEPTHCONTROL normalized_depth_control,
+                               draw_util::ViewportInfo& viewport_info_out);
+  void ApplyViewportAndScissor(const RegisterFile& regs,
+                               const draw_util::ViewportInfo& viewport_info);
+  // Splits the command buffer when the draw samples memory a pending resolve
+  // wrote, then requests the textures the draw uses. Returns false when the
+  // draw has to be skipped.
+  bool PrepareDrawTextures(uint32_t used_texture_mask,
+                           const RegisterFile& regs);
+  // Refreshes the packed float / bool-loop / fetch constant blobs from the
+  // guest registers, skipping any whose registers and used-constant layout are
+  // unchanged.
+  void UpdateGuestConstantCaches(const Shader* vertex_shader,
+                                 const Shader* pixel_shader,
+                                 const RegisterFile& regs);
+  // What to feed the draw call: the host primitive type, and either an index
+  // buffer or a plain vertex range.
+  struct DrawIndexBuffer {
+    MTL::PrimitiveType primitive_type = MTL::PrimitiveTypeTriangle;
+    uint32_t index_count = 0;
+    bool indexed = false;
+    MTL::IndexType index_type = MTL::IndexTypeUInt16;
+    MTL::Buffer* buffer = nullptr;
+    uint64_t offset = 0;
+  };
+  bool ResolveDrawIndexBuffer(
+      const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+      Shader::HostVertexShaderType host_vertex_shader_type,
+      DrawIndexBuffer& index_buffer_out);
+
+  // Constants shared between the guest shader paths.
   static constexpr size_t kStageCount = 2;  // Vertex + pixel.
   static constexpr size_t kNullBufferSize = 4096;
   static constexpr size_t kCbvSizeBytes = 4096;
   static constexpr size_t kUniformsBytesPerTable = 6 * kCbvSizeBytes;
+  static constexpr size_t kBoolLoopConstantsSize = (8 + 32) * sizeof(uint32_t);
+  static constexpr size_t kFetchConstantsSize =
+      xenos::kTextureFetchConstantCount * 6 * sizeof(uint32_t);
 
   struct SpirvArgumentBufferPage {
     MTL::Buffer* buffer = nullptr;
@@ -240,10 +295,25 @@ class MetalCommandProcessor : public CommandProcessor {
   MTL::RenderPipelineState* CreateMslPipelineState(
       const MslPipelineCompileRequest& request, std::string* error_out);
   void MslShaderCompileThread(size_t thread_index);
+  // Fills a request's attachment formats and blend state from the active render
+  // pass and the registers, returning the pipeline cache key. The translations
+  // only identify the shaders within that key.
+  uint64_t PopulatePipelineCompileRequest(
+      const RegisterFile& regs, const Shader::Translation* vertex_translation,
+      const Shader::Translation* pixel_translation,
+      MslPipelineCompileRequest& request);
   MTL::RenderPipelineState* GetOrCreateMslPipelineState(
       MslShader::MslTranslation* vertex_translation,
       MslShader::MslTranslation* pixel_translation, const RegisterFile& regs,
       MslPipelineCompileStatus* compile_status_out = nullptr);
+
+  // TODO(macos): compile these on the MSL compile threads, which are keyed on
+  // MslShader::MslTranslation today, instead of on the draw thread.
+  DxilShader::DxilTranslation* GetOrCreateDxilTranslation(
+      DxilShader& shader, uint64_t modification);
+  MTL::RenderPipelineState* GetOrCreateDxilPipelineState(
+      DxilShader::DxilTranslation* vertex_translation,
+      DxilShader::DxilTranslation* pixel_translation, const RegisterFile& regs);
 
   // Metal device and command queue (from provider)
   MTL::Device* device_ = nullptr;
@@ -291,9 +361,16 @@ class MetalCommandProcessor : public CommandProcessor {
   // Shader ucode disassembly buffer (used by AnalyzeUcode).
   StringBuffer ucode_disasm_buffer_;
 
-  // SPIRV-Cross (MSL) path - shader translator and cache.
+  // The cache holds MslShader or DxilShader depending on the active path; both
+  // derive from SpirvShader and share this translator's output.
   std::unique_ptr<SpirvShaderTranslator> spirv_shader_translator_;
-  std::unordered_map<uint64_t, std::unique_ptr<MslShader>> msl_shader_cache_;
+  std::unordered_map<uint64_t, std::unique_ptr<SpirvShader>>
+      guest_shader_cache_;
+  // Owns the root signature the DXIL shaders are compiled against.
+  MetalShaderConverter metal_shader_converter_;
+  MetalDxilBinder dxil_binder_;
+  std::unordered_map<uint64_t, MTL::RenderPipelineState*> dxil_pipeline_cache_;
+  std::unordered_set<Shader::Translation*> dxil_translation_failed_;
   // Includes user clip planes and tessellation constants.
   SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};
   struct MslShaderCompileRequest {
@@ -401,8 +478,6 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unordered_map<DepthStencilStateKey, MTL::DepthStencilState*,
                      DepthStencilStateKey::Hasher>
       depth_stencil_state_cache_;
-
-  bool mesh_shader_supported_ = false;
 
   // Texture cache for guest texture uploads
   std::unique_ptr<MetalTextureCache> texture_cache_;

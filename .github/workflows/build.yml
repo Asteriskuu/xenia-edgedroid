@@ -176,10 +176,23 @@ jobs:
         if: steps.cache-slang.outputs.cache-hit != 'true'
         run: ./xenia-build.py slang
 
+      - name: Cache Metal Shader Converter
+        id: cache-msc
+        uses: actions/cache@v5
+        with:
+          path: .metal-shader-converter
+          # Keep in sync with MSC_VERSION in xenia-build.py.
+          key: ${{ runner.os }}-metal-shader-converter-4.0-beta2
+
+      - name: Download Metal Shader Converter
+        if: steps.cache-msc.outputs.cache-hit != 'true'
+        run: ./xenia-build.py msc
+
       - name: Setup
         run: |
-          # Update submodules. Skip DirectXShaderCompiler (we don't use the
-          # Metal shader converter / dxilconv pipeline on edge).
+          # Update submodules. Skip DirectXShaderCompiler (the DXIL that the
+          # Metal backend converts comes from mesa's spirv_to_dxil, not
+          # dxilconv).
           git submodule update --init --depth=1 -j$(sysctl -n hw.ncpu) \
             $(grep -oE 'path = .+' .gitmodules | sed 's/path = //' \
               | grep -v 'DirectXShaderCompiler')
@@ -287,6 +300,18 @@ jobs:
       - name: Download Slang
         if: steps.cache-slang.outputs.cache-hit != 'true'
         run: ./xenia-build.py slang
+
+      - name: Cache Metal Shader Converter
+        id: cache-msc
+        uses: actions/cache@v5
+        with:
+          path: .metal-shader-converter
+          # Keep in sync with MSC_VERSION in xenia-build.py.
+          key: ${{ runner.os }}-metal-shader-converter-4.0-beta2
+
+      - name: Download Metal Shader Converter
+        if: steps.cache-msc.outputs.cache-hit != 'true'
+        run: ./xenia-build.py msc
 
       - name: Setup
         run: |

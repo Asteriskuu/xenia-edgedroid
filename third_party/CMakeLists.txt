@@ -1403,6 +1403,15 @@ endian = 'little'
     endif()
   endif()
   if(APPLE)
+    # Mesa's meson build sets no deployment target, so its objects get the SDK's
+    # and the linker warns about every one of them being newer than what the
+    # rest of the tree links against.
+    if(CMAKE_OSX_DEPLOYMENT_TARGET)
+      list(APPEND _xe_s2d_meson_args
+        "-Dc_args=-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}"
+        "-Dcpp_args=-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    endif()
+
     # Extend the Apple ar/ranlib "has no symbols" quieting we apply to CMake
     # targets (root CMakeLists.txt) to meson's mesa build. Several util/nir
     # sources compile to empty objects on macOS (futex is Linux-only,
@@ -1487,5 +1496,40 @@ endian = 'little'
     string(TOUPPER "${_xe_cfg}" _xe_cfg_u)
     set_target_properties(spirv_to_dxil PROPERTIES
       IMPORTED_LOCATION_${_xe_cfg_u} "${_xe_s2d_main}")
+  endforeach()
+endif()
+
+# ==============================================================================
+# Metal Shader Converter (Apple only — the DXIL -> AIR half of the Metal guest
+# shader path, taking the DXIL that spirv_to_dxil above produces)
+# ==============================================================================
+# Apache 2.0 but closed source, so it is downloaded rather than built. The
+# headers are vendored here; the dylib is mirrored as a release asset and
+# fetched by `./xenia-build.py msc` into .metal-shader-converter/, because
+# Apple's own download requires a developer login.
+if(APPLE)
+  set(_xe_msc_root "${CMAKE_CURRENT_SOURCE_DIR}/metal-shader-converter")
+  file(GLOB _xe_msc_found
+       "${PROJECT_SOURCE_DIR}/.metal-shader-converter/*/libmetalirconverter.dylib")
+  if(NOT _xe_msc_found)
+    message(FATAL_ERROR
+      "The Metal backend requires Apple's Metal Shader Converter. Run: "
+      "./xenia-build.py msc")
+  endif()
+  list(GET _xe_msc_found 0 _xe_msc_dylib)
+
+  add_library(xenia-third-party-metal-shader-converter SHARED IMPORTED GLOBAL)
+  # IR_RUNTIME_METALCPP makes metal_irconverter_runtime.h's inline helpers take
+  # metal-cpp types instead of Objective-C ones.
+  set_target_properties(xenia-third-party-metal-shader-converter PROPERTIES
+    IMPORTED_LOCATION "${_xe_msc_dylib}"
+    INTERFACE_INCLUDE_DIRECTORIES
+      "${_xe_msc_root}/include;${_xe_msc_root}/include/metal_irconverter;${_xe_msc_root}/include/metal_irconverter_runtime"
+    INTERFACE_COMPILE_DEFINITIONS "IR_RUNTIME_METALCPP")
+  # Multi-Config evaluates every config, so point each at the same dylib.
+  foreach(_xe_cfg IN LISTS CMAKE_CONFIGURATION_TYPES)
+    string(TOUPPER "${_xe_cfg}" _xe_cfg_u)
+    set_target_properties(xenia-third-party-metal-shader-converter PROPERTIES
+      IMPORTED_LOCATION_${_xe_cfg_u} "${_xe_msc_dylib}")
   endforeach()
 endif()

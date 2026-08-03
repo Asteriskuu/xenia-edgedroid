@@ -91,6 +91,9 @@ node_modules/
 # Downloaded Slang shader compiler (xenia-build.py ensure_slangc)
 /.slang/
 
+# Downloaded Metal Shader Converter dylib (xenia-build.py msc)
+/.metal-shader-converter/
+
 # CMake user-specific overrides + compile commands export
 CMakeUserPresets.json
 /compile_commands.json
