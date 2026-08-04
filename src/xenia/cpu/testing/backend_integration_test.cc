@@ -1172,3 +1172,106 @@ TEST_CASE("PPC_RESTGPRLR_INLINED", "[backend]") {
   memory->SystemHeapFree(frame_address);
   memory->SystemHeapFree(stack_address);
 }
+
+// The other half of the restore's branch: when the reloaded LR is *not* the
+// caller's own return address the backend must dispatch to it as a tail call
+// rather than taking the epilogue.  The spilled LR here points at a third
+// guest function, which writes a sentinel so the landing is observable.
+TEST_CASE("PPC_RESTGPRLR_INLINED_TAIL_DISPATCH", "[backend]") {
+  constexpr uint32_t kTailTargetAddr = 0x80002000;
+  constexpr uint64_t kTailSentinel = 0x5A5A1234BEEF0001ull;
+
+  auto memory = std::make_unique<Memory>();
+  memory->Initialize();
+
+  auto backend = CreateBackend();
+  REQUIRE(backend);
+  auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+  processor->Setup(std::move(backend));
+
+  int gen_invocation = 0;
+  Function* helper_fn = nullptr;
+  auto module_owner = std::make_unique<TestModule>(
+      processor.get(), "Test",
+      [](uint32_t address) {
+        return address == kSaverestCallerAddr ||
+               address == kSaverestHelperAddr || address == kTailTargetAddr;
+      },
+      [&](HIRBuilder& b) {
+        switch (gen_invocation++) {
+          case 0:
+            // Helper body; the backend inlines the call so this never runs.
+            b.Return();
+            break;
+          case 1:
+            // Tail-call target: proves the dispatch landed here.
+            StoreGPR(b, 3, b.LoadConstantUint64(kTailSentinel));
+            b.Return();
+            break;
+          default:
+            REQUIRE(helper_fn != nullptr);
+            b.Call(helper_fn, CALL_TAIL);
+            b.Return();
+            break;
+        }
+        return true;
+      },
+      /*skip_cf_simplification=*/true);
+  processor->AddModule(std::move(module_owner));
+  processor->backend()->CommitExecutableRange(kSaverestCallerAddr,
+                                              kTailTargetAddr + 0x1000);
+
+  helper_fn = processor->ResolveFunction(kSaverestHelperAddr);
+  REQUIRE(helper_fn != nullptr);
+  helper_fn->SetSaverest(SaveRestoreType::GPR, /*is_rest=*/true,
+                         kSaverestFirstGpr);
+
+  // Resolve the tail target before the caller so it is in the indirection
+  // table by the time the restore dispatches to it.
+  auto* target_fn = processor->ResolveFunction(kTailTargetAddr);
+  REQUIRE(target_fn != nullptr);
+
+  auto* caller_fn = processor->ResolveFunction(kSaverestCallerAddr);
+  REQUIRE(caller_fn != nullptr);
+
+  uint32_t stack_size = 64 * 1024;
+  uint32_t stack_address = memory->SystemHeapAlloc(stack_size);
+  uint32_t frame_size = 1024;
+  uint32_t frame_address = memory->SystemHeapAlloc(frame_size);
+  uint32_t guest_sp = frame_address + frame_size / 2;
+  std::memset(memory->TranslateVirtual(frame_address), 0, frame_size);
+
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    store_and_swap<uint64_t>(
+        memory->TranslateVirtual(SaverestSlot(guest_sp, g)), SaverestCanary(g));
+  }
+  // Spilled LR differs from the return address passed to Call below, so the
+  // epilogue comparison must fail and the tail dispatch must run.
+  store_and_swap<uint32_t>(memory->TranslateVirtual(guest_sp - 8),
+                           kTailTargetAddr);
+
+  auto thread_state = std::make_unique<ThreadState>(processor.get(), 0x100,
+                                                    stack_address + stack_size);
+  auto ctx = thread_state->context();
+  ctx->lr = 0;
+  ctx->r[1] = guest_sp;
+  ctx->r[3] = 0;
+  ctx->r[12] = 0;
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    ctx->r[g] = 0;
+  }
+
+  caller_fn->Call(thread_state.get(), kSaverestRetAddr);
+
+  // The dispatch landed in the target rather than returning early.
+  REQUIRE(ctx->r[3] == kTailSentinel);
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    INFO("guest r" << g);
+    REQUIRE(ctx->r[g] == SaverestCanary(g));
+  }
+  REQUIRE(ctx->r[12] == kTailTargetAddr);
+  REQUIRE(ctx->lr == kTailTargetAddr);
+
+  memory->SystemHeapFree(frame_address);
+  memory->SystemHeapFree(stack_address);
+}
