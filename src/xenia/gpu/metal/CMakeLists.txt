@@ -20,6 +20,8 @@ add_library(xenia-gpu-metal STATIC
   metal_shader_converter.h
   metal_shared_memory.cc
   metal_shared_memory.h
+  metal_tessellation_shaders.cc
+  metal_tessellation_shaders.h
   metal_texture_cache.cc
   metal_texture_cache.h
   msl_bindings.h
@@ -41,6 +43,15 @@ target_link_libraries(xenia-gpu-metal PUBLIC
   "-framework MetalKit"
 )
 target_link_libraries(xenia-gpu-metal PRIVATE glslang-spirv)
+# The tessellation path feeds the SPIR-V host vertex/hull shaders through Mesa,
+# so it includes their vulkan_spirv headers, which the Vulkan backend generates.
+# Depend on that generation so the headers exist on a clean build.
+foreach(_spirv_shaders_dep
+        xenia-gpu-vulkan-spirv-shaders xenia-gpu-vulkan-slang-spirv-shaders)
+  if(TARGET ${_spirv_shaders_dep})
+    add_dependencies(xenia-gpu-metal ${_spirv_shaders_dep})
+  endif()
+endforeach()
 xe_shader_rules_metal(xenia-gpu-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
 xe_shader_rules_slang(xenia-gpu-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
                       TARGET msl)

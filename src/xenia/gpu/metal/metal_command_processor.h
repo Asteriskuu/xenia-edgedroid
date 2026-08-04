@@ -228,7 +228,7 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   bool ResolveDrawIndexBuffer(
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
-      Shader::HostVertexShaderType host_vertex_shader_type,
+      Shader::HostVertexShaderType host_vertex_shader_type, bool tessellated,
       DrawIndexBuffer& index_buffer_out);
 
   // Constants shared between the guest shader paths.
@@ -292,6 +292,11 @@ class MetalCommandProcessor : public CommandProcessor {
   bool EnqueueMslShaderCompilation(MslShader::MslTranslation* translation,
                                    bool is_ios, uint8_t priority);
   bool EnqueueMslPipelineCompilation(const MslPipelineCompileRequest& request);
+  // Formats, write masks and blend state, shared by the render and mesh
+  // pipeline descriptors.
+  static void ApplyColorAttachmentState(
+      MTL::RenderPipelineColorAttachmentDescriptorArray* attachments,
+      const MslPipelineCompileRequest& request);
   MTL::RenderPipelineState* CreateMslPipelineState(
       const MslPipelineCompileRequest& request, std::string* error_out);
   void MslShaderCompileThread(size_t thread_index);
@@ -314,6 +319,33 @@ class MetalCommandProcessor : public CommandProcessor {
   MTL::RenderPipelineState* GetOrCreateDxilPipelineState(
       DxilShader::DxilTranslation* vertex_translation,
       DxilShader::DxilTranslation* pixel_translation, const RegisterFile& regs);
+
+  // One MSC stage of a tessellated draw.
+  struct DxilTessellationStage {
+    MTL::Library* library = nullptr;
+    MTL::Function* function = nullptr;
+    std::string function_name;
+    MetalShaderReflection reflection;
+  };
+  // The host vertex and hull shaders linked with one guest domain shader.
+  // Tessellation emulation links all three together, so they are cached as a
+  // unit rather than per stage.
+  struct DxilTessellationShaders {
+    DxilTessellationStage vertex;
+    DxilTessellationStage hull;
+    DxilTessellationStage domain;
+    // Pipelines built from these, keyed by render state.
+    std::unordered_map<uint64_t, MTL::RenderPipelineState*> pipelines;
+  };
+  DxilTessellationShaders* GetOrCreateDxilTessellationShaders(
+      DxilShader& domain_shader, uint64_t domain_modification,
+      xenos::TessellationMode tessellation_mode,
+      Shader::HostVertexShaderType host_vertex_shader_type);
+  MTL::RenderPipelineState* GetOrCreateDxilTessellationPipelineState(
+      DxilTessellationShaders& shaders,
+      DxilShader::DxilTranslation* pixel_translation, const RegisterFile& regs);
+  // MSC's tessellator lookup tables, allocated once and kept resident.
+  bool EnsureTessellatorTablesBuffer();
 
   // Metal device and command queue (from provider)
   MTL::Device* device_ = nullptr;
@@ -371,6 +403,12 @@ class MetalCommandProcessor : public CommandProcessor {
   MetalDxilBinder dxil_binder_;
   std::unordered_map<uint64_t, MTL::RenderPipelineState*> dxil_pipeline_cache_;
   std::unordered_set<Shader::Translation*> dxil_translation_failed_;
+  // Keyed by domain shader hash, modification, tessellation mode and host
+  // vertex shader type, which together pick all three linked stages.
+  std::unordered_map<uint64_t, std::unique_ptr<DxilTessellationShaders>>
+      dxil_tessellation_cache_;
+  MTL::Buffer* tessellator_tables_buffer_ = nullptr;
+  bool mesh_shader_supported_ = false;
   // Includes user clip planes and tessellation constants.
   SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};
   struct MslShaderCompileRequest {

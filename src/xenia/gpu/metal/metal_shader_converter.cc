@@ -55,6 +55,10 @@ IRShaderStage ToIRShaderStage(MetalShaderStage stage) {
   switch (stage) {
     case MetalShaderStage::kVertex:
       return IRShaderStageVertex;
+    case MetalShaderStage::kHull:
+      return IRShaderStageHull;
+    case MetalShaderStage::kDomain:
+      return IRShaderStageDomain;
     case MetalShaderStage::kFragment:
       return IRShaderStageFragment;
     default:
@@ -66,10 +70,74 @@ const char* StageName(MetalShaderStage stage) {
   switch (stage) {
     case MetalShaderStage::kVertex:
       return "vertex";
+    case MetalShaderStage::kHull:
+      return "hull";
+    case MetalShaderStage::kDomain:
+      return "domain";
     case MetalShaderStage::kFragment:
       return "fragment";
     default:
       return "compute";
+  }
+}
+
+// MSC only fills the info block of the stage it compiled.
+void CopyStageReflection(const IRShaderReflection* shader_reflection,
+                         IRShaderStage ir_stage,
+                         MetalShaderReflection& reflection_out) {
+  switch (ir_stage) {
+    case IRShaderStageVertex: {
+      IRVersionedVSInfo info = {};
+      if (IRShaderReflectionCopyVertexInfo(shader_reflection,
+                                           IRReflectionVersion_1_0, &info)) {
+        reflection_out.vertex_output_size_in_bytes =
+            info.info_1_0.vertex_output_size_in_bytes;
+        IRShaderReflectionReleaseVertexInfo(&info);
+      }
+      break;
+    }
+    case IRShaderStageHull: {
+      IRVersionedHSInfo info = {};
+      if (IRShaderReflectionCopyHullInfo(shader_reflection,
+                                         IRReflectionVersion_1_0, &info)) {
+        reflection_out.hs_max_patches_per_object_threadgroup =
+            info.info_1_0.max_patches_per_object_threadgroup;
+        reflection_out.hs_max_object_threads_per_patch =
+            info.info_1_0.max_object_threads_per_patch;
+        reflection_out.hs_input_control_point_count =
+            info.info_1_0.input_control_point_count;
+        reflection_out.hs_output_control_point_count =
+            info.info_1_0.output_control_point_count;
+        reflection_out.hs_output_control_point_size =
+            info.info_1_0.output_control_point_size;
+        reflection_out.hs_patch_constants_size =
+            info.info_1_0.patch_constants_size;
+        reflection_out.hs_tessellator_output_primitive =
+            uint32_t(info.info_1_0.tessellator_output_primitive);
+        reflection_out.hs_max_tessellation_factor =
+            info.info_1_0.max_tessellation_factor;
+        IRShaderReflectionReleaseHullInfo(&info);
+      }
+      break;
+    }
+    case IRShaderStageDomain: {
+      IRVersionedDSInfo info = {};
+      if (IRShaderReflectionCopyDomainInfo(shader_reflection,
+                                           IRReflectionVersion_1_0, &info)) {
+        reflection_out.ds_max_input_prims_per_mesh_threadgroup =
+            info.info_1_0.max_input_prims_per_mesh_threadgroup;
+        reflection_out.ds_input_control_point_count =
+            info.info_1_0.input_control_point_count;
+        reflection_out.ds_input_control_point_size =
+            info.info_1_0.input_control_point_size;
+        reflection_out.ds_patch_constants_size =
+            info.info_1_0.patch_constants_size;
+        IRShaderReflectionReleaseDomainInfo(&info);
+      }
+      break;
+    }
+    default:
+      break;
   }
 }
 
@@ -268,7 +336,8 @@ bool MetalShaderConverter::QueryRootParameterOffsets() {
 }
 
 MetalShaderConversionResult MetalShaderConverter::Convert(
-    MetalShaderStage stage, const std::vector<uint8_t>& dxil) const {
+    MetalShaderStage stage, const std::vector<uint8_t>& dxil,
+    bool tessellation_emulation) const {
   MetalShaderConversionResult result;
   if (!is_available_) {
     result.error_message = "MetalShaderConverter is not initialized";
@@ -297,6 +366,9 @@ MetalShaderConversionResult MetalShaderConverter::Convert(
   // Mesa embeds no root signature, but the flag also keeps MSC from inferring
   // one and disagreeing with ours.
   IRCompilerIgnoreRootSignature(compiler, true);
+  if (tessellation_emulation) {
+    IRCompilerEnableGeometryAndTessellationEmulation(compiler, true);
+  }
 
   IRError* error = nullptr;
   IRObject* metal_object =
@@ -338,6 +410,7 @@ MetalShaderConversionResult MetalShaderConverter::Convert(
       if (entry_point_name) {
         result.entry_point_name = entry_point_name;
       }
+      CopyStageReflection(reflection, ir_stage, result.reflection);
     }
     IRShaderReflectionDestroy(reflection);
   }

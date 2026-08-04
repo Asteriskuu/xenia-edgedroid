@@ -113,7 +113,8 @@ bool MetalDxilBinder::GatherStage(const SpirvShader* shader,
 bool MetalDxilBinder::Bind(MTL::RenderCommandEncoder* encoder,
                            const SpirvShader* vertex_shader,
                            const SpirvShader* pixel_shader,
-                           const Constants& constants, bool memexport_used) {
+                           const Constants& constants, bool memexport_used,
+                           bool tessellated) {
   if (!encoder || !converter_.is_available()) {
     return false;
   }
@@ -246,15 +247,34 @@ bool MetalDxilBinder::Bind(MTL::RenderCommandEncoder* encoder,
   write_root_parameter(MetalRootParameter::kSamplerRangePixel,
                        sampler_heap_address);
 
-  auto bind_both_stages = [&](const Slice& slice, uint64_t bind_point) {
-    encoder->setVertexBuffer(slice.buffer, slice.offset,
+  // Tessellation emulation runs the hull stage as an object shader and the
+  // tessellator as a mesh shader, so the pre-rasterization bindings go to those
+  // stages instead of the vertex stage.
+  auto bind_all_stages = [&](const Slice& slice, uint64_t bind_point) {
+    if (tessellated) {
+      encoder->setObjectBuffer(slice.buffer, slice.offset,
+                               NS::UInteger(bind_point));
+      encoder->setMeshBuffer(slice.buffer, slice.offset,
                              NS::UInteger(bind_point));
+    } else {
+      encoder->setVertexBuffer(slice.buffer, slice.offset,
+                               NS::UInteger(bind_point));
+    }
     encoder->setFragmentBuffer(slice.buffer, slice.offset,
                                NS::UInteger(bind_point));
   };
-  bind_both_stages(texture_heap, kIRDescriptorHeapBindPoint);
-  bind_both_stages(sampler_heap, kIRSamplerHeapBindPoint);
-  bind_both_stages(argument_buffer, kIRArgumentBufferBindPoint);
+  bind_all_stages(texture_heap, kIRDescriptorHeapBindPoint);
+  bind_all_stages(sampler_heap, kIRSamplerHeapBindPoint);
+  bind_all_stages(argument_buffer, kIRArgumentBufferBindPoint);
+  if (tessellated) {
+    // The hull and domain stages read the same root parameters from their own
+    // bind point.
+    encoder->setObjectBuffer(
+        argument_buffer.buffer, argument_buffer.offset,
+        NS::UInteger(kIRArgumentBufferHullDomainBindPoint));
+    encoder->setMeshBuffer(argument_buffer.buffer, argument_buffer.offset,
+                           NS::UInteger(kIRArgumentBufferHullDomainBindPoint));
+  }
 
   // Binding covers only the three buffers above; everything the shaders reach
   // through a GPU address has to be made resident explicitly.

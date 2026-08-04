@@ -54,14 +54,14 @@ class MetalDxilBinder {
   ~MetalDxilBinder();
 
   // Writes this draw's descriptor heaps, per-stage index buffers and top-level
-  // argument buffer, binds them to both stages and makes everything they
-  // reference resident.
+  // argument buffer, binds them to the stages the pipeline runs and makes
+  // everything they reference resident.
   // TODO(macos): reuse the previous draw's slices when nothing they hold
   // changed, instead of re-uploading roughly 10 KB per draw. Needs the reuse
   // cache dropped whenever the transient pool's pages can be recycled.
   bool Bind(MTL::RenderCommandEncoder* encoder,
             const SpirvShader* vertex_shader, const SpirvShader* pixel_shader,
-            const Constants& constants, bool memexport_used);
+            const Constants& constants, bool memexport_used, bool tessellated);
 
  private:
   static constexpr uint32_t kStageVertex = 0;
