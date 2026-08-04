@@ -91,6 +91,7 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   stack_size_ = StackLayout::GUEST_STACK_SIZE;
   source_map_arena_.Reset();
   tail_code_.clear();
+  label_bind_offsets_.clear();
   fpcr_mode_ = FPCRMode::Unknown;
 
   // The prolog, epilog and helpers emit outside the per-opcode guard below, so
@@ -331,6 +332,9 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
 void A64Emitter::ResetPerFunctionState() {
   reset();
   tail_code_.clear();
+  // reset() restarts xbyak label ids from 1, so recorded bind offsets from
+  // this function must not leak into the next one.
+  label_bind_offsets_.clear();
 
   // Clean up cached labels.
   epilog_label_ = nullptr;
@@ -360,6 +364,10 @@ void A64Emitter::Trap(uint16_t trap_type) { brk(trap_type); }
 
 void A64Emitter::b(const Xbyak_aarch64::Cond cond,
                    const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::b(cond, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::b(static_cast<Xbyak_aarch64::Cond>(cond ^ 1), skip);
   CodeGenerator::b(label);
@@ -368,6 +376,10 @@ void A64Emitter::b(const Xbyak_aarch64::Cond cond,
 
 void A64Emitter::cbz(const Xbyak_aarch64::WReg& rt,
                      const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::cbz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbnz(rt, skip);
   CodeGenerator::b(label);
@@ -376,6 +388,10 @@ void A64Emitter::cbz(const Xbyak_aarch64::WReg& rt,
 
 void A64Emitter::cbz(const Xbyak_aarch64::XReg& rt,
                      const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::cbz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbnz(rt, skip);
   CodeGenerator::b(label);
@@ -384,6 +400,10 @@ void A64Emitter::cbz(const Xbyak_aarch64::XReg& rt,
 
 void A64Emitter::cbnz(const Xbyak_aarch64::WReg& rt,
                       const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::cbnz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbz(rt, skip);
   CodeGenerator::b(label);
@@ -392,6 +412,10 @@ void A64Emitter::cbnz(const Xbyak_aarch64::WReg& rt,
 
 void A64Emitter::cbnz(const Xbyak_aarch64::XReg& rt,
                       const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::cbnz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbz(rt, skip);
   CodeGenerator::b(label);
@@ -400,6 +424,10 @@ void A64Emitter::cbnz(const Xbyak_aarch64::XReg& rt,
 
 void A64Emitter::tbz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
                      const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kTestBranchBackwardRange)) {
+    CodeGenerator::tbz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbnz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -408,6 +436,10 @@ void A64Emitter::tbz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
 
 void A64Emitter::tbz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
                      const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kTestBranchBackwardRange)) {
+    CodeGenerator::tbz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbnz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -416,6 +448,10 @@ void A64Emitter::tbz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
 
 void A64Emitter::tbnz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
                       const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kTestBranchBackwardRange)) {
+    CodeGenerator::tbnz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -424,6 +460,10 @@ void A64Emitter::tbnz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
 
 void A64Emitter::tbnz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
                       const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kTestBranchBackwardRange)) {
+    CodeGenerator::tbnz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -768,10 +808,10 @@ void A64Emitter::PushStackpoint() {
   ldr(w9, ptr(x19, static_cast<uint32_t>(
                        offsetof(A64BackendContext, current_stackpoint_depth))));
 
-  // Compute offset into array: x10 = w9 * sizeof(A64BackendStackpoint)
-  mov(w10, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
-  umull(x10, w9, w10);
-  add(x8, x8, x10);
+  // x8 += w9 * sizeof(A64BackendStackpoint) via scaled extended-register add.
+  static_assert(sizeof(A64BackendStackpoint) == 16,
+                "stackpoint indexing relies on a 16-byte element size");
+  add(x8, x8, w9, UXTW, 4);
 
   // Store host SP.
   mov(x10, sp);
@@ -824,7 +864,8 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
 
   ldr(w16, ptr(x19, static_cast<uint32_t>(offsetof(
                         A64BackendContext, pending_stackpoint_sync_depth))));
-  cbz(w16, return_from_sync);
+  // Bound forward target (adr + b below) — short form is safe.
+  cbz_near(w16, return_from_sync);
 
   auto& sync_label = AddToTail([](A64Emitter& e, Label& lbl) {
     // x8 was set up in the body to point at return_from_sync; do that there
