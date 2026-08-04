@@ -274,11 +274,21 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
 static std::mutex g_multi_wait_mutex;
 static std::condition_variable g_multi_wait_cv;
 static std::atomic<uint64_t> g_multi_wait_gen{0};
+static std::atomic<uint32_t> g_multi_waiters{0};
 static void PokeMultiWaiters() {
-  {
-    std::lock_guard<std::mutex> lock(g_multi_wait_mutex);
-    g_multi_wait_gen.fetch_add(1, std::memory_order_relaxed);
+  // Bump the generation before reading the waiter count: a waiter that has
+  // just registered re-checks the generation under the mutex before sleeping,
+  // so it cannot miss this.
+  g_multi_wait_gen.fetch_add(1, std::memory_order_release);
+  if (g_multi_waiters.load(std::memory_order_acquire) == 0) {
+    // Nobody is parked, so skip the process-global mutex entirely. This path
+    // runs from the realtime audio callback, where blocking on a lock held by
+    // an ordinary guest thread costs an audio deadline.
+    return;
   }
+  // Notified without holding the mutex, so a realtime caller never blocks on
+  // it. A wakeup lost to the register/sleep race costs at most the 1ms park
+  // cap the waiter already applies.
   g_multi_wait_cv.notify_all();
 }
 
@@ -462,10 +472,14 @@ class PosixConditionBase {
       auto remaining =
           std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
       auto park = std::min(remaining, std::chrono::milliseconds(1));
-      std::unique_lock<std::mutex> mw_lock(g_multi_wait_mutex);
-      g_multi_wait_cv.wait_for(mw_lock, park, [&] {
-        return g_multi_wait_gen.load(std::memory_order_acquire) != wait_gen;
-      });
+      g_multi_waiters.fetch_add(1, std::memory_order_release);
+      {
+        std::unique_lock<std::mutex> mw_lock(g_multi_wait_mutex);
+        g_multi_wait_cv.wait_for(mw_lock, park, [&] {
+          return g_multi_wait_gen.load(std::memory_order_acquire) != wait_gen;
+        });
+      }
+      g_multi_waiters.fetch_sub(1, std::memory_order_release);
     }
   }
 
