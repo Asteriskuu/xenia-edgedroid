@@ -118,6 +118,11 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   void Call(const hir::Instr* instr, GuestFunction* function);
   void CallIndirect(const hir::Instr* instr, int reg_index);
   void CallExtern(const hir::Instr* instr, const Function* function);
+  // Emits a PPC __savegprlr_N/__restgprlr_N helper body inline instead of
+  // calling it. Returns false when the callee is not a GPR saverest helper.
+  bool TryInlinePPCGprLrSaveRestore(const hir::Instr* instr,
+                                    const GuestFunction* function);
+  void TailCallGuestAddressInW16();
   void CallNative(void* fn);
   void CallNativeSafe(void* fn);
   void SetReturnAddress(uint64_t value);

@@ -479,6 +479,10 @@ void A64Emitter::UnimplementedInstr(const hir::Instr* i) {
 void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   assert_not_null(function);
   ForgetFpcrMode();
+  if (TryInlinePPCGprLrSaveRestore(instr, function)) {
+    return;
+  }
+
   auto fn = static_cast<A64Function*>(function);
 
   if (fn->machine_code()) {
@@ -562,6 +566,127 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     blr(x9);
     synchronize_stack_on_next_instruction_ = true;
   }
+}
+
+void A64Emitter::TailCallGuestAddressInW16() {
+  if (code_cache_->has_indirection_table()) {
+    // Must leave the guest address in w16 for the resolve thunk to read.
+    if (!code_cache_->encoded_indirection()) {
+      // Fast path: table mapped at host VA == guest addr; slot holds raw
+      // 32-bit host target.
+      ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
+    } else {
+      // Encoded path: see A64CodeCache for the entry format.
+      Label external_target;
+      Label indirection_ready;
+
+      mov(x14, code_cache_->indirection_table_base_bias());
+      add(x14, x14, w16, UXTW);
+      ldr(w9, ptr(x14, static_cast<uint32_t>(0)));
+      tbnz(w9, 31, external_target);
+
+      // Internal: rel32 from code cache base.
+      mov(x14, code_cache_->execute_base_address());
+      add(x9, x14, w9, UXTW);
+      b(indirection_ready);
+
+      // External: tagged index into the side table.
+      L(external_target);
+      and_(w15, w9, A64CodeCache::kIndirectionExternalIndexMask);
+      mov(x14, code_cache_->external_indirection_table_base_address());
+      lsl(x15, x15, 3);
+      add(x14, x14, x15);
+      ldr(x9, ptr(x14, static_cast<uint32_t>(0)));
+
+      L(indirection_ready);
+    }
+  } else {
+    // No indirection table: resolve at runtime.
+    mov(x0, x20);  // context
+    mov(x1, x16);  // guest address
+    mov(x9, reinterpret_cast<uint64_t>(&ResolveFunction));
+    blr(x9);
+    mov(x9, x0);  // resolved address
+  }
+
+  PopStackpoint();
+  ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
+  ldr(x30, ptr(sp, static_cast<uint32_t>(StackLayout::HOST_RET_ADDR)));
+  if (stack_size() <= 4095) {
+    add(sp, sp, static_cast<uint32_t>(stack_size()));
+  } else {
+    mov(x17, static_cast<uint64_t>(stack_size()));
+    add(sp, sp, x17, UXTX);
+  }
+  br(x9);
+}
+
+bool A64Emitter::TryInlinePPCGprLrSaveRestore(const hir::Instr* instr,
+                                              const GuestFunction* function) {
+  if (!function->IsSaverest() ||
+      function->SaverestType() != SaveRestoreType::GPR) {
+    return false;
+  }
+
+  const unsigned first_gpr = function->SaverestIndex();
+  if (first_gpr < 14 || first_gpr > 31) {
+    return false;
+  }
+
+  const bool is_tail_call = (instr->flags & hir::CALL_TAIL) != 0;
+  if ((function->IsSave() && is_tail_call) ||
+      (function->IsRestore() && !is_tail_call)) {
+    return false;
+  }
+
+  // Standard PPC helper layout:
+  //   std/ld rN, -((33 - N) * 8)(r1), N = first_gpr..31
+  //   stw/lwz r12, -8(r1)
+  const uint32_t first_slot_offset = (33 - first_gpr) * 8;
+  const uint32_t lr_slot_offset = (32 - first_gpr) * 8;
+
+  ldr(w14, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+  if (xe::memory::allocation_granularity() > 0x1000) {
+    // Branch-free: w15 = w14 + 0x1000, keep it only when w14 >= 0xE0000000.
+    mov(w15, 0xE0000000u);
+    cmp(w14, w15);
+    add(w15, w14, 1, 12);  // w15 = w14 + 0x1000 via LSL #12
+    csel(w14, w14, w15, LO);
+  }
+  add(x14, x21, w14, UXTW);
+  sub(x14, x14, first_slot_offset);
+
+  if (function->IsSave()) {
+    for (unsigned guest_reg = first_gpr; guest_reg <= 31; ++guest_reg) {
+      ldr(x15, ptr(x20, static_cast<int32_t>(
+                            offsetof(ppc::PPCContext, r[guest_reg]))));
+      rev(x15, x15);
+      str(x15, ptr(x14, static_cast<uint32_t>((guest_reg - first_gpr) * 8)));
+    }
+
+    ldr(w15, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[12]))));
+    rev(w15, w15);
+    str(w15, ptr(x14, lr_slot_offset));
+    return true;
+  }
+
+  for (unsigned guest_reg = first_gpr; guest_reg <= 31; ++guest_reg) {
+    ldr(x15, ptr(x14, static_cast<uint32_t>((guest_reg - first_gpr) * 8)));
+    rev(x15, x15);
+    str(x15, ptr(x20, static_cast<int32_t>(
+                          offsetof(ppc::PPCContext, r[guest_reg]))));
+  }
+
+  ldr(w16, ptr(x14, lr_slot_offset));
+  rev(w16, w16);
+  str(x16, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[12]))));
+  str(x16, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, lr))));
+
+  ldr(w15, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
+  cmp(w16, w15);
+  b(EQ, epilog_label());
+  TailCallGuestAddressInW16();
+  return true;
 }
 
 void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
