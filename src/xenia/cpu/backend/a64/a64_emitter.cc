@@ -568,59 +568,6 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   }
 }
 
-void A64Emitter::TailCallGuestAddressInW16() {
-  if (code_cache_->has_indirection_table()) {
-    // Must leave the guest address in w16 for the resolve thunk to read.
-    if (!code_cache_->encoded_indirection()) {
-      // Fast path: table mapped at host VA == guest addr; slot holds raw
-      // 32-bit host target.
-      ldr(w9, ptr(x16, static_cast<uint32_t>(0)));
-    } else {
-      // Encoded path: see A64CodeCache for the entry format.
-      Label external_target;
-      Label indirection_ready;
-
-      mov(x14, code_cache_->indirection_table_base_bias());
-      add(x14, x14, w16, UXTW);
-      ldr(w9, ptr(x14, static_cast<uint32_t>(0)));
-      tbnz(w9, 31, external_target);
-
-      // Internal: rel32 from code cache base.
-      mov(x14, code_cache_->execute_base_address());
-      add(x9, x14, w9, UXTW);
-      b(indirection_ready);
-
-      // External: tagged index into the side table.
-      L(external_target);
-      and_(w15, w9, A64CodeCache::kIndirectionExternalIndexMask);
-      mov(x14, code_cache_->external_indirection_table_base_address());
-      lsl(x15, x15, 3);
-      add(x14, x14, x15);
-      ldr(x9, ptr(x14, static_cast<uint32_t>(0)));
-
-      L(indirection_ready);
-    }
-  } else {
-    // No indirection table: resolve at runtime.
-    mov(x0, x20);  // context
-    mov(x1, x16);  // guest address
-    mov(x9, reinterpret_cast<uint64_t>(&ResolveFunction));
-    blr(x9);
-    mov(x9, x0);  // resolved address
-  }
-
-  PopStackpoint();
-  ldr(x0, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
-  ldr(x30, ptr(sp, static_cast<uint32_t>(StackLayout::HOST_RET_ADDR)));
-  if (stack_size() <= 4095) {
-    add(sp, sp, static_cast<uint32_t>(stack_size()));
-  } else {
-    mov(x17, static_cast<uint64_t>(stack_size()));
-    add(sp, sp, x17, UXTX);
-  }
-  br(x9);
-}
-
 bool A64Emitter::TryInlinePPCGprLrSaveRestore(const hir::Instr* instr,
                                               const GuestFunction* function) {
   if (!function->IsSaverest() ||
@@ -682,10 +629,13 @@ bool A64Emitter::TryInlinePPCGprLrSaveRestore(const hir::Instr* instr,
   str(x16, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[12]))));
   str(x16, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, lr))));
 
+  // __restgprlr_N returns to the reloaded LR: take our epilogue when it is our
+  // own return address, otherwise tail-call it. CallIndirect emits the
+  // indirection lookup and, for a tail call, the stack teardown and jump.
   ldr(w15, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
   cmp(w16, w15);
   b(EQ, epilog_label());
-  TailCallGuestAddressInW16();
+  CallIndirect(instr, 16);
   return true;
 }
 

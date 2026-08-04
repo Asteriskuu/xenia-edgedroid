@@ -122,7 +122,6 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // calling it. Returns false when the callee is not a GPR saverest helper.
   bool TryInlinePPCGprLrSaveRestore(const hir::Instr* instr,
                                     const GuestFunction* function);
-  void TailCallGuestAddressInW16();
   void CallNative(void* fn);
   void CallNativeSafe(void* fn);
   void SetReturnAddress(uint64_t value);
