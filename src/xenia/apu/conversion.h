@@ -163,34 +163,7 @@ inline void sequential_6_BE_to_interleaved_2_LE(float* output,
   }
 }
 #else
-inline void sequential_6_BE_to_interleaved_6_LE(float* output,
-                                                const float* input,
-                                                size_t ch_sample_count) {
-  for (size_t sample = 0; sample < ch_sample_count; sample++) {
-    for (size_t channel = 0; channel < 6; channel++) {
-      output[sample * 6 + channel] =
-          xe::byte_swap(input[channel * ch_sample_count + sample]);
-    }
-  }
-}
-inline void sequential_6_BE_to_interleaved_2_LE(float* output,
-                                                const float* input,
-                                                size_t ch_sample_count) {
-  // 5.1 mapping: fl, fr, fc, lfe, bl, br. XAudio2-default-style downmix:
-  // front pair at unity, C/surround at -3dB, LFE at -6dB.
-  for (size_t sample = 0; sample < ch_sample_count; sample++) {
-    float fl = xe::byte_swap(input[0 * ch_sample_count + sample]);
-    float fr = xe::byte_swap(input[1 * ch_sample_count + sample]);
-    float fc = xe::byte_swap(input[2 * ch_sample_count + sample]);
-    float lfe = xe::byte_swap(input[3 * ch_sample_count + sample]);
-    float bl = xe::byte_swap(input[4 * ch_sample_count + sample]);
-    float br = xe::byte_swap(input[5 * ch_sample_count + sample]);
-    output[sample * 2] =
-        fl + 0.707106781f * fc + 0.707106781f * bl + 0.5f * lfe;
-    output[sample * 2 + 1] =
-        fr + 0.707106781f * fc + 0.707106781f * br + 0.5f * lfe;
-  }
-}
+#error Audio conversion has no implementation for this architecture.
 #endif
 
 }  // namespace conversion
