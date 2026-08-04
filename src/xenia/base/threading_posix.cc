@@ -346,11 +346,39 @@ class PosixConditionBase {
     return WaitResult::kTimeout;
   }
 
-  // Wake this object's waiters and any parked WaitMultiple.
+  // The shared condvar is a notify_all, so poking it for an object nobody
+  // multi-waits on wakes every parked thread to re-check handles it does not
+  // care about.
   void NotifyAll() {
     cond_.notify_all();
-    PokeMultiWaiters();
+    if (multi_wait_refs_.load(std::memory_order_acquire) != 0) {
+      PokeMultiWaiters();
+    }
   }
+
+  // Number of parked WaitMultiple threads that include this object.
+  std::atomic<uint32_t> multi_wait_refs_{0};
+
+  // Registers the caller against every handle it is waiting on, so a signal
+  // knows whether waking the shared condvar can possibly help.
+  class MultiWaitRegistration {
+   public:
+    explicit MultiWaitRegistration(
+        const std::vector<PosixConditionBase*>& handles)
+        : handles_(handles) {
+      for (auto* h : handles_) {
+        h->multi_wait_refs_.fetch_add(1, std::memory_order_release);
+      }
+    }
+    ~MultiWaitRegistration() {
+      for (auto* h : handles_) {
+        h->multi_wait_refs_.fetch_sub(1, std::memory_order_release);
+      }
+    }
+
+   private:
+    const std::vector<PosixConditionBase*>& handles_;
+  };
 
   static std::pair<WaitResult, size_t> WaitMultiple(
       std::vector<PosixConditionBase*>&& handles, bool wait_all,
@@ -362,6 +390,8 @@ class PosixConditionBase {
       auto result = handles[0]->Wait(timeout);
       return std::make_pair(result, 0);
     }
+
+    MultiWaitRegistration registration(handles);
 
     // For multiple handles, we need to poll since we can't wait on multiple
     // condition variables simultaneously. This is a limitation of the POSIX
