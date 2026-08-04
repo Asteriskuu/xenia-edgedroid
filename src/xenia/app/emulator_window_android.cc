@@ -46,7 +46,7 @@ void EmulatorWindow::SetupGraphicsSystemPresenterPainting() {
     window->SetPresenter(presenter);
   }
 
-  if (emulator_->graphics_system() && 
+  if (emulator_->graphics_system() &&
       emulator_->graphics_system()->provider()) {
     immediate_drawer_ =
         emulator_->graphics_system()->provider()->CreateImmediateDrawer();
