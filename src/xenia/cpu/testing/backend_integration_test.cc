@@ -772,16 +772,26 @@ TEST_CASE("FPCR_PRESERVED_ACROSS_HOST_CALLBACK", "[backend]") {
 // JIT code.
 //
 // Windows: RtlLookupFunctionEntry directly queries the registered SEH tables.
-// POSIX: we call backtrace() from inside a JIT callback and verify we get
-// enough frames to have unwound through the JIT thunks.  This exercises the
-// DWARF .eh_frame data registered via __register_frame.
+// POSIX: we unwind from inside a JIT callback and verify we get enough frames
+// to have unwound through the JIT thunks.  This exercises the DWARF .eh_frame
+// data registered via __register_frame.
+//
+// _Unwind_Backtrace is used rather than backtrace(3) because it consults the
+// registered FDEs on both glibc and Apple libunwind.  backtrace(3) on Apple
+// arm64 walks the x29 frame-pointer chain instead, which JIT'd code does not
+// maintain, so it stops at the first JIT frame regardless of unwind data.
 
 #if !XE_PLATFORM_WIN32
-#include <execinfo.h>
+#include <unwind.h>
 static int jit_backtrace_depth = 0;
+static _Unwind_Reason_Code CountJITFrame(struct _Unwind_Context* context,
+                                         void* arg) {
+  ++jit_backtrace_depth;
+  return _URC_NO_REASON;
+}
 static void CaptureJITBacktrace(ppc::PPCContext* ctx, void* arg0, void* arg1) {
-  void* frames[64];
-  jit_backtrace_depth = backtrace(frames, 64);
+  jit_backtrace_depth = 0;
+  _Unwind_Backtrace(CountJITFrame, nullptr);
 }
 #endif
 
@@ -822,8 +832,8 @@ TEST_CASE("JIT_UNWIND_INFO_REGISTERED", "[backend]") {
   REQUIRE(entry != nullptr);
   REQUIRE(image_base != 0);
 #else
-  // On POSIX, call backtrace() from inside a JIT callback. If the .eh_frame
-  // unwind info is correctly registered, backtrace will unwind through:
+  // On POSIX, unwind from inside a JIT callback. If the .eh_frame unwind info
+  // is correctly registered, the unwinder will walk through:
   //   callback -> GuestToHostThunk -> guest func -> HostToGuestThunk -> Call
   // giving at least 4 frames. Without unwind info it stops at 1-2.
   jit_backtrace_depth = 0;
