@@ -2,14 +2,15 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Empty Android stub                                                        *
+ * Hello
  ******************************************************************************
  */
 
 #include "xenia/app/emulator_window_android.h"
 
 #include "xenia/app/emulator_window.h"
-#include "xenia/ui/immediate_drawer.h"
+#include "xenia/emulator.h"
+#include "xenia/ui/window.h"
 
 namespace xe {
 namespace app {
@@ -41,37 +42,13 @@ void EmulatorWindow::SetupGraphicsSystemPresenterPainting() {
     return;
   }
 
-  auto* window = window_.get();
-  if (window) {
-    window->SetPresenter(presenter);
-  }
-
-  if (emulator_->graphics_system() &&
-      emulator_->graphics_system()->provider()) {
-    immediate_drawer_ =
-        emulator_->graphics_system()->provider()->CreateImmediateDrawer();
-    if (immediate_drawer_) {
-      immediate_drawer_->SetPresenter(presenter);
-      if (imgui_drawer_) {
-        imgui_drawer_->SetPresenterAndImmediateDrawer(presenter,
-                                                      immediate_drawer_.get());
-        Profiler::SetUserIO(kZOrderProfiler, window, presenter,
-                            immediate_drawer_.get());
-      }
-    } else if (imgui_drawer_) {
-      imgui_drawer_->SetPresenterAndImmediateDrawer(presenter, nullptr);
-      Profiler::SetUserIO(kZOrderProfiler, window, presenter, nullptr);
-    }
+  if (window_) {
+    window_->SetPresenter(presenter);
   }
   presenter_painting_ = presenter;
 }
 
 void EmulatorWindow::ShutdownGraphicsSystemPresenterPainting() {
-  Profiler::SetUserIO(kZOrderProfiler, window_.get(), nullptr, nullptr);
-  if (imgui_drawer_) {
-    imgui_drawer_->SetPresenterAndImmediateDrawer(nullptr, nullptr);
-  }
-  immediate_drawer_.reset();
   if (window_) {
     window_->SetPresenter(nullptr);
   }
@@ -103,22 +80,22 @@ void EmulatorWindow::SaveImage(const std::filesystem::path& path,
 
 void EmulatorWindow::ToggleProfilesConfigDialog() {}
 void EmulatorWindow::ToggleAudioDialog() {}
-void EmulatorWindow::ToggleConfigDialog() {}
-void EmulatorWindow::OpenConfigDialog(const std::string& category) {}
+void EmulatorWindow::ToggleConfigDialog(const std::string&) {}
+void EmulatorWindow::OpenConfigDialog(const std::string&) {}
 void EmulatorWindow::ToggleControllerVibration() {}
 void EmulatorWindow::FileOpen() {}
 void EmulatorWindow::FileAddGames() {}
 
 void EmulatorWindow::UpdateAntiAliasingCvar(
-    gpu::CommandProcessor::SwapPostEffect effect) {}
+    gpu::CommandProcessor::SwapPostEffect) {}
 
 void EmulatorWindow::UpdateScalingAndSharpeningCvar(
-    ui::Presenter::GuestOutputPaintConfig::Effect effect) {}
+    ui::Presenter::GuestOutputPaintConfig::Effect) {}
 
-void EmulatorWindow::UpdateFsrSharpnessCvar(float value) {}
-void EmulatorWindow::UpdateFsrMaxUpsamplingPassesCvar(uint32_t value) {}
-void EmulatorWindow::UpdateCasSharpnessCvar(float value) {}
-void EmulatorWindow::UpdateDitherCvar(bool value) {}
+void EmulatorWindow::UpdateFsrSharpnessCvar(float) {}
+void EmulatorWindow::UpdateFsrMaxUpsamplingPassesCvar(uint32_t) {}
+void EmulatorWindow::UpdateCasSharpnessCvar(float) {}
+void EmulatorWindow::UpdateDitherCvar(bool) {}
 
 const char* EmulatorWindow::GetCvarValueForSwapPostEffect(
     gpu::CommandProcessor::SwapPostEffect effect) {
