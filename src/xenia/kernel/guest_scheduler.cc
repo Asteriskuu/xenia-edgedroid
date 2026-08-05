@@ -101,11 +101,14 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
     }
     forced_at_irql = true;
     self->kernel_state()->guest_scheduler()->NoteForcedPreempt();
-    XELOGD(
-        "GuestScheduler: forcing preemption of tid={:08X} '{}' at IRQL {} "
-        "after {} declined safepoints",
-        self->thread_id(), self->thread_name(), uint32_t(kpcr->current_irql),
-        links.preempt_defers_irql);
+    if (!links.forced_preempt_logged) {
+      links.forced_preempt_logged = true;
+      XELOGW(
+          "GuestScheduler: forcing preemption of tid={:08X} '{}' at IRQL {} "
+          "after {} declined safepoints (first time for this thread)",
+          self->thread_id(), self->thread_name(), uint32_t(kpcr->current_irql),
+          links.preempt_defers_irql);
+    }
   }
   links.preempt_defers_irql = 0;
   // Involuntary quantum end, so no yield to a lower-priority thread - except
@@ -1289,6 +1292,33 @@ void GuestScheduler::WatchdogLoop() {
       if (running && now >= cpus_[i].quantum_deadline_tick) {
         running->thread_state()->context()->preempt_requested = 1;
       }
+      // Stall detector: a dispatch count that has not moved for a whole
+      // window separates the wedge modes - flag still set means the fiber
+      // never reaches a safepoint, flag cleared means it yields but makes no
+      // progress.
+      uint64_t seq = cpus_[i].switch_seq.load(std::memory_order_relaxed);
+      if (!running || seq != stall_last_seq_[i]) {
+        stall_last_seq_[i] = seq;
+        stall_ticks_[i] = 0;
+        stall_reported_[i] = false;
+        continue;
+      }
+      if (++stall_ticks_[i] < kStallReportTicks || stall_reported_[i]) {
+        continue;
+      }
+      stall_reported_[i] = true;
+      auto* context = running->thread_state()->context();
+      auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+      XELOGW(
+          "GuestScheduler: CPU {} has not switched fibers in {} watchdog "
+          "ticks. Running tid={:08X} '{}' pc~lr={:08X} irql={} "
+          "preempt_requested={} irql_defers={} lock_defers={} ready_summary={:#x}",
+          i, stall_ticks_[i], running->thread_id(), running->thread_name(),
+          uint32_t(context->lr), uint32_t(kpcr->current_irql),
+          uint32_t(context->preempt_requested),
+          running->scheduler_links().preempt_defers_irql,
+          running->scheduler_links().preempt_defers_lock,
+          cpus_[i].ready_summary);
     }
   }
 }

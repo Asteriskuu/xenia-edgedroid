@@ -260,6 +260,11 @@ class GuestScheduler {
   uint64_t quantum_ticks_ = 0;
   std::unique_ptr<xe::threading::Thread> watchdog_thread_;
   std::unique_ptr<xe::threading::Event> watchdog_event_;
+  // Watchdog-only stall detection state, touched under lock_.
+  static constexpr uint32_t kStallReportTicks = 2000;  // ~2 s at a 1 ms period
+  uint64_t stall_last_seq_[kMaxCpus] = {};
+  uint32_t stall_ticks_[kMaxCpus] = {};
+  bool stall_reported_[kMaxCpus] = {};
 
   // Guards every CPU's ready and blocked lists. Never held across a fiber
   // switch.

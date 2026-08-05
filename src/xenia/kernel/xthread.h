@@ -542,6 +542,8 @@ class XThread : public XObject, public cpu::Thread {
     bool running = false;    // executing on a dispatch thread
     bool preempted = false;  // slice cut short by a higher-priority thread
     bool has_run = false;    // diagnostic: dispatched at least once
+    bool forced_preempt_logged =
+        false;  // one forced-preempt warning per thread
     // Set by an external Terminate, exits the fiber at its next
     // ExitIfTerminated check.
     std::atomic<bool> terminate_pending{false};
