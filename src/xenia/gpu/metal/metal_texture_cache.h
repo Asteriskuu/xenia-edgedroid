@@ -175,6 +175,7 @@ class MetalTextureCache : public TextureCache {
     MTL::Texture* GetOrCreate3DAs2DView(uint32_t host_swizzle,
                                         xenos::FetchOpDimension dimension,
                                         bool is_signed);
+    void Invalidate3DAs2DView() { texture_3d_as_2d_.reset(); }
 
    private:
     MetalTextureCache& texture_cache_;

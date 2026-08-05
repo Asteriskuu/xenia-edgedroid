@@ -3259,7 +3259,16 @@ bool MetalTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
 
   // GPU-based loading path for Metal texture_load_* shaders only (parity with
   // D3D12/Vulkan; no CPU untile fallback).
-  return TryGpuLoadTexture(texture, load_base, load_mips);
+  if (!TryGpuLoadTexture(texture, load_base, load_mips)) {
+    return false;
+  }
+
+  // The 3D-as-2D wrapper holds a copy of the base texture's data, so a reload
+  // leaves it stale. Only a base texture ever owns one.
+  if (texture.key().dimension == xenos::DataDimension::k3D) {
+    metal_texture->Invalidate3DAs2DView();
+  }
+  return true;
 }
 
 // MetalTexture implementation
