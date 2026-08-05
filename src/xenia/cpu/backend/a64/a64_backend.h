@@ -43,8 +43,10 @@ static constexpr uint32_t MAX_GUEST_TRAMPOLINES =
 static constexpr uint32_t A64_RESERVE_GRANULE_SHIFT = 7;
 // A generation counter per granule, hashed. stwcx. bumps its granule to kill
 // other threads' reservations. Colliding granules only cost a spurious failure.
-static constexpr uint32_t A64_RESERVE_NUM_ENTRIES = 1u << 20;
-static constexpr uint32_t A64_RESERVE_ENTRY_MASK = A64_RESERVE_NUM_ENTRIES - 1;
+static constexpr uint32_t A64_RESERVE_ENTRY_BITS = 20;
+static constexpr uint32_t A64_RESERVE_ENTRY_MASK =
+    (1u << A64_RESERVE_ENTRY_BITS) - 1;
+static constexpr uint32_t A64_RESERVE_NUM_ENTRIES = A64_RESERVE_ENTRY_MASK + 1;
 
 struct ReserveHelper {
   std::atomic<uint32_t> generations[A64_RESERVE_NUM_ENTRIES];
@@ -188,12 +190,6 @@ class A64Backend : public Backend {
   ResolveFunctionThunk resolve_function_thunk_ = nullptr;
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
 
- public:
-  void* try_acquire_reservation_helper_ = nullptr;
-  void* reserved_store_32_helper = nullptr;
-  void* reserved_store_64_helper = nullptr;
-
- private:
   alignas(64) ReserveHelper reserve_helper_;
   BitMap guest_trampoline_address_bitmap_;
   uint8_t* guest_trampoline_memory_ = nullptr;

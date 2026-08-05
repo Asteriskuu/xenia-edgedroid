@@ -507,8 +507,8 @@ std::atomic<uint32_t>& ReserveGranule(ReserveHelper* reserve_helper,
   return reserve_helper->generations[granule & A64_RESERVE_ENTRY_MASK];
 }
 
-extern "C" uint64_t TryAcquireReservationHelper(void* raw_context,
-                                                uint64_t guest_address) {
+uint64_t TryAcquireReservationHelper(void* raw_context,
+                                     uint64_t guest_address) {
   auto* bctx = BackendContextFromRawContext(raw_context);
   auto& granule =
       ReserveGranule(bctx->reserve_helper_, uint32_t(guest_address));
@@ -566,22 +566,6 @@ uint64_t ReservedStoreImpl(void* raw_context, uint64_t guest_address,
     granule.fetch_add(1, std::memory_order_release);
   }
   return exchange_ok ? 1 : 0;
-}
-
-extern "C" uint64_t ReservedStore32Helper(void* raw_context,
-                                          uint64_t guest_address,
-                                          uint64_t host_address,
-                                          uint64_t value) {
-  return ReservedStoreImpl<uint32_t>(raw_context, guest_address, host_address,
-                                     value);
-}
-
-extern "C" uint64_t ReservedStore64Helper(void* raw_context,
-                                          uint64_t guest_address,
-                                          uint64_t host_address,
-                                          uint64_t value) {
-  return ReservedStoreImpl<uint64_t>(raw_context, guest_address, host_address,
-                                     value);
 }
 
 }  // namespace
@@ -818,12 +802,6 @@ bool A64Backend::Initialize(Processor* processor) {
     synchronize_guest_and_host_stack_helper_ =
         thunk_emitter.EmitGuestAndHostSynchronizeStackHelper();
   }
-
-  // Wire up reservation helpers used by RESERVED_LOAD/STORE codegen.
-  try_acquire_reservation_helper_ =
-      reinterpret_cast<void*>(&TryAcquireReservationHelper);
-  reserved_store_32_helper = reinterpret_cast<void*>(&ReservedStore32Helper);
-  reserved_store_64_helper = reinterpret_cast<void*>(&ReservedStore64Helper);
 
   // Set the indirection table default to point at the resolve thunk.
   // Use 64-bit encoding: the resolve thunk address is encoded as a rel32

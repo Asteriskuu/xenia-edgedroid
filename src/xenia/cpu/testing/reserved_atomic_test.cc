@@ -10,7 +10,14 @@
 #include "xenia/cpu/testing/util.h"
 
 #include "xenia/base/byte_order.h"
+#include "xenia/base/platform.h"
 #include "xenia/cpu/thread_state.h"
+
+#if XE_ARCH_ARM64
+#include "xenia/base/cvar.h"
+#include "xenia/base/platform_arm64.h"
+DECLARE_int64(a64_extension_mask);
+#endif  // XE_ARCH_ARM64
 
 using namespace xe;
 using namespace xe::cpu;
@@ -62,6 +69,45 @@ void FreeScratch(Memory* memory, PPCContext* ctx) {
   memory->SystemHeapFree(static_cast<uint32_t>(ctx->r[4]));
 }
 
+// a64 emits stwcx. two ways: a single casal under LSE, or an ldaxr/stlxr loop
+// without it. Every core that runs these tests reports LSE, so the loop is only
+// reachable by masking the feature off and rebuilding the emitter's cached
+// flags before the backend is constructed.
+enum class AtomicsMode { kDetected, kNoLSE };
+
+class ScopedAtomicsMode {
+ public:
+  explicit ScopedAtomicsMode(AtomicsMode mode) {
+#if XE_ARCH_ARM64
+    saved_mask_ = cvars::a64_extension_mask;
+    if (mode == AtomicsMode::kNoLSE) {
+      cvars::a64_extension_mask = 0;
+      xe::arm64::InitFeatureFlags();
+    }
+#endif  // XE_ARCH_ARM64
+  }
+  ~ScopedAtomicsMode() {
+#if XE_ARCH_ARM64
+    cvars::a64_extension_mask = saved_mask_;
+    xe::arm64::InitFeatureFlags();
+#endif  // XE_ARCH_ARM64
+  }
+
+  ScopedAtomicsMode(const ScopedAtomicsMode&) = delete;
+  ScopedAtomicsMode& operator=(const ScopedAtomicsMode&) = delete;
+
+ private:
+#if XE_ARCH_ARM64
+  int64_t saved_mask_ = 0;
+#endif  // XE_ARCH_ARM64
+};
+
+#if XE_ARCH_ARM64
+#define XE_RESERVE_ATOMICS_MODES AtomicsMode::kDetected, AtomicsMode::kNoLSE
+#else
+#define XE_RESERVE_ATOMICS_MODES AtomicsMode::kDetected
+#endif  // XE_ARCH_ARM64
+
 // lwarx only, leaving the reservation live on return.
 void EmitGuestReservedLoad(HIRBuilder& b) {
   auto addr = LoadGPR(b, 4);
@@ -79,6 +125,55 @@ void EmitGuestReservedPair(HIRBuilder& b) {
                         INT64_TYPE));
   auto stored = b.StoreWithReserve(
       addr, b.ByteSwap(b.Truncate(LoadGPR(b, 5), INT32_TYPE)), INT32_TYPE);
+  StoreGPR(b, 6, b.ZeroExtend(stored, INT64_TYPE));
+  b.Return();
+}
+
+// stwcx. with no lwarx of its own, so it completes whatever reservation the
+// context already holds. Lets a test set the reservation up by hand and drive
+// the guest store down one specific failure path.
+void EmitGuestReservedStoreOnly(HIRBuilder& b) {
+  auto addr = LoadGPR(b, 4);
+  auto stored = b.StoreWithReserve(
+      addr, b.ByteSwap(b.Truncate(LoadGPR(b, 5), INT32_TYPE)), INT32_TYPE);
+  StoreGPR(b, 6, b.ZeroExtend(stored, INT64_TYPE));
+  b.Return();
+}
+
+// lwarx at r4, stwcx. four bytes up: same granule, but not the reserved
+// address.
+void EmitGuestReservedPairOffset(HIRBuilder& b) {
+  auto addr = LoadGPR(b, 4);
+  StoreGPR(b, 3,
+           b.ZeroExtend(b.ByteSwap(b.LoadWithReserve(addr, INT32_TYPE)),
+                        INT64_TYPE));
+  auto stored = b.StoreWithReserve(
+      b.Add(addr, b.LoadConstantUint64(4)),
+      b.ByteSwap(b.Truncate(LoadGPR(b, 5), INT32_TYPE)), INT32_TYPE);
+  StoreGPR(b, 6, b.ZeroExtend(stored, INT64_TYPE));
+  b.Return();
+}
+
+// A pair, then a second stwcx. that has no reservation left to consume.
+void EmitGuestReservedPairTwice(HIRBuilder& b) {
+  auto addr = LoadGPR(b, 4);
+  StoreGPR(b, 3,
+           b.ZeroExtend(b.ByteSwap(b.LoadWithReserve(addr, INT32_TYPE)),
+                        INT64_TYPE));
+  auto first = b.StoreWithReserve(
+      addr, b.ByteSwap(b.Truncate(LoadGPR(b, 5), INT32_TYPE)), INT32_TYPE);
+  StoreGPR(b, 6, b.ZeroExtend(first, INT64_TYPE));
+  auto second = b.StoreWithReserve(
+      addr, b.ByteSwap(b.Truncate(LoadGPR(b, 7), INT32_TYPE)), INT32_TYPE);
+  StoreGPR(b, 8, b.ZeroExtend(second, INT64_TYPE));
+  b.Return();
+}
+
+// The 64-bit ldarx/stdcx. pair.
+void EmitGuestReservedPair64(HIRBuilder& b) {
+  auto addr = LoadGPR(b, 4);
+  StoreGPR(b, 3, b.ByteSwap(b.LoadWithReserve(addr, INT64_TYPE)));
+  auto stored = b.StoreWithReserve(addr, b.ByteSwap(LoadGPR(b, 5)), INT64_TYPE);
   StoreGPR(b, 6, b.ZeroExtend(stored, INT64_TYPE));
   b.Return();
 }
@@ -264,6 +359,7 @@ TEST_CASE("RESERVED_HOST_OTHER_GRANULE_SURVIVES", "[reserve]") {
 // =============================================================================
 // A host store completes a reservation the JIT took.
 TEST_CASE("RESERVED_GUEST_LOAD_HOST_STORE", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
   TestFunction test(EmitGuestReservedLoad);
   test.Run(
       [&test](PPCContext* ctx) {
@@ -284,6 +380,7 @@ TEST_CASE("RESERVED_GUEST_LOAD_HOST_STORE", "[reserve]") {
 
 // A host store from another thread cancels a reservation the JIT took.
 TEST_CASE("RESERVED_HOST_STORE_INVALIDATES_GUEST", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
   TestFunction test(EmitGuestReservedLoad);
   SecondThread other(test.processors[0].get(), test.memory.get());
   test.Run(
@@ -306,6 +403,7 @@ TEST_CASE("RESERVED_HOST_STORE_INVALIDATES_GUEST", "[reserve]") {
 
 // A JIT stwcx. cancels a reservation host code took.
 TEST_CASE("RESERVED_GUEST_STORE_INVALIDATES_HOST", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
   TestFunction test(EmitGuestReservedPair);
   SecondThread other(test.processors[0].get(), test.memory.get());
   test.Run(
@@ -325,6 +423,160 @@ TEST_CASE("RESERVED_GUEST_STORE_INVALIDATES_HOST", "[reserve]") {
         REQUIRE_FALSE(ctx->processor->backend()->ReservedStore32(
             other.context(), addr, 0xDEADBEEFu));
         REQUIRE(GuestRead32(test.memory.get(), addr) == 0x12345678u);
+        FreeScratch(test.memory.get(), ctx);
+      });
+}
+
+// =============================================================================
+// JIT stwcx. paths
+// =============================================================================
+// Nothing reserved, so the store is refused before it looks at memory.
+TEST_CASE("RESERVED_GUEST_STORE_WITHOUT_LOAD", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
+  TestFunction test(EmitGuestReservedStoreOnly);
+  test.Run(
+      [&test](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        ctx->r[5] = 0xDEADBEEFull;
+        GuestWrite32(test.memory.get(), addr, 0x11223344u);
+      },
+      [&test](PPCContext* ctx) {
+        uint32_t addr = static_cast<uint32_t>(ctx->r[4]);
+        REQUIRE(ctx->r[6] == 0ull);
+        REQUIRE(GuestRead32(test.memory.get(), addr) == 0x11223344u);
+        FreeScratch(test.memory.get(), ctx);
+      });
+}
+
+// A reservation host code took is completed by the guest's stwcx.
+TEST_CASE("RESERVED_HOST_LOAD_GUEST_STORE", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
+  TestFunction test(EmitGuestReservedStoreOnly);
+  test.Run(
+      [&test](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        ctx->r[5] = 0xAABBCCDDull;
+        GuestWrite32(test.memory.get(), addr, 0x11223344u);
+        ctx->processor->backend()->ReservedLoad32(ctx, addr);
+      },
+      [&test](PPCContext* ctx) {
+        uint32_t addr = static_cast<uint32_t>(ctx->r[4]);
+        REQUIRE(ctx->r[6] == 1ull);
+        REQUIRE(GuestRead32(test.memory.get(), addr) == 0xAABBCCDDu);
+        FreeScratch(test.memory.get(), ctx);
+      });
+}
+
+// A plain store leaves the granule generation alone, so only the compare
+// against the cached value can catch it.
+TEST_CASE("RESERVED_GUEST_VALUE_CHANGED", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
+  TestFunction test(EmitGuestReservedStoreOnly);
+  test.Run(
+      [&test](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        ctx->r[5] = 0xDEADBEEFull;
+        GuestWrite32(test.memory.get(), addr, 0u);
+        ctx->processor->backend()->ReservedLoad32(ctx, addr);
+        GuestWrite32(test.memory.get(), addr, 0x99999999u);
+      },
+      [&test](PPCContext* ctx) {
+        uint32_t addr = static_cast<uint32_t>(ctx->r[4]);
+        REQUIRE(ctx->r[6] == 0ull);
+        REQUIRE(GuestRead32(test.memory.get(), addr) == 0x99999999u);
+        FreeScratch(test.memory.get(), ctx);
+      });
+}
+
+// Another thread's store to the same granule bumps the generation, so the
+// guest's stwcx. is refused even though the address and value both still match.
+TEST_CASE("RESERVED_GUEST_GRANULE_INVALIDATED", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
+  TestFunction test(EmitGuestReservedStoreOnly);
+  SecondThread other(test.processors[0].get(), test.memory.get());
+  test.Run(
+      [&test, &other](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        ctx->r[5] = 0xDEADBEEFull;
+        GuestWrite32(test.memory.get(), addr, 0u);
+        GuestWrite32(test.memory.get(), addr + 4, 0u);
+
+        auto* backend = ctx->processor->backend();
+        backend->ReservedLoad32(ctx, addr);
+        backend->ReservedLoad32(other.context(), addr + 4);
+        REQUIRE(
+            backend->ReservedStore32(other.context(), addr + 4, 0x12345678u));
+      },
+      [&test](PPCContext* ctx) {
+        uint32_t addr = static_cast<uint32_t>(ctx->r[4]);
+        REQUIRE(ctx->r[6] == 0ull);
+        REQUIRE(GuestRead32(test.memory.get(), addr) == 0u);
+        FreeScratch(test.memory.get(), ctx);
+      });
+}
+
+TEST_CASE("RESERVED_GUEST_ADDRESS_MISMATCH", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
+  TestFunction test(EmitGuestReservedPairOffset);
+  test.Run(
+      [&test](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        ctx->r[5] = 0xDEADBEEFull;
+        GuestWrite32(test.memory.get(), addr, 0x11223344u);
+        GuestWrite32(test.memory.get(), addr + 4, 0u);
+      },
+      [&test](PPCContext* ctx) {
+        uint32_t addr = static_cast<uint32_t>(ctx->r[4]);
+        REQUIRE(ctx->r[3] == 0x11223344ull);
+        REQUIRE(ctx->r[6] == 0ull);
+        REQUIRE(GuestRead32(test.memory.get(), addr + 4) == 0u);
+        FreeScratch(test.memory.get(), ctx);
+      });
+}
+
+// The first store consumes the reservation, so the second has nothing to use.
+TEST_CASE("RESERVED_GUEST_STORE_TWICE", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
+  TestFunction test(EmitGuestReservedPairTwice);
+  test.Run(
+      [&test](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        ctx->r[5] = 0x12345678ull;
+        ctx->r[7] = 0xDEADBEEFull;
+        GuestWrite32(test.memory.get(), addr, 0u);
+      },
+      [&test](PPCContext* ctx) {
+        uint32_t addr = static_cast<uint32_t>(ctx->r[4]);
+        REQUIRE(ctx->r[6] == 1ull);
+        REQUIRE(ctx->r[8] == 0ull);
+        REQUIRE(GuestRead32(test.memory.get(), addr) == 0x12345678u);
+        FreeScratch(test.memory.get(), ctx);
+      });
+}
+
+TEST_CASE("RESERVED_GUEST_PAIR_64", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
+  TestFunction test(EmitGuestReservedPair64);
+  test.Run(
+      [&test](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        ctx->r[5] = 0xAABBCCDDEEFF0011ull;
+        *test.memory->TranslateVirtual<uint64_t*>(addr) =
+            xe::byte_swap(uint64_t(0x1122334455667788ull));
+      },
+      [&test](PPCContext* ctx) {
+        uint32_t addr = static_cast<uint32_t>(ctx->r[4]);
+        REQUIRE(ctx->r[3] == 0x1122334455667788ull);
+        REQUIRE(ctx->r[6] == 1ull);
+        REQUIRE(xe::byte_swap(*test.memory->TranslateVirtual<uint64_t*>(
+                    addr)) == 0xAABBCCDDEEFF0011ull);
         FreeScratch(test.memory.get(), ctx);
       });
 }

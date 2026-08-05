@@ -1198,95 +1198,210 @@ EMITTER_OPCODE_TABLE(OPCODE_STORE_MMIO, STORE_MMIO_I32);
 // ============================================================================
 // OPCODE_RESERVED_LOAD / OPCODE_RESERVED_STORE
 // ============================================================================
-// Helper: get pointer to A64BackendContext.
-// x19 is the dedicated backend context register, so this is a no-op
-// accessor for readability. The returned register is x19.
-static const Xbyak_aarch64::XReg& LoadBackendCtxPtr(A64Emitter& e) {
-  return e.GetBackendCtxReg();
+// RESERVED_LOAD/STORE keep a global per-granule generation counter so a stwcx.
+// on one thread invalidates concurrent lwarx reservations on others (PPC
+// semantics). A bare ldaxr/stlxr pair would only protect against contention on
+// the same host cache line; ABA on the cached value would silently succeed.
+//
+// The sequences below mirror the host-side helpers in a64_backend.cc and share
+// their state, so a reservation taken by either can be completed by the other.
+// Only x22-x28 and v4-v31 hold guest values, so x0-x17 are free scratch here.
+static constexpr uint32_t kReserveFlagBit = 1u << kA64BackendHasReserveBit;
+
+static constexpr uint32_t BackendCtxOffset(size_t offset) {
+  return static_cast<uint32_t>(offset);
 }
 
-// RESERVED_LOAD/STORE call out to host helpers in a64_backend.cc. The helpers
-// share a global per-granule generation counter so a stwcx. on one thread
-// invalidates concurrent lwarx reservations on others (PPC semantics). Doing
-// this purely inline with ldaxr/stlxr would only protect against contention on
-// the same host cache line; ABA on the cached value would silently succeed.
+// Materializes the guest (untranslated) address the reservation is keyed on.
+// Non-constant sources already sit in a callee-saved register that
+// ComputeMemoryAddress leaves alone.
+static WReg GuestAddressReg(A64Emitter& e, const I64Op& src,
+                            const WReg& scratch) {
+  if (src.is_constant) {
+    e.mov(scratch,
+          static_cast<uint64_t>(static_cast<uint32_t>(src.constant())));
+    return scratch;
+  }
+  return WReg(src.reg().getIdx());
+}
+
+// Leaves the granule counter's address in x_granule.
+static void EmitGranuleAddress(A64Emitter& e, const WReg& guest_address,
+                               const XReg& x_granule, const WReg& w_scratch) {
+  e.ldr(x_granule,
+        ptr(e.GetBackendCtxReg(),
+            BackendCtxOffset(offsetof(A64BackendContext, reserve_helper_))));
+  e.ubfx(w_scratch, guest_address, A64_RESERVE_GRANULE_SHIFT,
+         A64_RESERVE_ENTRY_BITS);
+  e.add(x_granule, x_granule, XReg(w_scratch.getIdx()), Xbyak_aarch64::LSL, 2);
+}
+
+static void EmitTryAcquireReservation(A64Emitter& e,
+                                      const WReg& guest_address) {
+  const auto bctx = e.GetBackendCtxReg();
+  EmitGranuleAddress(e, guest_address, e.x8, e.w9);
+  // snapshot the generation first, the acquire pins the value read after
+  e.ldar(e.w10, ptr(e.x8));
+  e.str(e.w10, ptr(bctx, BackendCtxOffset(
+                             offsetof(A64BackendContext, reserve_generation))));
+  e.str(guest_address, ptr(bctx, BackendCtxOffset(offsetof(A64BackendContext,
+                                                           reserve_address))));
+  // lwarx replaces any reservation this thread already held
+  e.ldr(e.w11, ptr(bctx, BackendCtxOffset(offsetof(A64BackendContext, flags))));
+  e.orr(e.w11, e.w11, kReserveFlagBit);
+  e.str(e.w11, ptr(bctx, BackendCtxOffset(offsetof(A64BackendContext, flags))));
+}
+
 struct RESERVED_LOAD_I32
     : Sequence<RESERVED_LOAD_I32, I<OPCODE_RESERVED_LOAD, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    if (i.src1.is_constant) {
-      e.mov(e.w1, static_cast<uint32_t>(i.src1.constant()));
-    } else {
-      e.mov(e.w1, WReg(i.src1.reg().getIdx()));
-    }
-    e.CallNativeSafe(e.backend()->try_acquire_reservation_helper_);
+    const WReg guest_address = GuestAddressReg(e, i.src1, e.w12);
     auto addr = ComputeMemoryAddress(e, i.src1);
+    EmitTryAcquireReservation(e, guest_address);
     e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
-    auto bctx = LoadBackendCtxPtr(e);
     e.mov(e.w0, i.dest);
-    e.str(e.x0, ptr(bctx, static_cast<uint32_t>(offsetof(
-                              A64BackendContext, cached_reserve_value_))));
+    e.str(e.x0, ptr(e.GetBackendCtxReg(),
+                    BackendCtxOffset(
+                        offsetof(A64BackendContext, cached_reserve_value_))));
   }
 };
 struct RESERVED_LOAD_I64
     : Sequence<RESERVED_LOAD_I64, I<OPCODE_RESERVED_LOAD, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    if (i.src1.is_constant) {
-      e.mov(e.w1, static_cast<uint32_t>(i.src1.constant()));
-    } else {
-      e.mov(e.w1, WReg(i.src1.reg().getIdx()));
-    }
-    e.CallNativeSafe(e.backend()->try_acquire_reservation_helper_);
+    const WReg guest_address = GuestAddressReg(e, i.src1, e.w12);
     auto addr = ComputeMemoryAddress(e, i.src1);
+    EmitTryAcquireReservation(e, guest_address);
     e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
-    auto bctx = LoadBackendCtxPtr(e);
-    e.str(i.dest, ptr(bctx, static_cast<uint32_t>(offsetof(
-                                A64BackendContext, cached_reserve_value_))));
+    e.str(i.dest, ptr(e.GetBackendCtxReg(),
+                      BackendCtxOffset(
+                          offsetof(A64BackendContext, cached_reserve_value_))));
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RESERVED_LOAD, RESERVED_LOAD_I32,
                      RESERVED_LOAD_I64);
 
+// x1 = host address, x2 = value to store, both set up by the caller.
+// Writes 1 to dest if the store landed, 0 otherwise.
+static void EmitReservedStore(A64Emitter& e, const I8Op& dest,
+                              const WReg& guest_address, bool bit64) {
+  using namespace Xbyak_aarch64;
+  const auto bctx = e.GetBackendCtxReg();
+  const uint32_t flags_offset =
+      BackendCtxOffset(offsetof(A64BackendContext, flags));
+  const uint32_t dest_idx = dest.reg().getIdx();
+
+  auto& done = e.NewCachedLabel();
+  auto& fail =
+      e.AddToTail([dest_idx, &done](A64Emitter& e, Xbyak_aarch64::Label&) {
+        e.mov(WReg(dest_idx), 0);
+        e.b(done);
+      });
+
+  // stwcx. always clears the reservation, stored or not
+  e.ldr(e.w8, ptr(bctx, flags_offset));
+  e.and_(e.w9, e.w8, static_cast<uint64_t>(~kReserveFlagBit));
+  e.str(e.w9, ptr(bctx, flags_offset));
+  e.tst(e.w8, static_cast<uint64_t>(kReserveFlagBit));
+  e.b(EQ, fail);
+
+  // the reservation must be for the address we're storing to
+  e.ldr(e.w10, ptr(bctx, BackendCtxOffset(
+                             offsetof(A64BackendContext, reserve_address))));
+  e.cmp(e.w10, guest_address);
+  e.b(NE, fail);
+
+  EmitGranuleAddress(e, guest_address, e.x11, e.w13);
+  // a store to this granule since our lwarx kills the reservation
+  e.ldar(e.w14, ptr(e.x11));
+  e.ldr(e.w15, ptr(bctx, BackendCtxOffset(
+                             offsetof(A64BackendContext, reserve_generation))));
+  e.cmp(e.w14, e.w15);
+  e.b(NE, fail);
+
+  e.ldr(e.x16, ptr(bctx, BackendCtxOffset(offsetof(A64BackendContext,
+                                                   cached_reserve_value_))));
+
+  if (e.IsFeatureEnabled(kA64EmitLSE)) {
+    // casal returns the old value in the compare register, so keep a copy
+    e.mov(e.x3, e.x16);
+    if (bit64) {
+      e.casal(e.x16, e.x2, ptr(e.x1));
+      e.cmp(e.x16, e.x3);
+    } else {
+      e.casal(e.w16, e.w2, ptr(e.x1));
+      e.cmp(e.w16, e.w3);
+    }
+    e.b(NE, fail);
+    // the store landed, so kill other reservations on this granule
+    e.mov(e.w17, 1);
+    e.staddl(e.w17, ptr(e.x11));
+  } else {
+    // The exclusive monitor is still held when the compare fails, so that
+    // path has to clear it before joining the common failure tail.
+    auto& cas_mismatch =
+        e.AddToTail([dest_idx, &done](A64Emitter& e, Xbyak_aarch64::Label&) {
+          e.clrex(15);
+          e.mov(WReg(dest_idx), 0);
+          e.b(done);
+        });
+    auto& cas_retry = e.NewCachedLabel();
+    auto& bump_retry = e.NewCachedLabel();
+
+    e.L(cas_retry);
+    if (bit64) {
+      e.ldaxr(e.x14, ptr(e.x1));
+      e.cmp(e.x14, e.x16);
+      e.b(NE, cas_mismatch);
+      e.stlxr(e.w15, e.x2, ptr(e.x1));
+    } else {
+      e.ldaxr(e.w14, ptr(e.x1));
+      e.cmp(e.w14, e.w16);
+      e.b(NE, cas_mismatch);
+      e.stlxr(e.w15, e.w2, ptr(e.x1));
+    }
+    e.cbnz(e.w15, cas_retry);
+
+    // the store landed, so kill other reservations on this granule
+    e.L(bump_retry);
+    e.ldxr(e.w14, ptr(e.x11));
+    e.add(e.w14, e.w14, 1);
+    e.stlxr(e.w15, e.w14, ptr(e.x11));
+    e.cbnz(e.w15, bump_retry);
+  }
+
+  e.mov(dest, 1);
+  e.L(done);
+}
+
 struct RESERVED_STORE_I32
     : Sequence<RESERVED_STORE_I32,
                I<OPCODE_RESERVED_STORE, I8Op, I64Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // Compute host address into x2 first; ComputeMemoryAddress writes w0
-    // and CallNativeSafe will clobber x0-x18 anyway, so x2 must be set up
-    // before populating other arg regs (and before the call).
+    const WReg guest_address = GuestAddressReg(e, i.src1, e.w12);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.add(e.x2, e.GetMembaseReg(), addr);
+    e.add(e.x1, e.GetMembaseReg(), addr);
     if (i.src2.is_constant) {
-      e.mov(e.w3, static_cast<uint32_t>(i.src2.constant()));
+      e.mov(e.w2,
+            static_cast<uint64_t>(static_cast<uint32_t>(i.src2.constant())));
     } else {
-      e.mov(e.w3, WReg(i.src2.reg().getIdx()));
+      e.mov(e.w2, WReg(i.src2.reg().getIdx()));
     }
-    if (i.src1.is_constant) {
-      e.mov(e.w1, static_cast<uint32_t>(i.src1.constant()));
-    } else {
-      e.mov(e.w1, WReg(i.src1.reg().getIdx()));
-    }
-    e.CallNativeSafe(e.backend()->reserved_store_32_helper);
-    e.mov(i.dest, e.w0);
+    EmitReservedStore(e, i.dest, guest_address, false);
   }
 };
 struct RESERVED_STORE_I64
     : Sequence<RESERVED_STORE_I64,
                I<OPCODE_RESERVED_STORE, I8Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const WReg guest_address = GuestAddressReg(e, i.src1, e.w12);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.add(e.x2, e.GetMembaseReg(), addr);
+    e.add(e.x1, e.GetMembaseReg(), addr);
     if (i.src2.is_constant) {
-      e.mov(e.x3, static_cast<uint64_t>(i.src2.constant()));
+      e.mov(e.x2, static_cast<uint64_t>(i.src2.constant()));
     } else {
-      e.mov(e.x3, XReg(i.src2.reg().getIdx()));
+      e.mov(e.x2, XReg(i.src2.reg().getIdx()));
     }
-    if (i.src1.is_constant) {
-      e.mov(e.w1, static_cast<uint32_t>(i.src1.constant()));
-    } else {
-      e.mov(e.w1, WReg(i.src1.reg().getIdx()));
-    }
-    e.CallNativeSafe(e.backend()->reserved_store_64_helper);
-    e.mov(i.dest, e.w0);
+    EmitReservedStore(e, i.dest, guest_address, true);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RESERVED_STORE, RESERVED_STORE_I32,
