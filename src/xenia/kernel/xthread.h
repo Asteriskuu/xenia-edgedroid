@@ -557,6 +557,13 @@ class XThread : public XObject, public cpu::Thread {
     bool wait_alertable = false;    // also re-poll on a pending user APC
     uint32_t wait_epoch = 0;        // object epoch sampled before the last poll
     uint64_t wait_deadline_ms = 0;  // absolute host uptime, 0 = none
+    // Consecutive safepoints that declined to preempt because the guest was at
+    // IRQL >= 2. Bounds the defer so a guest spinning at DISPATCH_LEVEL on a
+    // co-resident holder cannot livelock its dispatch CPU forever.
+    uint32_t preempt_defers_irql = 0;
+    // Same, for holding the global critical region. Diagnostic only - yielding
+    // there would let a co-resident fiber re-enter the recursive lock.
+    uint32_t preempt_defers_lock = 0;
   };
   SchedulerLinks& scheduler_links() { return scheduler_links_; }
 
