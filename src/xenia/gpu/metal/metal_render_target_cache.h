@@ -190,6 +190,49 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
                uint32_t& written_length,
                MTL::CommandBuffer* command_buffer = nullptr);
 
+  // Render encoder state the transfer draws overwrite when they are encoded
+  // into the guest's own render pass.
+  using DrawPassTransferEncoderMutationMask = uint32_t;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationNone = 0;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationPipeline = 1u << 0;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationDepthStencil = 1u << 1;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationStencilReference = 1u << 2;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationViewport = 1u << 3;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationScissor = 1u << 4;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationRasterizer = 1u << 5;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationVertexSlot0 = 1u << 6;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationVertexSlot1 = 1u << 7;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationFragmentSlot0 = 1u << 8;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationFragmentSlot1 = 1u << 9;
+  static constexpr DrawPassTransferEncoderMutationMask
+      kDrawPassTransferEncoderMutationFragmentTextures = 1u << 10;
+
+  bool HasPendingDrawPassTransfers() const {
+    return pending_draw_pass_transfer_mask_ != 0;
+  }
+  // Encodes the queued transfers as draws at the head of the guest's pass.
+  // Failure leaves the queue intact for FlushPendingDrawPassTransfers;
+  // mutations_out describes what was already encoded either way.
+  bool EncodePendingDrawPassTransfers(
+      MTL::RenderCommandEncoder* encoder,
+      MTL::RenderPassDescriptor* pass_descriptor,
+      DrawPassTransferEncoderMutationMask* mutations_out);
+  // Runs the queued transfers in standalone passes instead. Every path that
+  // abandons the queue has to come through here - ownership is already marked
+  // transferred, so dropping it corrupts the destination.
+  bool FlushPendingDrawPassTransfers();
+
  protected:
   // Virtual methods from RenderTargetCache
   uint32_t GetMaxRenderTargetWidth() const override;
@@ -414,6 +457,19 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
     };
   };
 
+  struct TransferAttachmentFormats {
+    TransferColorAttachmentFormats color_attachment_formats = {};
+    MTL::PixelFormat depth_attachment_format = MTL::PixelFormatInvalid;
+    MTL::PixelFormat stencil_attachment_format = MTL::PixelFormatInvalid;
+  };
+
+  struct TransferRectanglePlan {
+    uint32_t transfer_index = 0;
+    std::array<Transfer::Rectangle, Transfer::kMaxRectanglesWithCutout>
+        rectangles = {};
+    uint32_t rectangle_count = 0;
+  };
+
   struct TransferInvocation {
     Transfer transfer;
     TransferShaderKey shader_key;
@@ -479,6 +535,18 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
 
   MetalRenderTarget* current_color_targets_[4] = {};
   MetalRenderTarget* current_depth_target_ = nullptr;
+
+  // Ownership transfers deferred to the head of the guest's own render pass,
+  // indexed like the base class's accumulated targets (0 depth, 1..4 color).
+  std::array<std::vector<Transfer>, 1 + xenos::kMaxColorRenderTargets>
+      pending_draw_pass_transfers_;
+  std::array<RenderTarget*, 1 + xenos::kMaxColorRenderTargets>
+      pending_draw_pass_render_targets_ = {};
+  uint32_t pending_draw_pass_transfer_mask_ = 0;
+  uint32_t pending_draw_pass_full_overwrite_mask_ = 0;
+  // Subset of the above that the current render pass descriptor was built with
+  // a DontCare load action for.
+  uint32_t pending_draw_pass_load_dontcare_mask_ = 0;
 
   // Track the last REAL (non-dummy) render targets for capture
   MetalRenderTarget* last_real_color_targets_[4] = {};
@@ -576,12 +644,44 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   // Ownership transfer support - copies data between render targets when
   // EDRAM regions are aliased between different RT configurations.
   // This mirrors D3D12/Vulkan's PerformTransfersAndResolveClears.
-  void PerformTransfersAndResolveClears(
+  // With active_render_encoder the transfers are encoded as draws into that
+  // encoder's pass rather than into standalone passes of their own, which rules
+  // out resolve clears, host depth stores and the blit fast path.
+  bool PerformTransfersAndResolveClears(
       uint32_t render_target_count, RenderTarget* const* render_targets,
       const std::vector<Transfer>* render_target_transfers,
       const uint64_t* render_target_resolve_clear_values = nullptr,
       const Transfer::Rectangle* resolve_clear_rectangle = nullptr,
-      MTL::CommandBuffer* command_buffer = nullptr);
+      MTL::CommandBuffer* command_buffer = nullptr,
+      MTL::RenderCommandEncoder* active_render_encoder = nullptr,
+      MTL::RenderPassDescriptor* active_render_pass_descriptor = nullptr,
+      DrawPassTransferEncoderMutationMask* mutations_out = nullptr);
+
+  TransferShaderKey GetTransferShaderKey(
+      RenderTargetKey source_key, RenderTargetKey dest_key,
+      const RenderTargetKey* host_depth_source_key,
+      bool host_depth_source_is_copy, bool stencil_bit,
+      bool dest_sample_id_from_sample_default) const;
+  bool BuildTransferRectanglePlans(
+      RenderTargetKey dest_key, const std::vector<Transfer>& transfers,
+      const Transfer::Rectangle* cutout, bool require_all_rectangles,
+      std::vector<TransferRectanglePlan>& transfer_rectangles_out) const;
+  bool GetActiveTransferAttachmentFormats(
+      MTL::RenderPassDescriptor* pass_descriptor,
+      TransferAttachmentFormats& attachment_formats_out) const;
+  bool GetCurrentTransferAttachmentFormats(
+      TransferAttachmentFormats& attachment_formats_out) const;
+  bool CanQueueDrawPassTransfers(uint32_t render_target_index,
+                                 RenderTarget* const* render_targets,
+                                 const std::vector<Transfer>& transfers) const;
+  bool PendingDrawPassTransfersFullyOverwriteTarget(
+      uint32_t render_target_index, RenderTarget* render_target,
+      const std::vector<Transfer>& transfers) const;
+  bool PreflightPendingDrawPassTransfers(
+      const TransferAttachmentFormats& attachment_formats);
+  bool PreflightPendingDrawPassTransfers(
+      MTL::RenderPassDescriptor* pass_descriptor);
+  void ClearPendingDrawPassTransfers();
 
   // Writes contents of host render targets within rectangles from
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.

@@ -68,6 +68,10 @@ DEFINE_bool(
     metal_transfer_msaa_sample_id, true,
     "Use sample_id in Metal transfer shaders for MSAA (sample-rate shading)",
     "Metal");
+DEFINE_bool(metal_transfer_in_draw_pass, false,
+            "Encode render target ownership transfers at the head of the "
+            "guest's own render pass instead of in passes of their own",
+            "Metal");
 DEFINE_int32(metal_memory_log_rate, 0,
              "Log Metal render target/pipeline/instance buffer sizes every N "
              "frames (0 to disable)",
@@ -810,6 +814,7 @@ bool MetalRenderTargetCache::Initialize() {
 }
 
 void MetalRenderTargetCache::Shutdown(bool from_destructor) {
+  ClearPendingDrawPassTransfers();
   if (!from_destructor) {
     ClearCache();
   }
@@ -3003,6 +3008,8 @@ void MetalRenderTargetCache::ShutdownEdramComputeShaders() {
 }
 
 void MetalRenderTargetCache::ClearCache() {
+  ClearPendingDrawPassTransfers();
+
   // Clear current bindings
   for (uint32_t i = 0; i < 4; ++i) {
     current_color_targets_[i] = nullptr;
@@ -3021,6 +3028,8 @@ void MetalRenderTargetCache::ClearCache() {
 }
 
 void MetalRenderTargetCache::BeginFrame() {
+  (void)FlushPendingDrawPassTransfers();
+
   ++frame_id_;
 
   // Clear the tracking of which render targets have been cleared this frame
@@ -3046,6 +3055,13 @@ void MetalRenderTargetCache::BeginFrame() {
 bool MetalRenderTargetCache::Update(
     bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask, const Shader& vertex_shader) {
+  // Reaching another update means the command processor never got to encode
+  // the queued transfers into a pass. Their ownership is already transferred,
+  // so run them standalone before the base update reshuffles ownership again.
+  if (!FlushPendingDrawPassTransfers()) {
+    return false;
+  }
+
   // Use the base class logic to update the current render target setup.
   if (!RenderTargetCache::Update(is_rasterization_done,
                                  normalized_depth_control,
@@ -3116,15 +3132,495 @@ bool MetalRenderTargetCache::Update(
   // EDRAM regions are aliased between different RT configurations.
   // The base class Update() populates last_update_transfers() with the needed
   // transfers based on EDRAM tile overlaps.
-  PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
-                                   accumulated_targets, last_update_transfers(),
-                                   nullptr, nullptr, nullptr);
+  const std::vector<Transfer>* update_transfers = last_update_transfers();
+  if (::cvars::metal_transfer_in_draw_pass) {
+    std::array<std::vector<Transfer>, 1 + xenos::kMaxColorRenderTargets>
+        fallback_transfers;
+    bool fallback_transfer_work = false;
+    for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+      const std::vector<Transfer>& transfers = update_transfers[i];
+      if (transfers.empty()) {
+        continue;
+      }
+      if (!CanQueueDrawPassTransfers(i, accumulated_targets, transfers)) {
+        fallback_transfers[i] = transfers;
+        fallback_transfer_work = true;
+        continue;
+      }
+      pending_draw_pass_render_targets_[i] = accumulated_targets[i];
+      pending_draw_pass_transfers_[i] = transfers;
+      pending_draw_pass_transfer_mask_ |= uint32_t(1) << i;
+      if (PendingDrawPassTransfersFullyOverwriteTarget(
+              i, accumulated_targets[i], transfers)) {
+        pending_draw_pass_full_overwrite_mask_ |= uint32_t(1) << i;
+      }
+      // The transfer draws supersede the clear the descriptor would have done,
+      // matching what the standalone path does with the flag.
+      auto* dest_metal_rt =
+          static_cast<MetalRenderTarget*>(accumulated_targets[i]);
+      if (dest_metal_rt->needs_initial_clear()) {
+        dest_metal_rt->SetNeedsInitialClear(false);
+      }
+      render_pass_descriptor_dirty_ = true;
+    }
+    if (fallback_transfer_work) {
+      PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+                                       accumulated_targets,
+                                       fallback_transfers.data());
+    }
+    // Queue only what the pass the descriptor will describe can actually
+    // encode, so eligibility is not re-decided at encode time.
+    if (HasPendingDrawPassTransfers()) {
+      TransferAttachmentFormats attachment_formats;
+      if (!GetCurrentTransferAttachmentFormats(attachment_formats) ||
+          !PreflightPendingDrawPassTransfers(attachment_formats)) {
+        if (!FlushPendingDrawPassTransfers()) {
+          return false;
+        }
+      }
+    }
+  } else {
+    PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
+                                     accumulated_targets, update_transfers);
+  }
 
   // Only mark render pass descriptor as dirty if targets actually changed
   if (targets_changed) {
     render_pass_descriptor_dirty_ = true;
   }
 
+  return true;
+}
+
+void MetalRenderTargetCache::ClearPendingDrawPassTransfers() {
+  // A DontCare load action only holds for the one pass that also encodes the
+  // transfers. Patch the descriptor back in place rather than dirtying it: a
+  // rebuild would hand the command processor a new descriptor and cost the
+  // encoder restart this whole path exists to avoid, and an encoder already
+  // created from it has its own copy of the load actions.
+  if (pending_draw_pass_load_dontcare_mask_ && cached_render_pass_descriptor_) {
+    if (pending_draw_pass_load_dontcare_mask_ & 1) {
+      if (auto* depth_attachment =
+              cached_render_pass_descriptor_->depthAttachment()) {
+        depth_attachment->setLoadAction(MTL::LoadActionLoad);
+      }
+      if (auto* stencil_attachment =
+              cached_render_pass_descriptor_->stencilAttachment()) {
+        stencil_attachment->setLoadAction(MTL::LoadActionLoad);
+      }
+    }
+    if (auto* color_attachments =
+            cached_render_pass_descriptor_->colorAttachments()) {
+      for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+        if (!(pending_draw_pass_load_dontcare_mask_ & (uint32_t(2) << i))) {
+          continue;
+        }
+        if (auto* color_attachment = color_attachments->object(i)) {
+          color_attachment->setLoadAction(MTL::LoadActionLoad);
+        }
+      }
+    }
+  }
+
+  for (auto& transfers : pending_draw_pass_transfers_) {
+    transfers.clear();
+  }
+  pending_draw_pass_render_targets_.fill(nullptr);
+  pending_draw_pass_transfer_mask_ = 0;
+  pending_draw_pass_full_overwrite_mask_ = 0;
+  pending_draw_pass_load_dontcare_mask_ = 0;
+}
+
+bool MetalRenderTargetCache::BuildTransferRectanglePlans(
+    RenderTargetKey dest_key, const std::vector<Transfer>& transfers,
+    const Transfer::Rectangle* cutout, bool require_all_rectangles,
+    std::vector<TransferRectanglePlan>& transfer_rectangles_out) const {
+  transfer_rectangles_out.clear();
+  transfer_rectangles_out.reserve(transfers.size());
+  for (uint32_t transfer_index = 0; transfer_index < transfers.size();
+       ++transfer_index) {
+    const Transfer& transfer = transfers[transfer_index];
+    TransferRectanglePlan plan;
+    plan.transfer_index = transfer_index;
+    plan.rectangle_count = transfer.GetRectangles(
+        dest_key.base_tiles, dest_key.GetPitchTiles(), dest_key.msaa_samples,
+        IsKey64bpp(dest_key), plan.rectangles.data(), cutout);
+    if (!plan.rectangle_count) {
+      if (require_all_rectangles) {
+        transfer_rectangles_out.clear();
+        return false;
+      }
+      continue;
+    }
+    transfer_rectangles_out.push_back(plan);
+  }
+  return true;
+}
+
+bool MetalRenderTargetCache::CanQueueDrawPassTransfers(
+    uint32_t render_target_index, RenderTarget* const* render_targets,
+    const std::vector<Transfer>& transfers) const {
+  if (!render_targets || transfers.empty() ||
+      render_target_index > xenos::kMaxColorRenderTargets) {
+    return false;
+  }
+  auto* dest_metal_rt =
+      static_cast<MetalRenderTarget*>(render_targets[render_target_index]);
+  if (!dest_metal_rt) {
+    return false;
+  }
+  RenderTargetKey dest_key = dest_metal_rt->key();
+  if (dest_key.is_depth != (render_target_index == 0)) {
+    return false;
+  }
+
+  // The transfer draws have to write through the very texture the pass binds.
+  MTL::Texture* dest_draw_texture = dest_metal_rt->draw_texture();
+  bool dest_is_uint = false;
+  if (dest_key.is_depth) {
+    if (!dest_draw_texture || dest_draw_texture != dest_metal_rt->texture() ||
+        dest_draw_texture->pixelFormat() !=
+            GetDepthPixelFormat(dest_key.GetDepthFormat())) {
+      return false;
+    }
+  } else {
+    MTL::PixelFormat transfer_format = GetColorOwnershipTransferPixelFormat(
+        dest_key.GetColorFormat(), &dest_is_uint);
+    if (dest_is_uint || !dest_draw_texture ||
+        dest_draw_texture != dest_metal_rt->transfer_texture() ||
+        GetColorDrawPixelFormat(dest_key.GetColorFormat()) != transfer_format ||
+        dest_draw_texture->pixelFormat() != transfer_format) {
+      return false;
+    }
+  }
+
+  // Sampling a texture the same pass has bound as an attachment is undefined,
+  // so anything the draw pass will hold has to stay out of the sources.
+  auto is_active_draw_pass_texture = [&](const MetalRenderTarget* rt,
+                                         MTL::Texture* texture) -> bool {
+    for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+      auto* active_rt = static_cast<MetalRenderTarget*>(render_targets[i]);
+      if (!active_rt) {
+        continue;
+      }
+      MTL::Texture* active_draw_texture = active_rt->draw_texture();
+      if (rt == active_rt || texture == active_draw_texture ||
+          (rt && rt->draw_texture() == active_draw_texture)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (const Transfer& transfer : transfers) {
+    if (!transfer.source) {
+      return false;
+    }
+    auto* source_rt = static_cast<MetalRenderTarget*>(transfer.source);
+    if (source_rt == dest_metal_rt) {
+      return false;
+    }
+    RenderTargetKey source_key = source_rt->key();
+    if (transfer.host_depth_source) {
+      if (!dest_key.is_depth) {
+        return false;
+      }
+      auto* host_depth_rt =
+          static_cast<MetalRenderTarget*>(transfer.host_depth_source);
+      // A host depth source that is the destination itself goes through the
+      // EDRAM round trip, which needs a compute pass of its own.
+      if (!host_depth_rt || host_depth_rt == dest_metal_rt) {
+        return false;
+      }
+      RenderTargetKey host_depth_key = host_depth_rt->key();
+      MTL::Texture* host_depth_texture = host_depth_rt->texture();
+      if (!host_depth_key.is_depth || !host_depth_texture ||
+          host_depth_texture->pixelFormat() !=
+              GetDepthPixelFormat(host_depth_key.GetDepthFormat()) ||
+          is_active_draw_pass_texture(host_depth_rt, host_depth_texture)) {
+        return false;
+      }
+    }
+
+    MTL::Texture* source_texture = source_key.is_depth
+                                       ? source_rt->texture()
+                                       : source_rt->transfer_texture();
+    if (!source_texture) {
+      return false;
+    }
+    MTL::PixelFormat source_format =
+        source_key.is_depth ? GetDepthPixelFormat(source_key.GetDepthFormat())
+                            : GetColorOwnershipTransferPixelFormat(
+                                  source_key.GetColorFormat(), nullptr);
+    if (source_texture->pixelFormat() != source_format ||
+        is_active_draw_pass_texture(source_rt, source_texture)) {
+      return false;
+    }
+  }
+
+  std::vector<TransferRectanglePlan> transfer_rectangles;
+  return BuildTransferRectanglePlans(dest_key, transfers, nullptr, true,
+                                     transfer_rectangles);
+}
+
+bool MetalRenderTargetCache::PendingDrawPassTransfersFullyOverwriteTarget(
+    uint32_t render_target_index, RenderTarget* render_target,
+    const std::vector<Transfer>& transfers) const {
+  if (!render_target || transfers.empty() ||
+      render_target_index > xenos::kMaxColorRenderTargets) {
+    return false;
+  }
+
+  auto* dest_metal_rt = static_cast<MetalRenderTarget*>(render_target);
+  RenderTargetKey dest_key = dest_metal_rt->key();
+  MTL::Texture* dest_texture = dest_metal_rt->draw_texture();
+  if (!dest_texture) {
+    return false;
+  }
+  uint32_t dest_width = uint32_t(dest_texture->width());
+  uint32_t dest_height = uint32_t(dest_texture->height());
+  if (!dest_width || !dest_height) {
+    return false;
+  }
+
+  std::vector<TransferRectanglePlan> transfer_rectangles;
+  if (!BuildTransferRectanglePlans(dest_key, transfers, nullptr, true,
+                                   transfer_rectangles) ||
+      transfer_rectangles.size() != transfers.size()) {
+    return false;
+  }
+  for (const TransferRectanglePlan& transfer_plan : transfer_rectangles) {
+    if (transfer_plan.rectangle_count != 1) {
+      return false;
+    }
+    const Transfer::Rectangle& rect = transfer_plan.rectangles[0];
+    if (rect.x_pixels || rect.y_pixels ||
+        rect.width_pixels * draw_resolution_scale_x() < dest_width ||
+        rect.height_pixels * draw_resolution_scale_y() < dest_height) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool MetalRenderTargetCache::GetActiveTransferAttachmentFormats(
+    MTL::RenderPassDescriptor* pass_descriptor,
+    TransferAttachmentFormats& attachment_formats_out) const {
+  attachment_formats_out = TransferAttachmentFormats();
+  if (!pass_descriptor) {
+    return false;
+  }
+
+  if (auto* color_attachments = pass_descriptor->colorAttachments()) {
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      auto* color_attachment = color_attachments->object(i);
+      MTL::Texture* texture =
+          color_attachment ? color_attachment->texture() : nullptr;
+      if (texture) {
+        attachment_formats_out.color_attachment_formats[i] =
+            texture->pixelFormat();
+      }
+    }
+  }
+  if (auto* depth_attachment = pass_descriptor->depthAttachment()) {
+    if (MTL::Texture* texture = depth_attachment->texture()) {
+      attachment_formats_out.depth_attachment_format = texture->pixelFormat();
+    }
+  }
+  if (auto* stencil_attachment = pass_descriptor->stencilAttachment()) {
+    if (MTL::Texture* texture = stencil_attachment->texture()) {
+      attachment_formats_out.stencil_attachment_format = texture->pixelFormat();
+    }
+  }
+  return true;
+}
+
+bool MetalRenderTargetCache::GetCurrentTransferAttachmentFormats(
+    TransferAttachmentFormats& attachment_formats_out) const {
+  attachment_formats_out = TransferAttachmentFormats();
+
+  bool has_color_attachment = false;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    MTL::Texture* texture = current_color_targets_[i]
+                                ? current_color_targets_[i]->draw_texture()
+                                : nullptr;
+    if (!texture) {
+      continue;
+    }
+    attachment_formats_out.color_attachment_formats[i] = texture->pixelFormat();
+    has_color_attachment = true;
+  }
+  // GetRenderPassDescriptor attaches a dummy 8_8_8_8 target at slot 0 when the
+  // guest binds no color target.
+  if (!has_color_attachment) {
+    attachment_formats_out.color_attachment_formats[0] =
+        GetColorDrawPixelFormat(xenos::ColorRenderTargetFormat::k_8_8_8_8);
+  }
+
+  MTL::Texture* depth_texture =
+      current_depth_target_ ? current_depth_target_->draw_texture() : nullptr;
+  if (depth_texture) {
+    MTL::PixelFormat depth_pixel_format = depth_texture->pixelFormat();
+    attachment_formats_out.depth_attachment_format = depth_pixel_format;
+    if (depth_pixel_format == MTL::PixelFormatDepth32Float_Stencil8 ||
+        depth_pixel_format == MTL::PixelFormatDepth24Unorm_Stencil8 ||
+        depth_pixel_format == MTL::PixelFormatX32_Stencil8) {
+      attachment_formats_out.stencil_attachment_format = depth_pixel_format;
+    }
+  }
+  return true;
+}
+
+bool MetalRenderTargetCache::PreflightPendingDrawPassTransfers(
+    const TransferAttachmentFormats& attachment_formats) {
+  if (!HasPendingDrawPassTransfers()) {
+    return true;
+  }
+
+  for (uint32_t i = 0; i <= xenos::kMaxColorRenderTargets; ++i) {
+    if (!(pending_draw_pass_transfer_mask_ & (uint32_t(1) << i))) {
+      continue;
+    }
+    auto* dest_metal_rt =
+        static_cast<MetalRenderTarget*>(pending_draw_pass_render_targets_[i]);
+    if (!dest_metal_rt || pending_draw_pass_transfers_[i].empty()) {
+      return false;
+    }
+
+    RenderTargetKey dest_key = dest_metal_rt->key();
+    uint32_t dest_sample_count = MsaaSamplesToCount(dest_key.msaa_samples);
+    bool dest_is_uint = false;
+    uint32_t color_attachment_index = 0;
+    MTL::PixelFormat dest_format = MTL::PixelFormatInvalid;
+    if (dest_key.is_depth) {
+      dest_format = GetDepthPixelFormat(dest_key.GetDepthFormat());
+      // Every depth destination also runs the stencil clear and the per-bit
+      // stencil draws.
+      if (i != 0 || attachment_formats.depth_attachment_format != dest_format ||
+          !GetTransferDepthStencilState(true) ||
+          !GetTransferStencilClearState() ||
+          !GetOrCreateTransferClearPipeline(
+              dest_format, false, true, dest_sample_count, 0,
+              &attachment_formats.color_attachment_formats,
+              attachment_formats.depth_attachment_format,
+              attachment_formats.stencil_attachment_format)) {
+        return false;
+      }
+      for (uint32_t bit = 0; bit < 8; ++bit) {
+        if (!GetTransferStencilBitState(bit)) {
+          return false;
+        }
+      }
+      if ((dest_format == MTL::PixelFormatDepth32Float_Stencil8 ||
+           dest_format == MTL::PixelFormatDepth24Unorm_Stencil8) &&
+          attachment_formats.stencil_attachment_format != dest_format) {
+        return false;
+      }
+    } else {
+      if (!i) {
+        return false;
+      }
+      color_attachment_index = i - 1;
+      dest_format = GetColorOwnershipTransferPixelFormat(
+          dest_key.GetColorFormat(), &dest_is_uint);
+      if (dest_is_uint ||
+          attachment_formats.color_attachment_formats[color_attachment_index] !=
+              dest_format ||
+          !GetTransferNoDepthStencilState()) {
+        return false;
+      }
+    }
+
+    bool dest_sample_id_default =
+        dest_sample_count > 1 && ::cvars::metal_transfer_msaa_sample_id;
+    for (const Transfer& transfer : pending_draw_pass_transfers_[i]) {
+      auto* source_rt = static_cast<MetalRenderTarget*>(transfer.source);
+      if (!source_rt) {
+        return false;
+      }
+      RenderTargetKey source_key = source_rt->key();
+      if (source_key.is_depth && !GetStencilTextureView(source_rt)) {
+        return false;
+      }
+      RenderTargetKey host_depth_key;
+      bool has_host_depth = transfer.host_depth_source != nullptr;
+      if (has_host_depth) {
+        host_depth_key =
+            static_cast<MetalRenderTarget*>(transfer.host_depth_source)->key();
+      }
+      // CanQueueDrawPassTransfers rejected a host depth source that is the
+      // destination, so the copy-through-EDRAM mode never appears here.
+      for (uint32_t stencil_bit = 0; stencil_bit <= uint32_t(dest_key.is_depth);
+           ++stencil_bit) {
+        TransferShaderKey shader_key = GetTransferShaderKey(
+            source_key, dest_key,
+            (has_host_depth && !stencil_bit) ? &host_depth_key : nullptr, false,
+            stencil_bit != 0, dest_sample_id_default);
+        for (uint32_t tile_instanced = 0;
+             tile_instanced <=
+             uint32_t(::cvars::metal_transfer_tile_instancing);
+             ++tile_instanced) {
+          if (!GetOrCreateTransferPipelines(
+                  shader_key, dest_format, dest_is_uint, tile_instanced != 0,
+                  color_attachment_index,
+                  &attachment_formats.color_attachment_formats,
+                  attachment_formats.depth_attachment_format,
+                  attachment_formats.stencil_attachment_format)) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+bool MetalRenderTargetCache::PreflightPendingDrawPassTransfers(
+    MTL::RenderPassDescriptor* pass_descriptor) {
+  TransferAttachmentFormats attachment_formats;
+  if (!GetActiveTransferAttachmentFormats(pass_descriptor,
+                                          attachment_formats)) {
+    return false;
+  }
+  return PreflightPendingDrawPassTransfers(attachment_formats);
+}
+
+bool MetalRenderTargetCache::EncodePendingDrawPassTransfers(
+    MTL::RenderCommandEncoder* encoder,
+    MTL::RenderPassDescriptor* pass_descriptor,
+    DrawPassTransferEncoderMutationMask* mutations_out) {
+  if (mutations_out) {
+    *mutations_out = kDrawPassTransferEncoderMutationNone;
+  }
+  if (!HasPendingDrawPassTransfers()) {
+    return true;
+  }
+  if (!encoder || !PreflightPendingDrawPassTransfers(pass_descriptor)) {
+    return false;
+  }
+  if (!PerformTransfersAndResolveClears(
+          1 + xenos::kMaxColorRenderTargets,
+          pending_draw_pass_render_targets_.data(),
+          pending_draw_pass_transfers_.data(), nullptr, nullptr, nullptr,
+          encoder, pass_descriptor, mutations_out)) {
+    return false;
+  }
+  ClearPendingDrawPassTransfers();
+  return true;
+}
+
+bool MetalRenderTargetCache::FlushPendingDrawPassTransfers() {
+  if (!HasPendingDrawPassTransfers()) {
+    return true;
+  }
+  if (!PerformTransfersAndResolveClears(
+          1 + xenos::kMaxColorRenderTargets,
+          pending_draw_pass_render_targets_.data(),
+          pending_draw_pass_transfers_.data())) {
+    return false;
+  }
+  ClearPendingDrawPassTransfers();
   return true;
 }
 
@@ -3563,6 +4059,24 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
   cached_render_pass_descriptor_->retain();
   cached_render_pass_descriptor_sample_count_ = expected_sample_count;
 
+  // Queued transfers that rewrite a destination in full make loading its old
+  // contents into tile memory pointless, but only for the pass that actually
+  // encodes them - ClearPendingDrawPassTransfers rebuilds this if it doesn't.
+  pending_draw_pass_load_dontcare_mask_ = 0;
+  if (HasPendingDrawPassTransfers()) {
+    TransferAttachmentFormats attachment_formats;
+    if (GetCurrentTransferAttachmentFormats(attachment_formats) &&
+        PreflightPendingDrawPassTransfers(attachment_formats)) {
+      pending_draw_pass_load_dontcare_mask_ =
+          pending_draw_pass_transfer_mask_ &
+          pending_draw_pass_full_overwrite_mask_;
+    }
+  }
+  auto pending_load_dontcare = [this](uint32_t pending_index) {
+    return (pending_draw_pass_load_dontcare_mask_ &
+            (uint32_t(1) << pending_index)) != 0;
+  };
+
   bool has_any_render_target = false;
   bool has_any_color_target = false;
   bool needs_descriptor_refresh = false;
@@ -3580,13 +4094,15 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
     // Clear on first bind to avoid synchronous clears at creation.
     uint32_t depth_key = current_depth_target_->key().key;
     bool depth_needs_clear = current_depth_target_->needs_initial_clear();
+    bool depth_load_dontcare = pending_load_dontcare(0);
     if (depth_needs_clear) {
       depth_attachment->setLoadAction(MTL::LoadActionClear);
       depth_attachment->setClearDepth(1.0);
       current_depth_target_->SetNeedsInitialClear(false);
       needs_descriptor_refresh = true;
     } else {
-      depth_attachment->setLoadAction(MTL::LoadActionLoad);
+      depth_attachment->setLoadAction(
+          depth_load_dontcare ? MTL::LoadActionDontCare : MTL::LoadActionLoad);
     }
     depth_attachment->setStoreAction(MTL::StoreActionStore);
 
@@ -3605,7 +4121,11 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
         stencil_attachment->setLoadAction(MTL::LoadActionClear);
         stencil_attachment->setClearStencil(0);
       } else {
-        stencil_attachment->setLoadAction(MTL::LoadActionLoad);
+        // The queued depth transfers clear and rewrite stencil over the same
+        // rectangles they cover.
+        stencil_attachment->setLoadAction(depth_load_dontcare
+                                              ? MTL::LoadActionDontCare
+                                              : MTL::LoadActionLoad);
       }
       stencil_attachment->setStoreAction(MTL::StoreActionStore);
     }
@@ -3645,7 +4165,9 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
         current_color_targets_[i]->SetNeedsInitialClear(false);
         needs_descriptor_refresh = true;
       } else {
-        color_attachment->setLoadAction(MTL::LoadActionLoad);
+        color_attachment->setLoadAction(pending_load_dontcare(i + 1)
+                                            ? MTL::LoadActionDontCare
+                                            : MTL::LoadActionLoad);
       }
       color_attachment->setStoreAction(MTL::StoreActionStore);
 
@@ -4928,18 +5450,98 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
   return false;
 }
 
-void MetalRenderTargetCache::PerformTransfersAndResolveClears(
+MetalRenderTargetCache::TransferShaderKey
+MetalRenderTargetCache::GetTransferShaderKey(
+    RenderTargetKey source_key, RenderTargetKey dest_key,
+    const RenderTargetKey* host_depth_source_key,
+    bool host_depth_source_is_copy, bool stencil_bit,
+    bool dest_sample_id_from_sample_default) const {
+  TransferShaderKey shader_key = {};
+  shader_key.source_msaa_samples = source_key.msaa_samples;
+  shader_key.dest_msaa_samples = dest_key.msaa_samples;
+  shader_key.source_resource_format = source_key.resource_format;
+  shader_key.dest_resource_format = dest_key.resource_format;
+  shader_key.host_depth_source_msaa_samples = xenos::MsaaSamples::k1X;
+  shader_key.host_depth_source_is_copy = 0;
+
+  if (stencil_bit) {
+    shader_key.mode = source_key.is_depth ? TransferMode::kDepthToStencilBit
+                                          : TransferMode::kColorToStencilBit;
+  } else if (dest_key.is_depth) {
+    if (host_depth_source_key) {
+      shader_key.mode = source_key.is_depth
+                            ? TransferMode::kDepthAndHostDepthToDepth
+                            : TransferMode::kColorAndHostDepthToDepth;
+      shader_key.host_depth_source_is_copy = host_depth_source_is_copy ? 1 : 0;
+      shader_key.host_depth_source_msaa_samples =
+          host_depth_source_is_copy ? xenos::MsaaSamples::k1X
+                                    : host_depth_source_key->msaa_samples;
+    } else {
+      shader_key.mode = source_key.is_depth ? TransferMode::kDepthToDepth
+                                            : TransferMode::kColorToDepth;
+    }
+  } else {
+    shader_key.mode = source_key.is_depth ? TransferMode::kDepthToColor
+                                          : TransferMode::kColorToColor;
+  }
+
+  // Sample-rate shading only buys anything when a multisample source is being
+  // resolved per sample.
+  bool dest_sample_id_from_sample = dest_sample_id_from_sample_default;
+  if (dest_sample_id_from_sample) {
+    const TransferModeInfo& mode_info =
+        kTransferModeInfos[size_t(shader_key.mode)];
+    bool source_is_multisample =
+        source_key.msaa_samples != xenos::MsaaSamples::k1X;
+    bool host_depth_is_multisample =
+        mode_info.uses_host_depth &&
+        shader_key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X &&
+        !shader_key.host_depth_source_is_copy;
+    if (!source_is_multisample && !host_depth_is_multisample) {
+      dest_sample_id_from_sample = false;
+    }
+  }
+  shader_key.dest_sample_id_from_sample = dest_sample_id_from_sample ? 1u : 0u;
+  return shader_key;
+}
+
+bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
     uint32_t render_target_count, RenderTarget* const* render_targets,
     const std::vector<Transfer>* render_target_transfers,
     const uint64_t* render_target_resolve_clear_values,
     const Transfer::Rectangle* resolve_clear_rectangle,
-    MTL::CommandBuffer* command_buffer) {
+    MTL::CommandBuffer* command_buffer,
+    MTL::RenderCommandEncoder* active_render_encoder,
+    MTL::RenderPassDescriptor* active_render_pass_descriptor,
+    DrawPassTransferEncoderMutationMask* mutations_out) {
+  if (mutations_out) {
+    *mutations_out = kDrawPassTransferEncoderMutationNone;
+  }
   if (!render_targets || !render_target_transfers) {
-    return;
+    return false;
   }
 
   bool resolve_clear_needed =
       render_target_resolve_clear_values && resolve_clear_rectangle;
+  // Resolve clears build a pass of their own around a clear load action, which
+  // the guest's already-started pass cannot provide.
+  bool use_active_render_encoder = active_render_encoder != nullptr;
+  if (use_active_render_encoder &&
+      (resolve_clear_needed || !active_render_pass_descriptor)) {
+    return false;
+  }
+  auto mark_encoder_mutation =
+      [&](DrawPassTransferEncoderMutationMask mutations) {
+        if (use_active_render_encoder && mutations_out) {
+          *mutations_out |= mutations;
+        }
+      };
+  TransferAttachmentFormats active_attachment_formats;
+  if (use_active_render_encoder &&
+      !GetActiveTransferAttachmentFormats(active_render_pass_descriptor,
+                                          active_attachment_formats)) {
+    return false;
+  }
   bool any_work = false;
   bool host_depth_store_needed = false;
   for (uint32_t i = 0; i < render_target_count; ++i) {
@@ -4966,21 +5568,28 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
     }
   }
   if (!any_work) {
-    return;
+    return true;
+  }
+  // The host depth store is a compute dispatch, which cannot be encoded into a
+  // render pass.
+  if (use_active_render_encoder && host_depth_store_needed) {
+    return false;
   }
 
-  MTL::CommandBuffer* cmd = command_buffer;
-  if (!cmd) {
-    cmd = command_processor_.EnsureCommandBuffer();
+  // Encoding into the guest's pass touches no encoder of its own, so it needs
+  // no command buffer either.
+  MTL::CommandBuffer* cmd = nullptr;
+  if (!use_active_render_encoder) {
+    cmd = command_buffer ? command_buffer
+                         : command_processor_.EnsureCommandBuffer();
+    if (!cmd) {
+      XELOGE(
+          "MetalRenderTargetCache::PerformTransfersAndResolveClears: no "
+          "command buffer");
+      return false;
+    }
+    command_processor_.EndRenderEncoder();
   }
-  if (!cmd) {
-    XELOGE(
-        "MetalRenderTargetCache::PerformTransfersAndResolveClears: no command "
-        "buffer");
-    return;
-  }
-
-  command_processor_.EndRenderEncoder();
 
   uint32_t scale_x = draw_resolution_scale_x();
   uint32_t scale_y = draw_resolution_scale_y();
@@ -5118,6 +5727,64 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                   "Transfer color must use ownership pixel format");
     }
 
+    // The destination has to be an attachment of the pass already under way,
+    // bound through the same texture the transfer draws write.
+    uint32_t active_color_attachment_index = 0;
+    if (use_active_render_encoder) {
+      if (dest_is_depth) {
+        auto* depth_attachment =
+            active_render_pass_descriptor->depthAttachment();
+        MTL::Texture* depth_texture =
+            depth_attachment ? depth_attachment->texture() : nullptr;
+        if (i != 0 || depth_texture != dest_texture ||
+            active_attachment_formats.depth_attachment_format !=
+                dest_pixel_format) {
+          return false;
+        }
+        if (dest_pixel_format == MTL::PixelFormatDepth32Float_Stencil8 ||
+            dest_pixel_format == MTL::PixelFormatDepth24Unorm_Stencil8) {
+          auto* stencil_attachment =
+              active_render_pass_descriptor->stencilAttachment();
+          MTL::Texture* stencil_texture =
+              stencil_attachment ? stencil_attachment->texture() : nullptr;
+          if (stencil_texture != depth_texture ||
+              active_attachment_formats.stencil_attachment_format !=
+                  dest_pixel_format) {
+            return false;
+          }
+        }
+      } else {
+        if (!i || i > xenos::kMaxColorRenderTargets) {
+          return false;
+        }
+        active_color_attachment_index = i - 1;
+        auto* color_attachments =
+            active_render_pass_descriptor->colorAttachments();
+        auto* color_attachment =
+            color_attachments
+                ? color_attachments->object(active_color_attachment_index)
+                : nullptr;
+        if (!color_attachment || color_attachment->texture() != dest_texture ||
+            active_attachment_formats
+                    .color_attachment_formats[active_color_attachment_index] !=
+                dest_pixel_format) {
+          return false;
+        }
+      }
+    }
+    const TransferColorAttachmentFormats* active_color_formats =
+        use_active_render_encoder
+            ? &active_attachment_formats.color_attachment_formats
+            : nullptr;
+    MTL::PixelFormat active_depth_format =
+        use_active_render_encoder
+            ? active_attachment_formats.depth_attachment_format
+            : MTL::PixelFormatInvalid;
+    MTL::PixelFormat active_stencil_format =
+        use_active_render_encoder
+            ? active_attachment_formats.stencil_attachment_format
+            : MTL::PixelFormatInvalid;
+
     uint32_t dest_sample_count = MsaaSamplesToCount(dest_key.msaa_samples);
     bool transfer_use_sample_id_default =
         dest_sample_count > 1 && ::cvars::metal_transfer_msaa_sample_id;
@@ -5165,12 +5832,14 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
       vp.znear = 0.0;
       vp.zfar = 1.0;
       encoder->setViewport(vp);
+      mark_encoder_mutation(kDrawPassTransferEncoderMutationViewport);
       MTL::ScissorRect scissor;
       scissor.x = scaled_x;
       scissor.y = scaled_y;
       scissor.width = scaled_width;
       scissor.height = scaled_height;
       encoder->setScissorRect(scissor);
+      mark_encoder_mutation(kDrawPassTransferEncoderMutationScissor);
       return true;
     };
 
@@ -5570,8 +6239,9 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
     };
 
     // Fast path: when source/dest share compatible EDRAM layout and format,
-    // use a blit instead of shader-based transfers.
-    if (!transfers.empty()) {
+    // use a blit instead of shader-based transfers. A blit needs an encoder of
+    // its own, which is exactly the split the draw-pass path exists to avoid.
+    if (!use_active_render_encoder && !transfers.empty()) {
       auto try_blit_transfer = [&](const Transfer& transfer) -> bool {
         auto* source_rt = static_cast<MetalRenderTarget*>(transfer.source);
         if (!source_rt || transfer.host_depth_source) {
@@ -5959,6 +6629,15 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
       if (transfer_encoder) {
         return transfer_encoder;
       }
+      if (use_active_render_encoder) {
+        transfer_encoder = active_render_encoder;
+        // Whatever the guest left on the encoder must not cull or wireframe
+        // the full-viewport transfer draws.
+        transfer_encoder->setCullMode(MTL::CullModeNone);
+        transfer_encoder->setTriangleFillMode(MTL::TriangleFillModeFill);
+        mark_encoder_mutation(kDrawPassTransferEncoderMutationRasterizer);
+        return transfer_encoder;
+      }
       MTL::RenderPassDescriptor* rp =
           MTL::RenderPassDescriptor::renderPassDescriptor();
       if (dest_is_depth) {
@@ -6043,65 +6722,14 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
           ensure_sort_index(host_depth_rt);
 
           RenderTargetKey source_key = source_rt->key();
-          TransferShaderKey shader_key = {};
-          shader_key.source_msaa_samples = source_key.msaa_samples;
-          shader_key.dest_msaa_samples = dest_key.msaa_samples;
-          shader_key.source_resource_format = source_key.resource_format;
-          shader_key.dest_resource_format = dest_key.resource_format;
-
-          if (pass) {
-            shader_key.mode = source_key.is_depth
-                                  ? TransferMode::kDepthToStencilBit
-                                  : TransferMode::kColorToStencilBit;
-            shader_key.host_depth_source_msaa_samples = xenos::MsaaSamples::k1X;
-            shader_key.host_depth_source_is_copy = 0;
-          } else {
-            if (dest_is_depth) {
-              if (host_depth_rt) {
-                bool host_depth_is_copy = host_depth_rt == dest_metal_rt;
-                shader_key.mode = source_key.is_depth
-                                      ? TransferMode::kDepthAndHostDepthToDepth
-                                      : TransferMode::kColorAndHostDepthToDepth;
-                shader_key.host_depth_source_is_copy =
-                    host_depth_is_copy ? 1 : 0;
-                shader_key.host_depth_source_msaa_samples =
-                    host_depth_is_copy ? xenos::MsaaSamples::k1X
-                                       : host_depth_rt->key().msaa_samples;
-              } else {
-                shader_key.mode = source_key.is_depth
-                                      ? TransferMode::kDepthToDepth
-                                      : TransferMode::kColorToDepth;
-                shader_key.host_depth_source_msaa_samples =
-                    xenos::MsaaSamples::k1X;
-                shader_key.host_depth_source_is_copy = 0;
-              }
-            } else {
-              shader_key.mode = source_key.is_depth
-                                    ? TransferMode::kDepthToColor
-                                    : TransferMode::kColorToColor;
-              shader_key.host_depth_source_msaa_samples =
-                  xenos::MsaaSamples::k1X;
-              shader_key.host_depth_source_is_copy = 0;
-            }
+          RenderTargetKey host_depth_key;
+          if (host_depth_rt) {
+            host_depth_key = host_depth_rt->key();
           }
-
-          const TransferModeInfo& mode_info =
-              kTransferModeInfos[size_t(shader_key.mode)];
-          bool transfer_use_sample_id = transfer_use_sample_id_default;
-          if (transfer_use_sample_id) {
-            bool source_is_multisample =
-                source_key.msaa_samples != xenos::MsaaSamples::k1X;
-            bool host_depth_is_multisample =
-                mode_info.uses_host_depth &&
-                shader_key.host_depth_source_msaa_samples !=
-                    xenos::MsaaSamples::k1X &&
-                !shader_key.host_depth_source_is_copy;
-            if (!source_is_multisample && !host_depth_is_multisample) {
-              transfer_use_sample_id = false;
-            }
-          }
-          shader_key.dest_sample_id_from_sample =
-              transfer_use_sample_id ? 1u : 0u;
+          TransferShaderKey shader_key = GetTransferShaderKey(
+              source_key, dest_key, host_depth_rt ? &host_depth_key : nullptr,
+              host_depth_rt == dest_metal_rt, pass != 0,
+              transfer_use_sample_id_default);
 
           transfer_invocations_.emplace_back(transfer, shader_key);
           if (pass) {
@@ -6114,8 +6742,10 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
 
       if (stencil_clear_needed) {
         MTL::RenderPipelineState* clear_pipeline =
-            GetOrCreateTransferClearPipeline(dest_pixel_format, false, true,
-                                             dest_sample_count);
+            GetOrCreateTransferClearPipeline(
+                dest_pixel_format, false, true, dest_sample_count, 0,
+                active_color_formats, active_depth_format,
+                active_stencil_format);
         MTL::DepthStencilState* stencil_clear_state =
             GetTransferStencilClearState();
         if (clear_pipeline && stencil_clear_state) {
@@ -6127,6 +6757,11 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
             encoder->setDepthStencilState(stencil_clear_state);
             encoder->setStencilReferenceValue(0);
             encoder->setFragmentBytes(&constants, sizeof(constants), 0);
+            mark_encoder_mutation(
+                kDrawPassTransferEncoderMutationPipeline |
+                kDrawPassTransferEncoderMutationDepthStencil |
+                kDrawPassTransferEncoderMutationStencilReference |
+                kDrawPassTransferEncoderMutationFragmentSlot0);
             for (const Transfer& transfer : transfers_for_shaders) {
               Transfer::Rectangle
                   rectangles[Transfer::kMaxRectanglesWithCutout];
@@ -6170,12 +6805,14 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
         auto bind_transfer_pipeline = [&](MTL::RenderPipelineState* pipeline) {
           if (last_transfer_pipeline != pipeline) {
             encoder->setRenderPipelineState(pipeline);
+            mark_encoder_mutation(kDrawPassTransferEncoderMutationPipeline);
             last_transfer_pipeline = pipeline;
           }
         };
         auto bind_transfer_depth_state = [&](MTL::DepthStencilState* state) {
           if (last_transfer_depth_state != state) {
             encoder->setDepthStencilState(state);
+            mark_encoder_mutation(kDrawPassTransferEncoderMutationDepthStencil);
             last_transfer_depth_state = state;
           }
         };
@@ -6186,12 +6823,16 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
           }
           if (last_transfer_fragment_textures[index] != texture) {
             encoder->setFragmentTexture(texture, index);
+            mark_encoder_mutation(
+                kDrawPassTransferEncoderMutationFragmentTextures);
             last_transfer_fragment_textures[index] = texture;
           }
         };
         auto bind_transfer_fragment_buffer_1 = [&](MTL::Buffer* buffer) {
           if (last_transfer_fragment_buffer_1 != buffer) {
             encoder->setFragmentBuffer(buffer, 0, 1);
+            mark_encoder_mutation(
+                kDrawPassTransferEncoderMutationFragmentSlot1);
             last_transfer_fragment_buffer_1 = buffer;
           }
         };
@@ -6199,6 +6840,8 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
           if (!last_transfer_stencil_reference_valid ||
               last_transfer_stencil_reference != reference) {
             encoder->setStencilReferenceValue(reference);
+            mark_encoder_mutation(
+                kDrawPassTransferEncoderMutationStencilReference);
             last_transfer_stencil_reference = reference;
             last_transfer_stencil_reference_valid = true;
           }
@@ -6210,6 +6853,9 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                               sizeof(constants)) != 0) {
                 encoder->setVertexBytes(&constants, sizeof(constants), 0);
                 encoder->setFragmentBytes(&constants, sizeof(constants), 0);
+                mark_encoder_mutation(
+                    kDrawPassTransferEncoderMutationVertexSlot0 |
+                    kDrawPassTransferEncoderMutationFragmentSlot0);
                 last_transfer_constants = constants;
                 transfer_constants_valid = true;
               }
@@ -6221,6 +6867,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               last_transfer_scissor.width != scissor.width ||
               last_transfer_scissor.height != scissor.height) {
             encoder->setScissorRect(scissor);
+            mark_encoder_mutation(kDrawPassTransferEncoderMutationScissor);
             last_transfer_scissor = scissor;
             last_transfer_scissor_valid = true;
           }
@@ -6232,6 +6879,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
               last_transfer_vertex_buffer_1 != buffer ||
               last_transfer_vertex_buffer_1_offset != offset) {
             encoder->setVertexBuffer(buffer, offset, 1);
+            mark_encoder_mutation(kDrawPassTransferEncoderMutationVertexSlot1);
             last_transfer_vertex_slot_1_binding =
                 TransferVertexSlot1Binding::kBuffer;
             last_transfer_vertex_buffer_1 = buffer;
@@ -6248,6 +6896,8 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                               sizeof(rect_instance)) != 0) {
                 encoder->setVertexBytes(&rect_instance, sizeof(rect_instance),
                                         1);
+                mark_encoder_mutation(
+                    kDrawPassTransferEncoderMutationVertexSlot1);
                 last_transfer_vertex_slot_1_binding =
                     TransferVertexSlot1Binding::kBytes;
                 last_transfer_vertex_buffer_1 = nullptr;
@@ -6266,6 +6916,8 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                   rect_instances,
                   size_t(rect_instance_count) * sizeof(TransferRectInstance),
                   1);
+              mark_encoder_mutation(
+                  kDrawPassTransferEncoderMutationVertexSlot1);
               last_transfer_vertex_slot_1_binding =
                   TransferVertexSlot1Binding::kBytes;
               last_transfer_vertex_buffer_1 = nullptr;
@@ -6282,6 +6934,7 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
             vp.znear = 0.0;
             vp.zfar = 1.0;
             encoder->setViewport(vp);
+            mark_encoder_mutation(kDrawPassTransferEncoderMutationViewport);
             transfer_viewport_full_set = true;
           }
           MTL::ScissorRect scissor;
@@ -6586,7 +7239,9 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
           }
 
           MTL::RenderPipelineState* pipeline = GetOrCreateTransferPipelines(
-              shader_key, dest_pixel_format, dest_is_uint, use_tile_instancing);
+              shader_key, dest_pixel_format, dest_is_uint, use_tile_instancing,
+              active_color_attachment_index, active_color_formats,
+              active_depth_format, active_stencil_format);
           if (!pipeline) {
             continue;
           }
@@ -6692,8 +7347,10 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
             break;
         }
         MTL::RenderPipelineState* clear_pipeline =
-            GetOrCreateTransferClearPipeline(dest_pixel_format, false, true,
-                                             dest_sample_count);
+            GetOrCreateTransferClearPipeline(
+                dest_pixel_format, false, true, dest_sample_count, 0,
+                active_color_formats, active_depth_format,
+                active_stencil_format);
         MTL::DepthStencilState* clear_state = GetTransferDepthClearState();
         if (clear_pipeline && clear_state) {
           MTL::RenderCommandEncoder* clear_encoder = ensure_transfer_encoder();
@@ -6705,6 +7362,11 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
             clear_encoder->setStencilReferenceValue(uint32_t(clear_value) &
                                                     0xFF);
             clear_encoder->setFragmentBytes(&constants, sizeof(constants), 0);
+            mark_encoder_mutation(
+                kDrawPassTransferEncoderMutationPipeline |
+                kDrawPassTransferEncoderMutationDepthStencil |
+                kDrawPassTransferEncoderMutationStencilReference |
+                kDrawPassTransferEncoderMutationFragmentSlot0);
             Transfer::Rectangle clear_rect = *resolve_clear_rectangle;
             if (set_rect_viewport(clear_encoder, clear_rect)) {
               clear_encoder->drawPrimitives(MTL::PrimitiveTypeTriangle,
@@ -6834,8 +7496,10 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
 
         if (clear_texture) {
           MTL::RenderPipelineState* clear_pipeline =
-              GetOrCreateTransferClearPipeline(clear_format, clear_use_uint,
-                                               false, dest_sample_count);
+              GetOrCreateTransferClearPipeline(
+                  clear_format, clear_use_uint, false, dest_sample_count,
+                  active_color_attachment_index, active_color_formats,
+                  active_depth_format, active_stencil_format);
           if (clear_pipeline) {
             MTL::RenderCommandEncoder* clear_encoder =
                 ensure_transfer_encoder();
@@ -6854,6 +7518,10 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
                 clear_encoder->setFragmentBytes(&float_constants,
                                                 sizeof(float_constants), 0);
               }
+              mark_encoder_mutation(
+                  kDrawPassTransferEncoderMutationPipeline |
+                  kDrawPassTransferEncoderMutationDepthStencil |
+                  kDrawPassTransferEncoderMutationFragmentSlot0);
               Transfer::Rectangle clear_rect = *resolve_clear_rectangle;
               if (set_rect_viewport(clear_encoder, clear_rect)) {
                 clear_encoder->drawPrimitives(MTL::PrimitiveTypeTriangle,
@@ -6865,10 +7533,11 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
       }
     }
 
-    if (transfer_encoder) {
+    if (transfer_encoder && !use_active_render_encoder) {
       transfer_encoder->endEncoding();
     }
   }
+  return true;
 }
 
 MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateTransferPipelines(
