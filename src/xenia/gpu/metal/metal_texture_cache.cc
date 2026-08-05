@@ -427,10 +427,18 @@ class MetalTextureCache::UploadBufferPool
   void Shutdown() {
     std::lock_guard<std::mutex> lock(mutex_);
     for (Entry& entry : entries_) {
-      if (entry.buffer) {
-        entry.buffer->release();
-        entry.buffer = nullptr;
+      if (!entry.buffer) {
+        continue;
       }
+      if (entry.in_use) {
+        // Still owned by a pending completion handler. Once entries_ is
+        // cleared, its ReleaseImmediate finds no match and releases it as a
+        // transient buffer - releasing here too would be a double release.
+        entry.buffer = nullptr;
+        continue;
+      }
+      entry.buffer->release();
+      entry.buffer = nullptr;
     }
     pooled_bytes_ = 0;
     entries_.clear();
