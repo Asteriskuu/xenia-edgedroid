@@ -5553,10 +5553,15 @@ MetalCommandProcessor::GetOrCreateMslTessPipelineState(
   key_data.normalized_color_mask = normalized_color_mask;
   key_data.alpha_to_mask_enable = rb_colorcontrol.alpha_to_mask_enable ? 1 : 0;
   for (uint32_t i = 0; i < 4; ++i) {
+    // The blend register is only read below for a bound RT with a non-zero
+    // write mask; zeroing it elsewhere lets those draws share one pipeline.
+    uint32_t rt_write_mask = (normalized_color_mask >> (i * 4)) & 0xF;
     key_data.blendcontrol[i] =
-        regs.Get<reg::RB_BLENDCONTROL>(
-                reg::RB_BLENDCONTROL::rt_register_indices[i])
-            .value;
+        (rt_write_mask && color_formats[i] != MTL::PixelFormatInvalid)
+            ? regs.Get<reg::RB_BLENDCONTROL>(
+                      reg::RB_BLENDCONTROL::rt_register_indices[i])
+                  .value
+            : 0u;
   }
   uint64_t key = XXH3_64bits(&key_data, sizeof(key_data));
   auto it = msl_tess_pipeline_cache_.find(key);
@@ -5901,10 +5906,16 @@ uint64_t MetalCommandProcessor::PopulatePipelineCompileRequest(
   auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
   key_data.alpha_to_mask_enable = rb_colorcontrol.alpha_to_mask_enable ? 1 : 0;
   for (uint32_t i = 0; i < 4; ++i) {
+    // ApplyColorAttachmentState only reads the blend register for a bound RT
+    // with a non-zero write mask; zeroing it elsewhere lets those draws share
+    // one pipeline.
+    uint32_t rt_write_mask = (key_data.normalized_color_mask >> (i * 4)) & 0xF;
     key_data.blendcontrol[i] =
-        regs.Get<reg::RB_BLENDCONTROL>(
-                reg::RB_BLENDCONTROL::rt_register_indices[i])
-            .value;
+        (rt_write_mask && color_formats[i] != MTL::PixelFormatInvalid)
+            ? regs.Get<reg::RB_BLENDCONTROL>(
+                      reg::RB_BLENDCONTROL::rt_register_indices[i])
+                  .value
+            : 0u;
   }
   uint64_t key = XXH3_64bits(&key_data, sizeof(key_data));
 
