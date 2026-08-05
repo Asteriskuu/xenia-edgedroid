@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -36,6 +37,7 @@
 #include "xenia/gpu/metal/metal_shader_converter.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
+#include "xenia/gpu/metal/metal_zpd_visibility_pool.h"
 #include "xenia/gpu/metal/msl_bindings.h"
 #include "xenia/gpu/metal/msl_shader.h"
 #include "xenia/gpu/spirv_shader_translator.h"
@@ -128,6 +130,24 @@ class MetalCommandProcessor : public CommandProcessor {
   // the autorelease pool is drained, preventing hangs from deferred
   // deallocation.
   void PrepareForWait() override;
+  void PollCompletedSubmission() override;
+
+  // ZPD occlusion query backend overrides. Metal has no query pool object:
+  // visibility counting is a render encoder mode writing into an offset of the
+  // pass descriptor's visibility result buffer, so the buffer must be attached
+  // before the encoder is created and a segment can't outlive its encoder.
+  void EnsureZPDQueryResources() override;
+  void ShutdownZPDQueryResources() override;
+  bool IsZPDQueryPoolReady() const override;
+  bool CanOpenZPDQuery() const override;
+  QueryOpenResult OpenZPDQuery(ReportHandle report_handle,
+                               bool can_close_submission) override;
+  bool CloseZPDQuery(ReportHandle report_handle,
+                     uint64_t& out_submission) override;
+  bool DiscardZPDQuery() override;
+  void PumpQueryResolves() override;
+  bool AwaitQueryResolve(ReportHandle report_handle,
+                         uint64_t wait_for_submission) override;
 
   // Use base class WriteRegister - don't override with empty implementation!
   // The base class stores values in register_file_->values[] which we need.
@@ -176,6 +196,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // Reset cross-encoder SPIRV-Cross reuse caches at command-buffer boundaries.
   void ResetMslCrossEncoderReuseCaches();
   bool CanEndSubmissionImmediately();
+  // Blocks until the given submission's command buffer has completed. The
+  // submission must already be committed.
+  void AwaitSubmissionCompletion(uint64_t submission);
   void WaitForPendingCompletionHandlers();
   void ProcessCompletedSubmissions();
   bool EnsureDrawRingCapacity();
@@ -365,6 +388,9 @@ class MetalCommandProcessor : public CommandProcessor {
   MTL::RenderCommandEncoder* current_render_encoder_ = nullptr;
   MTL::RenderPassDescriptor* current_render_pass_descriptor_ = nullptr;
   NS::AutoreleasePool* command_buffer_autorelease_pool_ = nullptr;
+  // Whether the descriptor the current encoder was created from carried the
+  // visibility result buffer, so a ZPD segment may be opened on it.
+  bool render_encoder_has_zpd_visibility_ = false;
 
   // Tracks resources marked via useResource for the current render encoder
   // to avoid redundant driver calls across draws within the same encoder.
@@ -656,6 +682,31 @@ class MetalCommandProcessor : public CommandProcessor {
   std::atomic<uint32_t> pending_completion_handlers_{0};
   uint64_t submission_current_ = 0;
   uint64_t submission_completed_processed_ = 0;
+  // Signaled by the submission completion handler so waits for a specific
+  // submission don't have to poll.
+  std::mutex completion_mutex_;
+  std::condition_variable completion_cond_;
+
+  // ZPD visibility query state. Metal has no query pool object; each physical
+  // query segment gets one fresh 8-byte offset in the visibility buffer.
+  struct MetalZPDResolve {
+    uint64_t submission = 0;
+    uint32_t index = UINT32_MAX;
+    uint32_t generation = 0;
+    uint32_t scale_area = 1;
+    ReportHandle report_handle = kInvalidReportHandle;
+  };
+  struct MetalZPDActiveQuery {
+    uint32_t index = UINT32_MAX;
+    uint32_t generation = 0;
+    size_t offset = 0;
+
+    bool is_open() const { return index != UINT32_MAX; }
+    void Reset() { *this = {}; }
+  };
+  std::unique_ptr<MetalZPDVisibilityPool> zpd_visibility_pool_;
+  MetalZPDActiveQuery zpd_active_query_;
+  std::deque<MetalZPDResolve> zpd_resolves_in_flight_;
 
   // Draw counter for ring-buffer descriptor heap allocation
   // Each draw uses a different region of the descriptor heap to avoid

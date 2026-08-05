@@ -1077,7 +1077,7 @@ uint64_t MetalCommandProcessor::GetCurrentSubmission() const {
 }
 
 uint64_t MetalCommandProcessor::GetCompletedSubmission() const {
-  return completed_command_buffers_.load(std::memory_order_relaxed);
+  return completed_command_buffers_.load(std::memory_order_acquire);
 }
 
 void MetalCommandProcessor::MarkResolvedMemory(uint32_t base_ptr,
@@ -1326,6 +1326,13 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("Failed to initialize Metal render target cache");
     return false;
   }
+
+  // Fallback for query segment normalization when no draw pinned a scale.
+  zpd_draw_resolution_scale_x_ = texture_cache_->draw_resolution_scale_x();
+  zpd_draw_resolution_scale_y_ = texture_cache_->draw_resolution_scale_y();
+
+  zpd_visibility_pool_ = std::make_unique<MetalZPDVisibilityPool>();
+  EnsureZPDQueryResources();
 
   // Initialize shader translation pipeline
   if (!InitializeShaderTranslation()) {
@@ -1608,6 +1615,11 @@ void MetalCommandProcessor::PrepareForWait() {
   CommandProcessor::PrepareForWait();
 }
 
+void MetalCommandProcessor::PollCompletedSubmission() {
+  ProcessCompletedSubmissions();
+  PumpQueryResolves();
+}
+
 void MetalCommandProcessor::WaitForPendingCompletionHandlers() {
   constexpr auto kMaxWait = std::chrono::seconds(5);
   const auto wait_start = std::chrono::steady_clock::now();
@@ -1696,6 +1708,9 @@ void MetalCommandProcessor::ShutdownContext() {
     pending_spirv_argbuf_releases_.clear();
     spirv_argbuf_pool_.clear();
   }
+
+  ShutdownZPDQueryResources();
+  zpd_visibility_pool_.reset();
 
   if (texture_cache_) {
     texture_cache_->Shutdown();
@@ -1983,6 +1998,10 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 }
 
 void MetalCommandProcessor::OnPrimaryBufferEnd() {
+  // Pump any completed resolves now since the guest is likely about to poll.
+  PumpQueryResolves();
+  PumpPendingRetire();
+
   if (!current_command_buffer_) {
     return;
   }
@@ -2015,6 +2034,258 @@ bool MetalCommandProcessor::CanEndSubmissionImmediately() {
          msl_pipeline_compile_queue_.empty() &&
          msl_shader_compile_pending_.empty() &&
          msl_pipeline_compile_pending_.empty();
+}
+
+void MetalCommandProcessor::AwaitSubmissionCompletion(uint64_t submission) {
+  std::unique_lock<std::mutex> lock(completion_mutex_);
+  completion_cond_.wait(lock, [this, submission]() {
+    return completed_command_buffers_.load(std::memory_order_acquire) >=
+           submission;
+  });
+}
+
+// ============================================================================
+// ZPD (occlusion query) backend overrides.
+// ============================================================================
+
+void MetalCommandProcessor::EnsureZPDQueryResources() {
+  if (GetZPDMode() == ZPDMode::kFake || !zpd_visibility_pool_) {
+    return;
+  }
+  if (!zpd_visibility_pool_->EnsureInitialized(device_,
+                                               kZPDQueryPoolCapacity)) {
+    // CanOpenZPDQuery gates on the pool, so OpenQuerySegment returns before
+    // reaching the base class's own pool-readiness check that arms this. Left
+    // unset, every report would resolve to zero samples - fully occluded -
+    // instead of falling back to fake counts.
+    zpd_force_fake_fallback_ = true;
+  }
+}
+
+void MetalCommandProcessor::ShutdownZPDQueryResources() {
+  if (!zpd_visibility_pool_) {
+    return;
+  }
+  zpd_resolves_in_flight_.clear();
+  zpd_active_query_.Reset();
+  zpd_visibility_pool_->Shutdown();
+}
+
+bool MetalCommandProcessor::IsZPDQueryPoolReady() const {
+  return zpd_visibility_pool_ && zpd_visibility_pool_->is_initialized();
+}
+
+bool MetalCommandProcessor::CanOpenZPDQuery() const {
+  // Metal visibility queries can only be enabled on a render encoder whose
+  // descriptor had visibilityResultBuffer set before the encoder was created.
+  return current_command_buffer_ != nullptr &&
+         current_render_encoder_ != nullptr &&
+         render_encoder_has_zpd_visibility_;
+}
+
+CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
+    ReportHandle report_handle, bool can_close_submission) {
+  if (!IsZPDQueryPoolReady()) {
+    return QueryOpenResult::kFailed;
+  }
+  if (!CanOpenZPDQuery()) {
+    return QueryOpenResult::kDeferred;
+  }
+
+  bool is_pool_exhausted = !zpd_visibility_pool_->has_free_indices();
+  if (is_pool_exhausted) {
+    PumpQueryResolves();
+    is_pool_exhausted = !zpd_visibility_pool_->has_free_indices();
+  }
+
+  bool waited_for_submission = false;
+
+  if (is_pool_exhausted) {
+    if (GetZPDMode() == ZPDMode::kFast || GetZPDMode() == ZPDMode::kFastAlt) {
+      return QueryOpenResult::kPoolExhausted;
+    }
+
+    uint64_t wait_for = 0;
+    if (!zpd_resolves_in_flight_.empty()) {
+      wait_for = zpd_resolves_in_flight_.front().submission;
+    }
+
+    uint64_t completed_submission = GetCompletedSubmission();
+    if (wait_for > completed_submission) {
+      if (wait_for >= GetCurrentSubmission()) {
+        // The oldest slot is held by the submission being recorded. Commit it
+        // so it can retire, and let the next draw retry the segment.
+        if (can_close_submission) {
+          EndRenderEncoder();
+          EndCommandBuffer();
+        }
+        return QueryOpenResult::kDeferred;
+      }
+
+      if (cvars::occlusion_query_log) {
+        XELOGI("ZPD: Stall awaiting submission={} completed_before={}",
+               wait_for, completed_submission);
+      }
+      AwaitSubmissionCompletion(wait_for);
+      waited_for_submission = true;
+      PumpQueryResolves();
+      is_pool_exhausted = !zpd_visibility_pool_->has_free_indices();
+    }
+  }
+
+  if (is_pool_exhausted) {
+    return waited_for_submission ? QueryOpenResult::kPoolExhausted
+                                 : QueryOpenResult::kDeferred;
+  }
+
+  MetalZPDActiveQuery active_query;
+  if (!zpd_visibility_pool_->Acquire(
+          active_query.index, active_query.generation, active_query.offset)) {
+    return QueryOpenResult::kFailed;
+  }
+
+  current_render_encoder_->setVisibilityResultMode(
+      MTL::VisibilityResultModeCounting, active_query.offset);
+  zpd_active_query_ = active_query;
+  return QueryOpenResult::kOpened;
+}
+
+bool MetalCommandProcessor::CloseZPDQuery(ReportHandle report_handle,
+                                          uint64_t& out_submission) {
+  if (!current_render_encoder_ || !render_encoder_has_zpd_visibility_ ||
+      !zpd_active_query_.is_open()) {
+    return false;
+  }
+
+  // Disable at this segment's own offset. The offset passed alongside Disabled
+  // is still touched by the pass, so a hardcoded 0 would zero pool slot 0 and
+  // make whatever segment owns it resolve as fully occluded.
+  current_render_encoder_->setVisibilityResultMode(
+      MTL::VisibilityResultModeDisabled, zpd_active_query_.offset);
+
+  MetalZPDResolve resolve;
+  resolve.submission = GetCurrentSubmission();
+  resolve.index = zpd_active_query_.index;
+  resolve.generation = zpd_active_query_.generation;
+  resolve.scale_area = GetZPDScaleArea();
+  resolve.report_handle = report_handle;
+  zpd_resolves_in_flight_.push_back(resolve);
+
+  out_submission = resolve.submission;
+
+  zpd_active_query_.Reset();
+  return true;
+}
+
+bool MetalCommandProcessor::DiscardZPDQuery() {
+  if (!zpd_visibility_pool_ || !zpd_active_query_.is_open()) {
+    return false;
+  }
+
+  if (current_render_encoder_ && render_encoder_has_zpd_visibility_) {
+    current_render_encoder_->setVisibilityResultMode(
+        MTL::VisibilityResultModeDisabled, zpd_active_query_.offset);
+  }
+
+  // The offset was used in this render pass and Metal only allows an offset to
+  // be selected once per pass. Retire the slot after the submission completes
+  // instead of making it immediately available for reuse.
+  MetalZPDResolve resolve;
+  resolve.submission = GetCurrentSubmission();
+  resolve.index = zpd_active_query_.index;
+  resolve.generation = zpd_active_query_.generation;
+  resolve.scale_area = GetZPDScaleArea();
+  resolve.report_handle = kInvalidReportHandle;
+  zpd_resolves_in_flight_.push_back(resolve);
+
+  zpd_active_query_.Reset();
+  return true;
+}
+
+void MetalCommandProcessor::PumpQueryResolves() {
+  if (!zpd_visibility_pool_) {
+    return;
+  }
+
+  uint64_t completed = GetCompletedSubmission();
+  if (completed == 0) {
+    return;
+  }
+
+  while (!zpd_resolves_in_flight_.empty()) {
+    if (zpd_resolves_in_flight_.front().submission > completed) {
+      break;
+    }
+    MetalZPDResolve resolve = zpd_resolves_in_flight_.front();
+    zpd_resolves_in_flight_.pop_front();
+
+    if (!zpd_visibility_pool_->IsGenerationCurrent(resolve.index,
+                                                   resolve.generation)) {
+      if (cvars::occlusion_query_log) {
+        XELOGI(
+            "ZPD/Metal: Dropping stale query index={} generation={} handle={}",
+            resolve.index, resolve.generation, resolve.report_handle);
+      }
+      continue;
+    }
+
+    uint64_t raw_samples = zpd_visibility_pool_->Read(resolve.index);
+    zpd_visibility_pool_->Release(resolve.index, resolve.generation);
+    if (resolve.report_handle != kInvalidReportHandle) {
+      OnZPDQueryResolved(resolve.report_handle, raw_samples,
+                         resolve.scale_area);
+    }
+  }
+}
+
+bool MetalCommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
+                                              uint64_t wait_for_submission) {
+  if (GetZPDMode() == ZPDMode::kFake) {
+    return false;
+  }
+
+  PumpQueryResolves();
+
+  auto it = logical_zpd_reports_.find(report_handle);
+  if (it == logical_zpd_reports_.end()) {
+    return true;
+  }
+  if (it->second.pending_segments == 0 && it->second.ended) {
+    return true;
+  }
+  if (wait_for_submission == 0) {
+    return false;
+  }
+
+  // The segment may still be in the submission being recorded, which has to be
+  // committed before it can ever complete. A closed command buffer needs no
+  // flush: everything recorded so far is already on the queue.
+  if (wait_for_submission >= GetCurrentSubmission() &&
+      current_command_buffer_) {
+    // Async pipeline creation in flight means the submission can't be closed
+    // cleanly. Report no progress and let PumpPendingRetire apply its stall
+    // limit, abandoning the report with a cached delta if it comes to that.
+    if (!CanEndSubmissionImmediately()) {
+      if (cvars::occlusion_query_log) {
+        XELOGI(
+            "ZPD/Metal: AwaitQueryResolve cannot end submission (pipelines "
+            "creating), deferring");
+      }
+      return false;
+    }
+    EndRenderEncoder();
+    EndCommandBuffer();
+  }
+
+  if (wait_for_submission > GetCompletedSubmission()) {
+    AwaitSubmissionCompletion(wait_for_submission);
+  }
+
+  PumpQueryResolves();
+
+  it = logical_zpd_reports_.find(report_handle);
+  return it == logical_zpd_reports_.end() ||
+         (it->second.pending_segments == 0 && it->second.ended);
 }
 
 Shader* MetalCommandProcessor::LoadShader(xenos::ShaderType shader_type,
@@ -2259,6 +2530,11 @@ void MetalCommandProcessor::ComputeDrawViewportInfo(
     draw_util::ViewportInfo& viewport_info_out) {
   constexpr uint32_t kViewportBoundsMax = 32767;
   bool convert_z_to_float24 = ::cvars::depth_float24_convert_in_pixel_shader;
+  // ZPD segments can't mix scales. The resolved sample count is divided by one
+  // scale area per segment, so a change splits the segment.
+  UpdateZPDScale(
+      (texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1) *
+      (texture_cache_ ? texture_cache_->draw_resolution_scale_y() : 1));
   draw_util::GetViewportInfoArgs gviargs{};
   gviargs.Setup(
       texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1,
@@ -3403,6 +3679,9 @@ bool MetalCommandProcessor::IssueDrawMsl(
     bind_msl_samplers(msl_pixel_shader, pixel_translation, true);
   }
 
+  // Resume a ZPD segment waiting on a render encoder so this draw is counted.
+  OpenQuerySegment(false);
+
   // =====================================================================
   // Draw dispatch — native Metal encoder calls (no IRRuntime).
   // =====================================================================
@@ -4095,6 +4374,10 @@ bool MetalCommandProcessor::IssueDrawDxil(
                               draw_index_buffer)) {
     return false;
   }
+
+  // Resume a ZPD segment waiting on a render encoder so this draw is counted.
+  OpenQuerySegment(false);
+
   if (is_tessellated) {
     UseRenderEncoderResource(tessellator_tables_buffer_,
                              MTL::ResourceUsageRead);
@@ -4329,8 +4612,14 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
   ++submission_current_;
   pending_completion_handlers_.fetch_add(1, std::memory_order_relaxed);
   current_command_buffer_->addCompletedHandler([this](MTL::CommandBuffer*) {
-    completed_command_buffers_.fetch_add(1, std::memory_order_relaxed);
-    pending_completion_handlers_.fetch_sub(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(completion_mutex_);
+    completed_command_buffers_.fetch_add(1, std::memory_order_release);
+    pending_completion_handlers_.fetch_sub(1, std::memory_order_release);
+    // Notify under the lock: a waiter that evaluated the predicate before the
+    // increment would otherwise miss the wakeup, and
+    // WaitForPendingCompletionHandlers can see the counter reach zero and let
+    // the object be destroyed out from under notify_all().
+    completion_cond_.notify_all();
   });
 
   if (primitive_processor_) {
@@ -4442,12 +4731,20 @@ void MetalCommandProcessor::ResetMslCrossEncoderReuseCaches() {
 
 void MetalCommandProcessor::EndRenderEncoder() {
   if (!current_render_encoder_) {
+    render_encoder_has_zpd_visibility_ = false;
     return;
+  }
+  // Visibility results are scoped to the render encoder and an offset can't be
+  // selected again after it ends, so the segment closes here. The logical
+  // report stays open and resumes on the next encoder.
+  if (GetZPDMode() != ZPDMode::kFake) {
+    CloseQuerySegment();
   }
   current_render_encoder_->endEncoding();
   current_render_encoder_->release();
   current_render_encoder_ = nullptr;
   current_render_pass_descriptor_ = nullptr;
+  render_encoder_has_zpd_visibility_ = false;
   ResetMslRenderEncoderStateCache();
 }
 
@@ -4516,9 +4813,25 @@ void MetalCommandProcessor::BeginCommandBuffer() {
     return;
   }
 
+  // The visibility result buffer has to be on the descriptor before the encoder
+  // is created, so a segment waiting to open needs the pool allocated now.
+  const bool zpd_segment_pending = GetZPDMode() != ZPDMode::kFake &&
+                                   zpd_active_segment_.logical_active &&
+                                   zpd_active_segment_.segment_pending_begin;
+  if (zpd_segment_pending) {
+    EnsureZPDQueryResources();
+  }
+
   if (!current_render_encoder_ && (!render_encoder_resource_usage_.empty() ||
                                    !render_encoder_heap_usage_.empty())) {
     ResetRenderEncoderResourceUsage();
+  }
+
+  // An encoder created before the pool existed can never host a query, so
+  // restart it rather than leave the segment pending indefinitely.
+  if (current_render_encoder_ && zpd_segment_pending && IsZPDQueryPoolReady() &&
+      !render_encoder_has_zpd_visibility_) {
+    EndRenderEncoder();
   }
 
   // Obtain the render pass descriptor. Prefer the one provided by
@@ -4534,6 +4847,15 @@ void MetalCommandProcessor::BeginCommandBuffer() {
   if (!pass_descriptor) {
     XELOGE("BeginCommandBuffer: No render pass descriptor available");
     return;
+  }
+
+  // Attach the ZPD visibility buffer so occlusion queries write their results
+  // straight into shared memory with no explicit resolve step.
+  if (GetZPDMode() != ZPDMode::kFake && IsZPDQueryPoolReady()) {
+    pass_descriptor->setVisibilityResultBuffer(
+        zpd_visibility_pool_->visibility_buffer());
+  } else {
+    pass_descriptor->setVisibilityResultBuffer(nullptr);
   }
 
   // Detect Reverse-Z usage and update clear depth.
@@ -4575,6 +4897,9 @@ void MetalCommandProcessor::BeginCommandBuffer() {
     current_render_encoder_->retain();
     current_render_encoder_->setLabel(
         NS::String::string("XeniaRenderEncoder", NS::UTF8StringEncoding));
+    render_encoder_has_zpd_visibility_ =
+        IsZPDQueryPoolReady() && (pass_descriptor->visibilityResultBuffer() ==
+                                  zpd_visibility_pool_->visibility_buffer());
     ff_blend_factor_valid_ = false;
     current_render_pass_descriptor_ = pass_descriptor;
     UseRenderEncoderAttachmentHeaps(pass_descriptor);
