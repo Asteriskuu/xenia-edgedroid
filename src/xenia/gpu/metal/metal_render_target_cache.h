@@ -352,6 +352,68 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
     };
   };
 
+  using TransferColorAttachmentFormats =
+      std::array<MTL::PixelFormat, xenos::kMaxColorRenderTargets>;
+
+  // A pipeline is only usable in a pass whose attachment formats it was built
+  // against, so the whole set is part of its identity. Color attachments other
+  // than the destination get an empty write mask.
+  struct TransferPipelineKey {
+    TransferShaderKey shader_key;
+    uint32_t color_attachment_index = 0;
+    TransferColorAttachmentFormats color_attachment_formats = {};
+    MTL::PixelFormat depth_attachment_format = MTL::PixelFormatInvalid;
+    MTL::PixelFormat stencil_attachment_format = MTL::PixelFormatInvalid;
+
+    bool operator==(const TransferPipelineKey& other) const = default;
+
+    struct Hasher {
+      size_t operator()(const TransferPipelineKey& key) const {
+        auto combine = [](size_t seed, size_t value) {
+          return seed ^ (value + 0x9E3779B9 + (seed << 6) + (seed >> 2));
+        };
+        size_t h = TransferShaderKey::Hasher()(key.shader_key);
+        h = combine(h, key.color_attachment_index);
+        h = combine(h, size_t(key.depth_attachment_format));
+        h = combine(h, size_t(key.stencil_attachment_format));
+        for (MTL::PixelFormat color_format : key.color_attachment_formats) {
+          h = combine(h, size_t(color_format));
+        }
+        return h;
+      }
+    };
+  };
+
+  struct TransferClearPipelineKey {
+    uint32_t color_attachment_index = 0;
+    uint32_t sample_count = 1;
+    uint32_t dest_is_uint = 0;
+    uint32_t is_depth = 0;
+    TransferColorAttachmentFormats color_attachment_formats = {};
+    MTL::PixelFormat depth_attachment_format = MTL::PixelFormatInvalid;
+    MTL::PixelFormat stencil_attachment_format = MTL::PixelFormatInvalid;
+
+    bool operator==(const TransferClearPipelineKey& other) const = default;
+
+    struct Hasher {
+      size_t operator()(const TransferClearPipelineKey& key) const {
+        auto combine = [](size_t seed, size_t value) {
+          return seed ^ (value + 0x9E3779B9 + (seed << 6) + (seed >> 2));
+        };
+        size_t h = key.color_attachment_index;
+        h = combine(h, key.sample_count);
+        h = combine(h, key.dest_is_uint);
+        h = combine(h, key.is_depth);
+        h = combine(h, size_t(key.depth_attachment_format));
+        h = combine(h, size_t(key.stencil_attachment_format));
+        for (MTL::PixelFormat color_format : key.color_attachment_formats) {
+          h = combine(h, size_t(color_format));
+        }
+        return h;
+      }
+    };
+  };
+
   struct TransferInvocation {
     Transfer transfer;
     TransferShaderKey shader_key;
@@ -381,15 +443,16 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
     }
   };
 
-  std::unordered_map<TransferShaderKey, MTL::RenderPipelineState*,
-                     TransferShaderKey::Hasher>
+  std::unordered_map<TransferPipelineKey, MTL::RenderPipelineState*,
+                     TransferPipelineKey::Hasher>
       transfer_pipelines_;
-  std::unordered_map<TransferShaderKey, MTL::RenderPipelineState*,
-                     TransferShaderKey::Hasher>
+  std::unordered_map<TransferPipelineKey, MTL::RenderPipelineState*,
+                     TransferPipelineKey::Hasher>
       transfer_tile_pipelines_;
   std::vector<TransferInvocation> transfer_invocations_;
   MTL::Library* transfer_library_ = nullptr;
-  std::unordered_map<uint32_t, MTL::RenderPipelineState*>
+  std::unordered_map<TransferClearPipelineKey, MTL::RenderPipelineState*,
+                     TransferClearPipelineKey::Hasher>
       transfer_clear_pipelines_;
   static constexpr uint32_t kTransferInstanceBufferCount = 3;
   std::array<MTL::Buffer*, kTransferInstanceBufferCount>
@@ -470,12 +533,22 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
 
   // Transfer pipeline setup (host RT ownership transfers) - Metal analogue of
   // D3D12RenderTargetCache::GetOrCreateTransferPipelines.
+  // A null color_attachment_formats builds for a pass whose only color
+  // attachment is the destination, at color_attachment_index; an invalid
+  // depth/stencil format on a depth destination means the destination's own.
   MTL::RenderPipelineState* GetOrCreateTransferPipelines(
       const TransferShaderKey& key, MTL::PixelFormat dest_format,
-      bool dest_is_uint, bool tile_instanced);
+      bool dest_is_uint, bool tile_instanced,
+      uint32_t color_attachment_index = 0,
+      const TransferColorAttachmentFormats* color_attachment_formats = nullptr,
+      MTL::PixelFormat depth_attachment_format = MTL::PixelFormatInvalid,
+      MTL::PixelFormat stencil_attachment_format = MTL::PixelFormatInvalid);
   MTL::RenderPipelineState* GetOrCreateTransferClearPipeline(
       MTL::PixelFormat dest_format, bool dest_is_uint, bool is_depth,
-      uint32_t sample_count);
+      uint32_t sample_count, uint32_t color_attachment_index = 0,
+      const TransferColorAttachmentFormats* color_attachment_formats = nullptr,
+      MTL::PixelFormat depth_attachment_format = MTL::PixelFormatInvalid,
+      MTL::PixelFormat stencil_attachment_format = MTL::PixelFormatInvalid);
   MTL::Library* GetOrCreateTransferLibrary();
   MTL::Texture* GetTransferDummyTexture(MTL::PixelFormat format,
                                         uint32_t sample_count);

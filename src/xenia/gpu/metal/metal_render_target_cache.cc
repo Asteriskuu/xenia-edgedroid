@@ -6873,20 +6873,64 @@ void MetalRenderTargetCache::PerformTransfersAndResolveClears(
 
 MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateTransferPipelines(
     const TransferShaderKey& key, MTL::PixelFormat dest_format,
-    bool dest_is_uint, bool tile_instanced) {
-  TransferShaderKey pipeline_key = key;
-  pipeline_key.host_depth_source_is_copy = 0;
+    bool dest_is_uint, bool tile_instanced, uint32_t color_attachment_index,
+    const TransferColorAttachmentFormats* color_attachment_formats,
+    MTL::PixelFormat depth_attachment_format,
+    MTL::PixelFormat stencil_attachment_format) {
+  const TransferModeInfo& mode_info = kTransferModeInfos[size_t(key.mode)];
+  TransferOutput output = mode_info.output;
+  bool source_is_color = mode_info.source_is_color;
+  bool has_host_depth = mode_info.uses_host_depth;
+
+  TransferPipelineKey pipeline_key = {};
+  pipeline_key.shader_key = key;
+  pipeline_key.shader_key.host_depth_source_is_copy = 0;
+  if (color_attachment_formats) {
+    pipeline_key.color_attachment_formats = *color_attachment_formats;
+  }
+  if (output == TransferOutput::kColor) {
+    if (color_attachment_index >= xenos::kMaxColorRenderTargets) {
+      return nullptr;
+    }
+    pipeline_key.color_attachment_index = color_attachment_index;
+    if (!color_attachment_formats) {
+      pipeline_key.color_attachment_formats[color_attachment_index] =
+          dest_format;
+    }
+    if (pipeline_key.color_attachment_formats[color_attachment_index] !=
+        dest_format) {
+      return nullptr;
+    }
+    pipeline_key.depth_attachment_format = depth_attachment_format;
+    pipeline_key.stencil_attachment_format = stencil_attachment_format;
+  } else {
+    pipeline_key.depth_attachment_format =
+        depth_attachment_format != MTL::PixelFormatInvalid
+            ? depth_attachment_format
+            : dest_format;
+    if (pipeline_key.depth_attachment_format != dest_format) {
+      return nullptr;
+    }
+    if (dest_format == MTL::PixelFormatDepth32Float_Stencil8 ||
+        dest_format == MTL::PixelFormatDepth24Unorm_Stencil8) {
+      pipeline_key.stencil_attachment_format =
+          stencil_attachment_format != MTL::PixelFormatInvalid
+              ? stencil_attachment_format
+              : dest_format;
+      if (pipeline_key.stencil_attachment_format != dest_format) {
+        return nullptr;
+      }
+    } else {
+      pipeline_key.stencil_attachment_format = stencil_attachment_format;
+    }
+  }
+
   auto& pipeline_map =
       tile_instanced ? transfer_tile_pipelines_ : transfer_pipelines_;
   auto it = pipeline_map.find(pipeline_key);
   if (it != pipeline_map.end()) {
     return it->second;
   }
-
-  const TransferModeInfo& mode_info = kTransferModeInfos[size_t(key.mode)];
-  TransferOutput output = mode_info.output;
-  bool source_is_color = mode_info.source_is_color;
-  bool has_host_depth = mode_info.uses_host_depth;
 
   xenos::ColorRenderTargetFormat source_color_format =
       xenos::ColorRenderTargetFormat(key.source_resource_format);
@@ -8754,17 +8798,17 @@ fragment TransferDepthOut transfer_ps(
   desc->setVertexFunction(vs);
   desc->setFragmentFunction(ps);
 
-  if (output == TransferOutput::kColor) {
-    desc->colorAttachments()->object(0)->setPixelFormat(dest_format);
-  } else {
-    desc->colorAttachments()->object(0)->setPixelFormat(
-        MTL::PixelFormatInvalid);
-    desc->setDepthAttachmentPixelFormat(dest_format);
-    if (dest_format == MTL::PixelFormatDepth32Float_Stencil8 ||
-        dest_format == MTL::PixelFormatDepth24Unorm_Stencil8) {
-      desc->setStencilAttachmentPixelFormat(dest_format);
-    }
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    auto* color_attachment = desc->colorAttachments()->object(i);
+    color_attachment->setPixelFormat(pipeline_key.color_attachment_formats[i]);
+    color_attachment->setWriteMask(
+        output == TransferOutput::kColor &&
+                i == pipeline_key.color_attachment_index
+            ? MTL::ColorWriteMaskAll
+            : MTL::ColorWriteMaskNone);
   }
+  desc->setDepthAttachmentPixelFormat(pipeline_key.depth_attachment_format);
+  desc->setStencilAttachmentPixelFormat(pipeline_key.stencil_attachment_format);
 
   uint32_t sample_count = 1;
   if (key.dest_msaa_samples == xenos::MsaaSamples::k2X) {
@@ -8869,14 +8913,50 @@ fragment TransferDepthOut transfer_clear_depth_ps(
 MTL::RenderPipelineState*
 MetalRenderTargetCache::GetOrCreateTransferClearPipeline(
     MTL::PixelFormat dest_format, bool dest_is_uint, bool is_depth,
-    uint32_t sample_count) {
-  uint32_t key = uint32_t(dest_format);
-  key ^= (sample_count & 0x7u) << 24;
-  if (dest_is_uint) {
-    key ^= 1u << 30;
+    uint32_t sample_count, uint32_t color_attachment_index,
+    const TransferColorAttachmentFormats* color_attachment_formats,
+    MTL::PixelFormat depth_attachment_format,
+    MTL::PixelFormat stencil_attachment_format) {
+  TransferClearPipelineKey key = {};
+  key.sample_count = sample_count ? sample_count : 1;
+  key.dest_is_uint = dest_is_uint ? 1u : 0u;
+  key.is_depth = is_depth ? 1u : 0u;
+  if (color_attachment_formats) {
+    key.color_attachment_formats = *color_attachment_formats;
   }
   if (is_depth) {
-    key ^= 1u << 31;
+    key.depth_attachment_format =
+        depth_attachment_format != MTL::PixelFormatInvalid
+            ? depth_attachment_format
+            : dest_format;
+    if (key.depth_attachment_format != dest_format) {
+      return nullptr;
+    }
+    if (dest_format == MTL::PixelFormatDepth32Float_Stencil8 ||
+        dest_format == MTL::PixelFormatDepth24Unorm_Stencil8) {
+      key.stencil_attachment_format =
+          stencil_attachment_format != MTL::PixelFormatInvalid
+              ? stencil_attachment_format
+              : dest_format;
+      if (key.stencil_attachment_format != dest_format) {
+        return nullptr;
+      }
+    } else {
+      key.stencil_attachment_format = stencil_attachment_format;
+    }
+  } else {
+    if (color_attachment_index >= xenos::kMaxColorRenderTargets) {
+      return nullptr;
+    }
+    key.color_attachment_index = color_attachment_index;
+    if (!color_attachment_formats) {
+      key.color_attachment_formats[color_attachment_index] = dest_format;
+    }
+    if (key.color_attachment_formats[color_attachment_index] != dest_format) {
+      return nullptr;
+    }
+    key.depth_attachment_format = depth_attachment_format;
+    key.stencil_attachment_format = stencil_attachment_format;
   }
   auto it = transfer_clear_pipelines_.find(key);
   if (it != transfer_clear_pipelines_.end()) {
@@ -8917,19 +8997,17 @@ MetalRenderTargetCache::GetOrCreateTransferClearPipeline(
       MTL::RenderPipelineDescriptor::alloc()->init();
   desc->setVertexFunction(vs);
   desc->setFragmentFunction(ps);
-  desc->setSampleCount(sample_count ? sample_count : 1);
+  desc->setSampleCount(key.sample_count);
 
-  if (is_depth) {
-    desc->colorAttachments()->object(0)->setPixelFormat(
-        MTL::PixelFormatInvalid);
-    desc->setDepthAttachmentPixelFormat(dest_format);
-    if (dest_format == MTL::PixelFormatDepth32Float_Stencil8 ||
-        dest_format == MTL::PixelFormatDepth24Unorm_Stencil8) {
-      desc->setStencilAttachmentPixelFormat(dest_format);
-    }
-  } else {
-    desc->colorAttachments()->object(0)->setPixelFormat(dest_format);
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    auto* color_attachment = desc->colorAttachments()->object(i);
+    color_attachment->setPixelFormat(key.color_attachment_formats[i]);
+    color_attachment->setWriteMask(!is_depth && i == key.color_attachment_index
+                                       ? MTL::ColorWriteMaskAll
+                                       : MTL::ColorWriteMaskNone);
   }
+  desc->setDepthAttachmentPixelFormat(key.depth_attachment_format);
+  desc->setStencilAttachmentPixelFormat(key.stencil_attachment_format);
 
   NS::Error* error = nullptr;
   MTL::RenderPipelineState* pipeline =
