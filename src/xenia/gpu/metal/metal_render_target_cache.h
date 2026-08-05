@@ -526,11 +526,12 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   uint64_t transfer_tile_instance_buffer_frame_id_ = 0;
   size_t transfer_tile_instance_buffer_offset_ = 0;
   MTL::DepthStencilState* transfer_depth_state_ = nullptr;
+  MTL::DepthStencilState* transfer_depth_stencil_output_state_ = nullptr;
   MTL::DepthStencilState* transfer_depth_state_none_ = nullptr;
   MTL::DepthStencilState* transfer_depth_clear_state_ = nullptr;
   MTL::DepthStencilState* transfer_stencil_clear_state_ = nullptr;
   MTL::DepthStencilState* transfer_stencil_bit_states_[8] = {};
-  bool native_stencil_output_unsupported_ = false;
+  bool native_stencil_output_probed_ = false;
   MTL::Buffer* transfer_dummy_buffer_ = nullptr;
   MTL::Texture* transfer_dummy_color_float_[3] = {};
   MTL::Texture* transfer_dummy_color_uint_[3] = {};
@@ -633,14 +634,14 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   MTL::Texture* GetTransferDummyStencilTexture(uint32_t sample_count);
   MTL::Buffer* GetTransferDummyBuffer();
   MTL::DepthStencilState* GetTransferDepthStencilState(bool depth_write);
+  MTL::DepthStencilState* GetTransferDepthAndStencilOutputState();
   MTL::DepthStencilState* GetTransferNoDepthStencilState();
   MTL::DepthStencilState* GetTransferDepthClearState();
   MTL::DepthStencilState* GetTransferStencilClearState();
-  // Whether stencil transfers write all eight bits from one draw rather than
-  // one masked draw per bit.
+  // Whether the depth transfer draw writes the guest stencil as well, rather
+  // than a stencil clear plus one masked draw per bit following it.
   bool UseNativeStencilOutputInTransfers() const;
-  void OnNativeStencilOutputUnsupported();
-  MTL::DepthStencilState* GetTransferStencilOutputState();
+  bool ProbeNativeStencilOutputSupport();
   MTL::DepthStencilState* GetTransferStencilBitState(uint32_t bit);
 
   // EDRAM tile operations

@@ -738,6 +738,13 @@ bool MetalRenderTargetCache::Initialize() {
   // Metal version currently is MacOS 15 / Metal 3
   msaa_2x_supported_ = device_->supportsTextureSampleCount(2);
 
+  native_stencil_output_probed_ = ProbeNativeStencilOutputSupport();
+  if (!native_stencil_output_probed_) {
+    XELOGW(
+        "Metal: no pixel shader stencil output on this device; stencil "
+        "transfers will use eight masked draws per rectangle");
+  }
+
   gamma_render_target_as_unorm16_ = ::cvars::gamma_render_target_as_unorm16 &&
                                     ::cvars::metal_allow_gamma_unorm16;
   if (::cvars::gamma_render_target_as_unorm16 &&
@@ -866,6 +873,10 @@ void MetalRenderTargetCache::Shutdown(bool from_destructor) {
   if (transfer_depth_state_) {
     transfer_depth_state_->release();
     transfer_depth_state_ = nullptr;
+  }
+  if (transfer_depth_stencil_output_state_) {
+    transfer_depth_stencil_output_state_->release();
+    transfer_depth_stencil_output_state_ = nullptr;
   }
   if (transfer_depth_state_none_) {
     transfer_depth_state_none_->release();
@@ -3550,7 +3561,13 @@ bool MetalRenderTargetCache::PreflightPendingDrawPassTransfers(
       }
       // CanQueueDrawPassTransfers rejected a host depth source that is the
       // destination, so the copy-through-EDRAM mode never appears here.
-      for (uint32_t stencil_bit = 0; stencil_bit <= uint32_t(dest_key.is_depth);
+      // Mirror the encode side: with the stencil folded into the depth draw
+      // there is no stencil-bit pass to build pipelines for.
+      bool native_stencil_output =
+          dest_key.is_depth && UseNativeStencilOutputInTransfers();
+      uint32_t stencil_bit_passes =
+          (dest_key.is_depth && !native_stencil_output) ? 1u : 0u;
+      for (uint32_t stencil_bit = 0; stencil_bit <= stencil_bit_passes;
            ++stencil_bit) {
         TransferShaderKey shader_key = GetTransferShaderKey(
             source_key, dest_key,
@@ -3560,24 +3577,12 @@ bool MetalRenderTargetCache::PreflightPendingDrawPassTransfers(
              tile_instanced <=
              uint32_t(::cvars::metal_transfer_tile_instancing);
              ++tile_instanced) {
-          bool native_stencil_output =
-              stencil_bit && UseNativeStencilOutputInTransfers();
-          MTL::RenderPipelineState* pipeline = GetOrCreateTransferPipelines(
-              shader_key, dest_format, dest_is_uint, tile_instanced != 0,
-              native_stencil_output, color_attachment_index,
-              &attachment_formats.color_attachment_formats,
-              attachment_formats.depth_attachment_format,
-              attachment_formats.stencil_attachment_format);
-          if (!pipeline && native_stencil_output) {
-            OnNativeStencilOutputUnsupported();
-            pipeline = GetOrCreateTransferPipelines(
-                shader_key, dest_format, dest_is_uint, tile_instanced != 0,
-                false, color_attachment_index,
-                &attachment_formats.color_attachment_formats,
-                attachment_formats.depth_attachment_format,
-                attachment_formats.stencil_attachment_format);
-          }
-          if (!pipeline) {
+          if (!GetOrCreateTransferPipelines(
+                  shader_key, dest_format, dest_is_uint, tile_instanced != 0,
+                  native_stencil_output && !stencil_bit, color_attachment_index,
+                  &attachment_formats.color_attachment_formats,
+                  attachment_formats.depth_attachment_format,
+                  attachment_formats.stencil_attachment_format)) {
             return false;
           }
         }
@@ -6699,7 +6704,11 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
             transfers_for_shaders.size(), i);
       }
     } else if (!transfers_for_shaders.empty()) {
-      bool need_stencil_bit_draws = dest_is_depth;
+      // The depth draw carries the guest stencil where the device allows it,
+      // which leaves nothing for the clear and the per-bit draws to do.
+      bool use_native_stencil_output =
+          dest_is_depth && UseNativeStencilOutputInTransfers();
+      bool need_stencil_bit_draws = dest_is_depth && !use_native_stencil_output;
       bool stencil_clear_needed = need_stencil_bit_draws;
 
       transfer_invocations_.clear();
@@ -7001,10 +7010,13 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
           const TransferModeInfo& mode_info =
               kTransferModeInfos[size_t(shader_key.mode)];
           bool is_stencil_bit = mode_info.output == TransferOutput::kStencilBit;
+          bool writes_stencil_with_depth =
+              use_native_stencil_output &&
+              mode_info.output == TransferOutput::kDepth;
           bool needs_source_stencil =
               !mode_info.source_is_color &&
-              (mode_info.output == TransferOutput::kColor ||
-               mode_info.output == TransferOutput::kStencilBit);
+              (mode_info.output == TransferOutput::kColor || is_stencil_bit ||
+               writes_stencil_with_depth);
 
           auto* source_rt = static_cast<MetalRenderTarget*>(transfer.source);
           if (!source_rt) {
@@ -7022,7 +7034,10 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
           if (is_stencil_bit) {
             // Depth/stencil state set per-bit below.
           } else if (dest_is_depth) {
-            bind_transfer_depth_state(GetTransferDepthStencilState(true));
+            bind_transfer_depth_state(
+                writes_stencil_with_depth
+                    ? GetTransferDepthAndStencilOutputState()
+                    : GetTransferDepthStencilState(true));
           } else {
             MTL::DepthStencilState* no_depth_state =
                 GetTransferNoDepthStencilState();
@@ -7256,21 +7271,10 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
             }
           }
 
-          bool use_native_stencil_output =
-              is_stencil_bit && UseNativeStencilOutputInTransfers();
           MTL::RenderPipelineState* pipeline = GetOrCreateTransferPipelines(
               shader_key, dest_pixel_format, dest_is_uint, use_tile_instancing,
-              use_native_stencil_output, active_color_attachment_index,
+              writes_stencil_with_depth, active_color_attachment_index,
               active_color_formats, active_depth_format, active_stencil_format);
-          if (!pipeline && use_native_stencil_output) {
-            OnNativeStencilOutputUnsupported();
-            use_native_stencil_output = false;
-            pipeline = GetOrCreateTransferPipelines(
-                shader_key, dest_pixel_format, dest_is_uint,
-                use_tile_instancing, false, active_color_attachment_index,
-                active_color_formats, active_depth_format,
-                active_stencil_format);
-          }
           if (!pipeline) {
             continue;
           }
@@ -7337,30 +7341,17 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
           };
 
           if (is_stencil_bit) {
-            MTL::DepthStencilState* stencil_output_state =
-                use_native_stencil_output ? GetTransferStencilOutputState()
-                                          : nullptr;
-            if (stencil_output_state) {
-              // The shader writes the whole stencil value, so the mask and the
-              // reference the per-bit draws select with are unused.
-              constants.stencil_mask = 0xFFu;
-              constants.stencil_clear = 0;
-              bind_transfer_depth_state(stencil_output_state);
-              bind_transfer_stencil_reference(0);
-              draw_transfer_samples(draw_transfer);
-            } else {
-              for (uint32_t bit = 0; bit < 8; ++bit) {
-                MTL::DepthStencilState* stencil_state =
-                    GetTransferStencilBitState(bit);
-                if (!stencil_state) {
-                  continue;
-                }
-                constants.stencil_mask = uint32_t(1) << bit;
-                constants.stencil_clear = 0;
-                bind_transfer_depth_state(stencil_state);
-                bind_transfer_stencil_reference(uint32_t(1) << bit);
-                draw_transfer_samples(draw_transfer);
+            for (uint32_t bit = 0; bit < 8; ++bit) {
+              MTL::DepthStencilState* stencil_state =
+                  GetTransferStencilBitState(bit);
+              if (!stencil_state) {
+                continue;
               }
+              constants.stencil_mask = uint32_t(1) << bit;
+              constants.stencil_clear = 0;
+              bind_transfer_depth_state(stencil_state);
+              bind_transfer_stencil_reference(uint32_t(1) << bit);
+              draw_transfer_samples(draw_transfer);
             }
           } else {
             constants.stencil_mask = 0;
@@ -7594,7 +7585,7 @@ MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateTransferPipelines(
   bool source_is_color = mode_info.source_is_color;
   bool has_host_depth = mode_info.uses_host_depth;
   native_stencil_output =
-      native_stencil_output && output == TransferOutput::kStencilBit;
+      native_stencil_output && output == TransferOutput::kDepth;
 
   TransferPipelineKey pipeline_key = {};
   pipeline_key.shader_key = key;
@@ -7673,9 +7664,13 @@ MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateTransferPipelines(
         (dest_color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA &&
          gamma_render_target_as_unorm16_);
   }
+  // A depth destination that writes stencil from this same draw needs the
+  // source's stencil alongside its depth.
   bool source_needs_stencil =
-      !source_is_color && (output == TransferOutput::kColor ||
-                           output == TransferOutput::kStencilBit);
+      !source_is_color &&
+      (output == TransferOutput::kColor ||
+       output == TransferOutput::kStencilBit ||
+       (output == TransferOutput::kDepth && native_stencil_output));
 
   uint32_t dest_component_count = 1;
   if (output == TransferOutput::kColor) {
@@ -8912,10 +8907,9 @@ fragment TransferColorOut transfer_ps(
 }
 #elif XE_TRANSFER_OUTPUT_DEPTH || XE_TRANSFER_OUTPUT_STENCIL_BIT
 struct TransferDepthOut {
-#if XE_TRANSFER_OUTPUT_STENCIL_BIT && XE_TRANSFER_NATIVE_STENCIL_OUTPUT
-  uint stencil [[stencil]];
-#else
   float depth [[depth(any)]];
+#if XE_TRANSFER_NATIVE_STENCIL_OUTPUT
+  uint stencil [[stencil]];
 #endif
 #if XE_TRANSFER_DEST_IS_MULTISAMPLE
   uint sample_mask [[sample_mask]];
@@ -9301,14 +9295,6 @@ fragment TransferDepthOut transfer_ps(
 #endif
 
 #if XE_TRANSFER_OUTPUT_STENCIL_BIT
-#if XE_TRANSFER_NATIVE_STENCIL_OUTPUT
-  TransferDepthOut out;
-  out.stencil = packed & 0xFFu;
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE
-  out.sample_mask = 1u << dest_sample_id;
-#endif
-  return out;
-#else
   if (constants.stencil_clear == 0u) {
     if ((packed & constants.stencil_mask) == 0u) {
       discard_fragment();
@@ -9320,7 +9306,6 @@ fragment TransferDepthOut transfer_ps(
   out.sample_mask = 1u << dest_sample_id;
 #endif
   return out;
-#endif
 #else
   uint guest_depth24 = packed;
   if (!packed_only_depth) {
@@ -9479,6 +9464,16 @@ fragment TransferDepthOut transfer_ps(
 
   TransferDepthOut out;
   out.depth = fragment_depth;
+#if XE_TRANSFER_NATIVE_STENCIL_OUTPUT
+#if XE_TRANSFER_SOURCE_IS_COLOR
+  // A color source carries the stencil in the low byte of the packed value.
+  out.stencil = packed & 0xFFu;
+#else
+  // A depth source keeps its stencil in the separate stencil texture, which is
+  // only declared for depth sources.
+  out.stencil = (packed_only_depth ? source_stencil0 : packed) & 0xFFu;
+#endif
+#endif
 #if XE_TRANSFER_DEST_IS_MULTISAMPLE
   out.sample_mask = 1u << dest_sample_id;
 #endif
@@ -9863,6 +9858,37 @@ MTL::DepthStencilState* MetalRenderTargetCache::GetTransferDepthStencilState(
 }
 
 MTL::DepthStencilState*
+MetalRenderTargetCache::GetTransferDepthAndStencilOutputState() {
+  if (transfer_depth_stencil_output_state_) {
+    return transfer_depth_stencil_output_state_;
+  }
+  bool not_equal_test = ::cvars::depth_transfer_not_equal_test;
+  MTL::DepthStencilDescriptor* desc =
+      MTL::DepthStencilDescriptor::alloc()->init();
+  desc->setDepthCompareFunction(not_equal_test ? MTL::CompareFunctionNotEqual
+                                               : MTL::CompareFunctionAlways);
+  desc->setDepthWriteEnabled(true);
+  MTL::StencilDescriptor* stencil = MTL::StencilDescriptor::alloc()->init();
+  // Always, not not-equal, so a differing stencil doesn't suppress the depth
+  // write - and with the not-equal depth test, replacing on depth failure so
+  // matching depth still gets its stencil written.
+  stencil->setStencilCompareFunction(MTL::CompareFunctionAlways);
+  stencil->setStencilFailureOperation(MTL::StencilOperationKeep);
+  stencil->setDepthFailureOperation(not_equal_test
+                                        ? MTL::StencilOperationReplace
+                                        : MTL::StencilOperationKeep);
+  stencil->setDepthStencilPassOperation(MTL::StencilOperationReplace);
+  stencil->setReadMask(0xFF);
+  stencil->setWriteMask(0xFF);
+  desc->setFrontFaceStencil(stencil);
+  desc->setBackFaceStencil(stencil);
+  transfer_depth_stencil_output_state_ = device_->newDepthStencilState(desc);
+  stencil->release();
+  desc->release();
+  return transfer_depth_stencil_output_state_;
+}
+
+MTL::DepthStencilState*
 MetalRenderTargetCache::GetTransferNoDepthStencilState() {
   if (transfer_depth_state_none_) {
     return transfer_depth_state_none_;
@@ -9923,28 +9949,68 @@ MTL::DepthStencilState* MetalRenderTargetCache::GetTransferStencilClearState() {
 }
 
 bool MetalRenderTargetCache::UseNativeStencilOutputInTransfers() const {
-  // Metal exposes no query for fragment stencil output, so the pipeline build
-  // is the probe - see OnNativeStencilOutputUnsupported.
-  return ::cvars::native_stencil_value_output &&
-         !native_stencil_output_unsupported_;
+  return ::cvars::native_stencil_value_output && native_stencil_output_probed_;
 }
 
-void MetalRenderTargetCache::OnNativeStencilOutputUnsupported() {
-  if (native_stencil_output_unsupported_) {
-    return;
+bool MetalRenderTargetCache::ProbeNativeStencilOutputSupport() {
+  // Metal has no query for fragment stencil output, and it decides which draws
+  // a stencil transfer needs, so build a pipeline that uses it up front rather
+  // than discovering it half way through a batch.
+  static const char kProbeSource[] = R"METAL(
+#include <metal_stdlib>
+using namespace metal;
+
+vertex float4 xe_stencil_probe_vs() {
+  return float4(0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+struct XeStencilProbeOut {
+  uint stencil [[stencil]];
+};
+
+fragment XeStencilProbeOut xe_stencil_probe_ps() {
+  XeStencilProbeOut out;
+  out.stencil = 0u;
+  return out;
+}
+)METAL";
+
+  NS::Error* error = nullptr;
+  MTL::Library* lib = device_->newLibrary(
+      NS::String::string(kProbeSource, NS::UTF8StringEncoding), nullptr,
+      &error);
+  if (!lib) {
+    return false;
   }
-  native_stencil_output_unsupported_ = true;
-  XELOGW(
-      "Metal: no pixel shader stencil output on this device; transferring "
-      "stencil with eight masked draws per rectangle instead");
-}
-
-MTL::DepthStencilState*
-MetalRenderTargetCache::GetTransferStencilOutputState() {
-  // Identical to the stencil clear state: always pass, no depth write, replace
-  // all eight bits. What differs is where the written value comes from - the
-  // shader's [[stencil]] output rather than the reference value.
-  return GetTransferStencilClearState();
+  MTL::Function* vs = lib->newFunction(
+      NS::String::string("xe_stencil_probe_vs", NS::UTF8StringEncoding));
+  MTL::Function* ps = lib->newFunction(
+      NS::String::string("xe_stencil_probe_ps", NS::UTF8StringEncoding));
+  MTL::RenderPipelineState* pipeline = nullptr;
+  if (vs && ps) {
+    MTL::PixelFormat depth_format =
+        GetDepthPixelFormat(xenos::DepthRenderTargetFormat::kD24S8);
+    MTL::RenderPipelineDescriptor* desc =
+        MTL::RenderPipelineDescriptor::alloc()->init();
+    desc->setVertexFunction(vs);
+    desc->setFragmentFunction(ps);
+    desc->setDepthAttachmentPixelFormat(depth_format);
+    desc->setStencilAttachmentPixelFormat(depth_format);
+    pipeline = device_->newRenderPipelineState(desc, &error);
+    desc->release();
+  }
+  if (vs) {
+    vs->release();
+  }
+  if (ps) {
+    ps->release();
+  }
+  lib->release();
+  if (!pipeline) {
+    return false;
+  }
+  pipeline->release();
+  return true;
 }
 
 MTL::DepthStencilState* MetalRenderTargetCache::GetTransferStencilBitState(
