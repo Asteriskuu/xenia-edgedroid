@@ -10,6 +10,7 @@
 
 #include "xenia/app/emulator_window.h"
 #include "xenia/emulator.h"
+#include "xenia/gpu/graphics_system.h"
 #include "xenia/ui/window.h"
 
 namespace xe {
@@ -80,22 +81,22 @@ void EmulatorWindow::SaveImage(const std::filesystem::path& path,
 
 void EmulatorWindow::ToggleProfilesConfigDialog() {}
 void EmulatorWindow::ToggleAudioDialog() {}
-void EmulatorWindow::ToggleConfigDialog(const std::string&) {}
-void EmulatorWindow::OpenConfigDialog(const std::string&) {}
+void EmulatorWindow::ToggleConfigDialog() {}
+void EmulatorWindow::OpenConfigDialog(const std::string& category) {}
 void EmulatorWindow::ToggleControllerVibration() {}
 void EmulatorWindow::FileOpen() {}
 void EmulatorWindow::FileAddGames() {}
 
 void EmulatorWindow::UpdateAntiAliasingCvar(
-    gpu::CommandProcessor::SwapPostEffect) {}
+    gpu::CommandProcessor::SwapPostEffect effect) {}
 
 void EmulatorWindow::UpdateScalingAndSharpeningCvar(
-    ui::Presenter::GuestOutputPaintConfig::Effect) {}
+    ui::Presenter::GuestOutputPaintConfig::Effect effect) {}
 
-void EmulatorWindow::UpdateFsrSharpnessCvar(float) {}
-void EmulatorWindow::UpdateFsrMaxUpsamplingPassesCvar(uint32_t) {}
-void EmulatorWindow::UpdateCasSharpnessCvar(float) {}
-void EmulatorWindow::UpdateDitherCvar(bool) {}
+void EmulatorWindow::UpdateFsrSharpnessCvar(float value) {}
+void EmulatorWindow::UpdateFsrMaxUpsamplingPassesCvar(uint32_t value) {}
+void EmulatorWindow::UpdateCasSharpnessCvar(float value) {}
+void EmulatorWindow::UpdateDitherCvar(bool value) {}
 
 const char* EmulatorWindow::GetCvarValueForSwapPostEffect(
     gpu::CommandProcessor::SwapPostEffect effect) {
