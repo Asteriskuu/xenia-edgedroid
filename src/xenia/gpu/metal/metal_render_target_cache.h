@@ -408,6 +408,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   struct TransferPipelineKey {
     TransferShaderKey shader_key;
     uint32_t color_attachment_index = 0;
+    uint32_t native_stencil_output = 0;
     TransferColorAttachmentFormats color_attachment_formats = {};
     MTL::PixelFormat depth_attachment_format = MTL::PixelFormatInvalid;
     MTL::PixelFormat stencil_attachment_format = MTL::PixelFormatInvalid;
@@ -421,6 +422,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
         };
         size_t h = TransferShaderKey::Hasher()(key.shader_key);
         h = combine(h, key.color_attachment_index);
+        h = combine(h, key.native_stencil_output);
         h = combine(h, size_t(key.depth_attachment_format));
         h = combine(h, size_t(key.stencil_attachment_format));
         for (MTL::PixelFormat color_format : key.color_attachment_formats) {
@@ -528,6 +530,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   MTL::DepthStencilState* transfer_depth_clear_state_ = nullptr;
   MTL::DepthStencilState* transfer_stencil_clear_state_ = nullptr;
   MTL::DepthStencilState* transfer_stencil_bit_states_[8] = {};
+  bool native_stencil_output_unsupported_ = false;
   MTL::Buffer* transfer_dummy_buffer_ = nullptr;
   MTL::Texture* transfer_dummy_color_float_[3] = {};
   MTL::Texture* transfer_dummy_color_uint_[3] = {};
@@ -611,7 +614,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   MTL::RenderPipelineState* GetOrCreateTransferPipelines(
       const TransferShaderKey& key, MTL::PixelFormat dest_format,
       bool dest_is_uint, bool tile_instanced,
-      uint32_t color_attachment_index = 0,
+      bool native_stencil_output = false, uint32_t color_attachment_index = 0,
       const TransferColorAttachmentFormats* color_attachment_formats = nullptr,
       MTL::PixelFormat depth_attachment_format = MTL::PixelFormatInvalid,
       MTL::PixelFormat stencil_attachment_format = MTL::PixelFormatInvalid);
@@ -633,6 +636,11 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   MTL::DepthStencilState* GetTransferNoDepthStencilState();
   MTL::DepthStencilState* GetTransferDepthClearState();
   MTL::DepthStencilState* GetTransferStencilClearState();
+  // Whether stencil transfers write all eight bits from one draw rather than
+  // one masked draw per bit.
+  bool UseNativeStencilOutputInTransfers() const;
+  void OnNativeStencilOutputUnsupported();
+  MTL::DepthStencilState* GetTransferStencilOutputState();
   MTL::DepthStencilState* GetTransferStencilBitState(uint32_t bit);
 
   // EDRAM tile operations
