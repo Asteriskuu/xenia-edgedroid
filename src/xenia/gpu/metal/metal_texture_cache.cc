@@ -56,7 +56,6 @@
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_dxt3_rgba8_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_dxt3a_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_dxt3aas1111_argb4_cs.h"
-#include "xenia/gpu/shaders/bytecode/metal/texture_load_dxt3aas1111_bgra4_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_dxt5_rgba8_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_dxt5a_r8_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_gbgr8_grgb8_cs.h"
@@ -75,8 +74,6 @@
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r16_unorm_float_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r4g4b4a4_a4r4g4b4_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r4g4b4a4_a4r4g4b4_scaled_cs.h"
-#include "xenia/gpu/shaders/bytecode/metal/texture_load_r4g4b4a4_b4g4r4a4_cs.h"
-#include "xenia/gpu/shaders/bytecode/metal/texture_load_r4g4b4a4_b4g4r4a4_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g5b5a1_b5g5r5a1_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g5b5a1_b5g5r5a1_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs.h"
@@ -617,7 +614,7 @@ TextureCache::LoadShaderIndex MetalTextureCache::GetLoadShaderIndexForKey(
     case xenos::TextureFormat::k_2_10_10_10:
       return kLoadShaderIndex32bpb;
     case xenos::TextureFormat::k_4_4_4_4:
-      return kLoadShaderIndexRGBA4ToBGRA4;
+      return kLoadShaderIndexRGBA4ToARGB4;
     case xenos::TextureFormat::k_10_11_11:
       return key.signed_separate ? kLoadShaderIndexR11G11B10ToRGBA16SNorm
                                  : kLoadShaderIndexR11G11B10ToRGBA16;
@@ -638,7 +635,7 @@ TextureCache::LoadShaderIndex MetalTextureCache::GetLoadShaderIndexForKey(
     case xenos::TextureFormat::k_DXT5A:
       return kLoadShaderIndexDXT5AToR8;
     case xenos::TextureFormat::k_DXT3A_AS_1_1_1_1:
-      return kLoadShaderIndexDXT3AAs1111ToBGRA4;
+      return kLoadShaderIndexDXT3AAs1111ToARGB4;
     case xenos::TextureFormat::k_CTX1:
       return kLoadShaderIndexCTX1;
 
@@ -722,6 +719,8 @@ MTL::PixelFormat MetalTextureCache::GetPixelFormatForKey(TextureKey key) const {
     case xenos::TextureFormat::k_6_5_5:
       return MTL::PixelFormatB5G6R5Unorm;
     case xenos::TextureFormat::k_4_4_4_4:
+      // Metal's only 4444 format. It reads the RGBA4ToARGB4 load shader output
+      // with red and blue exchanged - compensated in GetHostFormatSwizzle.
       return MTL::PixelFormatABGR4Unorm;
     case xenos::TextureFormat::k_8_8_8_8:
       return MTL::PixelFormatRGBA8Unorm;
@@ -778,6 +777,9 @@ MTL::PixelFormat MetalTextureCache::GetPixelFormatForKey(TextureKey key) const {
     case xenos::TextureFormat::k_DXT5A:
       return MTL::PixelFormatR8Unorm;
     case xenos::TextureFormat::k_DXT3A_AS_1_1_1_1:
+      // Metal's only 4444 format. It reads the DXT3AAs1111ToARGB4 load shader
+      // output with red and blue exchanged - compensated in
+      // GetHostFormatSwizzle.
       return MTL::PixelFormatABGR4Unorm;
     case xenos::TextureFormat::k_CTX1:
       // CTX1 is always decoded via the texture load shader to RG8.
@@ -1812,13 +1814,6 @@ bool MetalTextureCache::InitializeLoadPipelines() {
       texture_load_rgba16_snorm_float_scaled_cs_metallib,
       sizeof(texture_load_rgba16_snorm_float_scaled_cs_metallib));
 
-  init_pipeline(TextureCache::kLoadShaderIndexRGBA4ToBGRA4,
-                texture_load_r4g4b4a4_b4g4r4a4_cs_metallib,
-                sizeof(texture_load_r4g4b4a4_b4g4r4a4_cs_metallib));
-  init_pipeline_scaled(
-      TextureCache::kLoadShaderIndexRGBA4ToBGRA4,
-      texture_load_r4g4b4a4_b4g4r4a4_scaled_cs_metallib,
-      sizeof(texture_load_r4g4b4a4_b4g4r4a4_scaled_cs_metallib));
   init_pipeline(TextureCache::kLoadShaderIndexRGBA4ToARGB4,
                 texture_load_r4g4b4a4_a4r4g4b4_cs_metallib,
                 sizeof(texture_load_r4g4b4a4_a4r4g4b4_cs_metallib));
@@ -1846,9 +1841,6 @@ bool MetalTextureCache::InitializeLoadPipelines() {
   init_pipeline(TextureCache::kLoadShaderIndexDXT3A,
                 texture_load_dxt3a_cs_metallib,
                 sizeof(texture_load_dxt3a_cs_metallib));
-  init_pipeline(TextureCache::kLoadShaderIndexDXT3AAs1111ToBGRA4,
-                texture_load_dxt3aas1111_bgra4_cs_metallib,
-                sizeof(texture_load_dxt3aas1111_bgra4_cs_metallib));
   init_pipeline(TextureCache::kLoadShaderIndexDXT3AAs1111ToARGB4,
                 texture_load_dxt3aas1111_argb4_cs_metallib,
                 sizeof(texture_load_dxt3aas1111_argb4_cs_metallib));
@@ -2797,6 +2789,14 @@ uint32_t MetalTextureCache::GetHostFormatSwizzle(TextureKey key) const {
     case xenos::TextureFormat::k_10_11_11:
     case xenos::TextureFormat::k_11_11_10:
       return xenos::XE_GPU_TEXTURE_SWIZZLE_RGBB;
+
+    case xenos::TextureFormat::k_4_4_4_4:
+    case xenos::TextureFormat::k_DXT3A_AS_1_1_1_1:
+      // The ARGB4 load shaders output the layout Vulkan pairs with
+      // VK_FORMAT_B4G4R4A4_UNORM_PACK16; ABGR4Unorm is
+      // VK_FORMAT_R4G4B4A4_UNORM_PACK16, so red and blue arrive exchanged.
+      // MoltenVK exposes the former on ABGR4Unorm with this same swizzle.
+      return XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, A);
 
     case xenos::TextureFormat::k_8_8_8_8:
     case xenos::TextureFormat::k_8_8_8_8_A:
