@@ -221,6 +221,10 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   bool HasPendingDrawPassTransfers() const {
     return pending_draw_pass_transfer_mask_ != 0;
   }
+  // Whether the queue can be encoded into a pass with this descriptor, checked
+  // before the encoder exists so a rejected queue can still be run standalone.
+  bool PreflightPendingDrawPassTransfers(
+      MTL::RenderPassDescriptor* pass_descriptor);
   // Encodes the queued transfers as draws at the head of the guest's pass.
   // Failure leaves the queue intact for FlushPendingDrawPassTransfers;
   // mutations_out describes what was already encoded either way.
@@ -679,8 +683,6 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
       const std::vector<Transfer>& transfers) const;
   bool PreflightPendingDrawPassTransfers(
       const TransferAttachmentFormats& attachment_formats);
-  bool PreflightPendingDrawPassTransfers(
-      MTL::RenderPassDescriptor* pass_descriptor);
   void ClearPendingDrawPassTransfers();
 
   // Writes contents of host render targets within rectangles from

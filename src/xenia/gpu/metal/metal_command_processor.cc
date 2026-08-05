@@ -4708,6 +4708,49 @@ void MetalCommandProcessor::ResetMslRenderEncoderStateCache() {
   ResetRenderEncoderResourceUsage();
 }
 
+void MetalCommandProcessor::InvalidateRenderEncoderStateAfterDrawPassTransfers(
+    MetalRenderTargetCache::DrawPassTransferEncoderMutationMask mutations) {
+  if (!mutations) {
+    return;
+  }
+  using RTC = MetalRenderTargetCache;
+  if (mutations & RTC::kDrawPassTransferEncoderMutationPipeline) {
+    msl_bound_pipeline_state_ = nullptr;
+  }
+  if (mutations & RTC::kDrawPassTransferEncoderMutationDepthStencil) {
+    msl_depth_stencil_state_ = nullptr;
+  }
+  if (mutations & RTC::kDrawPassTransferEncoderMutationStencilReference) {
+    msl_stencil_reference_valid_ = false;
+  }
+  if (mutations & RTC::kDrawPassTransferEncoderMutationViewport) {
+    msl_viewport_valid_ = false;
+  }
+  if (mutations & RTC::kDrawPassTransferEncoderMutationScissor) {
+    msl_scissor_valid_ = false;
+  }
+  if (mutations & RTC::kDrawPassTransferEncoderMutationRasterizer) {
+    msl_rasterizer_state_valid_ = false;
+  }
+  // The DXIL binder rebinds its own buffer slots on every draw, so only the
+  // MSL path's bindings need dropping: shared memory sits at buffer slot 0 and
+  // the constant buffers from slot 1, both stages, and its textures start at
+  // fragment texture 0.
+  if (mutations & (RTC::kDrawPassTransferEncoderMutationVertexSlot0 |
+                   RTC::kDrawPassTransferEncoderMutationFragmentSlot0)) {
+    msl_bound_shared_memory_buffer_ = nullptr;
+  }
+  if (mutations & (RTC::kDrawPassTransferEncoderMutationVertexSlot1 |
+                   RTC::kDrawPassTransferEncoderMutationFragmentSlot1)) {
+    msl_bound_uniforms_offsets_valid_ = false;
+  }
+  if (mutations & RTC::kDrawPassTransferEncoderMutationFragmentTextures) {
+    msl_bound_pixel_textures_.fill(nullptr);
+    msl_bound_pixel_texture_count_ = 0;
+    msl_bound_pixel_texture_binding_uid_ = 0;
+  }
+}
+
 void MetalCommandProcessor::ResetMslCrossEncoderReuseCaches() {
   msl_last_argbuf_vertex_textures_.fill(nullptr);
   msl_last_argbuf_vertex_texture_count_ = 0;
@@ -4849,6 +4892,24 @@ void MetalCommandProcessor::BeginCommandBuffer() {
     return;
   }
 
+  // Ownership transfers queued for this pass have to be encoded into it ahead
+  // of the guest's draws. Resolve what it cannot take here, while no encoder
+  // exists yet and the descriptor can still be rebuilt.
+  if (render_target_cache_ &&
+      render_target_cache_->HasPendingDrawPassTransfers() &&
+      !render_target_cache_->PreflightPendingDrawPassTransfers(
+          pass_descriptor)) {
+    if (!render_target_cache_->FlushPendingDrawPassTransfers()) {
+      XELOGE(
+          "BeginCommandBuffer: failed to perform the queued render target "
+          "ownership transfers");
+    }
+    if (MTL::RenderPassDescriptor* cache_desc =
+            render_target_cache_->GetRenderPassDescriptor(1)) {
+      pass_descriptor = cache_desc;
+    }
+  }
+
   // Attach the ZPD visibility buffer so occlusion queries write their results
   // straight into shared memory with no explicit resolve step.
   if (GetZPDMode() != ZPDMode::kFake && IsZPDQueryPoolReady()) {
@@ -4903,6 +4964,39 @@ void MetalCommandProcessor::BeginCommandBuffer() {
     ff_blend_factor_valid_ = false;
     current_render_pass_descriptor_ = pass_descriptor;
     UseRenderEncoderAttachmentHeaps(pass_descriptor);
+  }
+
+  if (render_target_cache_ &&
+      render_target_cache_->HasPendingDrawPassTransfers()) {
+    // An occlusion query already counting on this encoder would count the
+    // transfer draws too. Closing the segment makes the next draw reopen it on
+    // a fresh pool slot, the only legal way to resume counting mid-encoder.
+    CloseQuerySegment();
+    MetalRenderTargetCache::DrawPassTransferEncoderMutationMask mutations =
+        MetalRenderTargetCache::kDrawPassTransferEncoderMutationNone;
+    bool transfers_encoded =
+        render_target_cache_->EncodePendingDrawPassTransfers(
+            current_render_encoder_, pass_descriptor, &mutations);
+    InvalidateRenderEncoderStateAfterDrawPassTransfers(mutations);
+    if (!transfers_encoded) {
+      // Preflight passed, so this is a resource failure part way in. Drop the
+      // pass and run the queue standalone: every attachment loaded DontCare is
+      // one the transfers rewrite in full, so the flush restores it.
+      static bool draw_pass_transfer_encode_failed_logged = false;
+      if (!draw_pass_transfer_encode_failed_logged) {
+        draw_pass_transfer_encode_failed_logged = true;
+        XELOGE(
+            "BeginCommandBuffer: failed to encode the queued render target "
+            "ownership transfers into the draw pass");
+      }
+      EndRenderEncoder();
+      if (!render_target_cache_->FlushPendingDrawPassTransfers()) {
+        XELOGE(
+            "BeginCommandBuffer: failed to perform the queued render target "
+            "ownership transfers");
+      }
+      return;
+    }
   }
 
   // Derive viewport/scissor from the actual bound render target rather than

@@ -195,6 +195,10 @@ class MetalCommandProcessor : public CommandProcessor {
   void ResetMslRenderEncoderStateCache();
   // Reset cross-encoder SPIRV-Cross reuse caches at command-buffer boundaries.
   void ResetMslCrossEncoderReuseCaches();
+  // Drops the cached bindings and states the render target cache's transfer
+  // draws overwrote while sharing the guest's render encoder.
+  void InvalidateRenderEncoderStateAfterDrawPassTransfers(
+      MetalRenderTargetCache::DrawPassTransferEncoderMutationMask mutations);
   bool CanEndSubmissionImmediately();
   // Blocks until the given submission's command buffer has completed. The
   // submission must already be committed.

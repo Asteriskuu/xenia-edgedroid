@@ -68,7 +68,7 @@ DEFINE_bool(
     metal_transfer_msaa_sample_id, true,
     "Use sample_id in Metal transfer shaders for MSAA (sample-rate shading)",
     "Metal");
-DEFINE_bool(metal_transfer_in_draw_pass, false,
+DEFINE_bool(metal_transfer_in_draw_pass, true,
             "Encode render target ownership transfers at the head of the "
             "guest's own render pass instead of in passes of their own",
             "Metal");
@@ -5125,6 +5125,12 @@ MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateEdramLoadPipeline(
 bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
                                      uint32_t& written_length,
                                      MTL::CommandBuffer* command_buffer) {
+  // Resolving reads the render targets, so anything still queued for a draw
+  // pass has to have been applied to them first.
+  if (!FlushPendingDrawPassTransfers()) {
+    return false;
+  }
+
   written_address = 0;
   written_length = 0;
   const RegisterFile& regs = register_file();
