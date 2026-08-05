@@ -2578,7 +2578,12 @@ void MetalCommandProcessor::ApplyViewportAndScissor(
   mtl_viewport.height = static_cast<double>(viewport_info.xy_extent[1]);
   mtl_viewport.znear = viewport_info.z_min;
   mtl_viewport.zfar = viewport_info.z_max;
-  current_render_encoder_->setViewport(mtl_viewport);
+  if (!msl_viewport_valid_ ||
+      std::memcmp(&msl_viewport_, &mtl_viewport, sizeof(mtl_viewport)) != 0) {
+    current_render_encoder_->setViewport(mtl_viewport);
+    msl_viewport_ = mtl_viewport;
+    msl_viewport_valid_ = true;
+  }
 
   MTL::ScissorRect mtl_scissor;
   mtl_scissor.x = scissor.offset[0];
@@ -4964,6 +4969,23 @@ void MetalCommandProcessor::BeginCommandBuffer() {
     ff_blend_factor_valid_ = false;
     current_render_pass_descriptor_ = pass_descriptor;
     UseRenderEncoderAttachmentHeaps(pass_descriptor);
+
+    // Start the encoder off covering the whole bound render target rather than
+    // a hard-coded 1280x720. Prefer color RT 0 from the MetalRenderTargetCache,
+    // falling back to depth (depth-only passes) and then legacy
+    // render_target_width_/height_ when needed. Every draw applies the guest's
+    // own viewport and scissor over this before it runs.
+    uint32_t rt_width = 1;
+    uint32_t rt_height = 1;
+    GetBoundRenderTargetSize(render_target_cache_.get(), render_target_width_,
+                             render_target_height_, rt_width, rt_height);
+    MTL::Viewport viewport = {
+        0.0, 0.0, static_cast<double>(rt_width), static_cast<double>(rt_height),
+        0.0, 1.0};
+    current_render_encoder_->setViewport(viewport);
+    // Must not exceed the render pass dimensions.
+    MTL::ScissorRect scissor = {0, 0, rt_width, rt_height};
+    current_render_encoder_->setScissorRect(scissor);
   }
 
   if (render_target_cache_ &&
@@ -4998,25 +5020,6 @@ void MetalCommandProcessor::BeginCommandBuffer() {
       return;
     }
   }
-
-  // Derive viewport/scissor from the actual bound render target rather than
-  // a hard-coded 1280x720. Prefer color RT 0 from the MetalRenderTargetCache,
-  // falling back to depth (depth-only passes) and then legacy
-  // render_target_width_/height_ when needed.
-  uint32_t rt_width = 1;
-  uint32_t rt_height = 1;
-  GetBoundRenderTargetSize(render_target_cache_.get(), render_target_width_,
-                           render_target_height_, rt_width, rt_height);
-
-  // Set viewport
-  MTL::Viewport viewport = {
-      0.0, 0.0, static_cast<double>(rt_width), static_cast<double>(rt_height),
-      0.0, 1.0};
-  current_render_encoder_->setViewport(viewport);
-
-  // Set scissor (must not exceed render pass dimensions)
-  MTL::ScissorRect scissor = {0, 0, rt_width, rt_height};
-  current_render_encoder_->setScissorRect(scissor);
 }
 
 bool MetalCommandProcessor::EnsureSpirvUniformBuffer() {
