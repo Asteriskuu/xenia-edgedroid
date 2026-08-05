@@ -28,13 +28,10 @@ Releases
 FAQ
 ---
 
-- Q: Why is game X running slower on Xenia Edge than Xenia Canary?<br>
-  A: Edge defaults to accuracy over performance. You can tune this per-game by using the Guide button while in-game (PS or Xbox button in the middle of the controller) and going to Performance, then disabling various options there to reach the same performance as Canary.
-
 - Q: How to tell what options a particular game might need?<br>
   A: Many games that are not running well by default require one or two simple config changes that make them (near) perfect. To find out, right-click the game in the game list and go to Compatibility. If there is an existing compatibility page there will be a link to Master, Caanary, or both. Prefer information on the Canary page, you will often find the answer there.
 
-- Q: Why are translations into langauage X so bad?<br>
+- Q: Why are translations into language X so bad?<br>
   A: They're AI-generated, if you speak the language and want to help edit the relevant .po file in the assets directory and submit it. If you don't know how to use git then just open a bug and attach the fixed .po file. Best way to edit those is with a program called Poedit.
 
 - Q: Should I use Vulkan on Windows?<br>
@@ -42,5 +39,8 @@ FAQ
 
 - Q: Should I use the Windows build with wine/proton on Linux?<br>
   A: While the answer has been "yes" for years it is no longer the case. The native build for Linux is quite competitive with Windows now and is recommened over wine/proton.
+
+- Q: Why is macOS build not as capable as Windows / Linux?<br>
+  A: macOS is the newest port, with a completely different CPU and GPU backends that have not had nearly the amount of testing of the other platforms. Many games will fail on macOS that run on Windows and Linux. This is working as intended for now.
 
 
