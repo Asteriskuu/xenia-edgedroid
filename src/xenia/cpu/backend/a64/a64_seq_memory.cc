@@ -61,13 +61,17 @@ static bool IsPossibleMMIOInstruction(A64Emitter& e, const hir::Instr* i) {
 struct DELAY_EXECUTION
     : Sequence<DELAY_EXECUTION, I<OPCODE_DELAY_EXECUTION, VoidOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // Coalesce consecutive yields (pure SMT hints) to shrink hot guest spin loops.
+    // db16cyc throttles a guest spin loop. yield is the literal translation
+    // but NOPs on Cortex-X/A7xx, so the sled cost nothing; isb is the usual
+    // stand-in - a pipeline flush with no guest-observable effect. Coalesce
+    // consecutive barriers so a long sled stays one instruction.
+    constexpr uint32_t kIsbSy = 0xD5033FDFu;
     if (e.getSize() >= sizeof(uint32_t) &&
         *reinterpret_cast<const uint32_t*>(e.getCurr() - sizeof(uint32_t)) ==
-            0xD503203Fu) {
+            kIsbSy) {
       return;
     }
-    e.yield();
+    e.isb(Xbyak_aarch64::SY);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_DELAY_EXECUTION, DELAY_EXECUTION);
