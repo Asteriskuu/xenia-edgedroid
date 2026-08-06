@@ -497,6 +497,10 @@ bool logging::ShouldLog(LogLevel log_level, uint32_t log_mask) {
          (log_mask & cvars::log_mask) == 0;
 }
 
+uint32_t logging::GetFrameNumber() {
+  return global_frame_number_.load(std::memory_order_relaxed);
+}
+
 void logging::IncrementFrameNumber() {
   global_frame_number_.fetch_add(1, std::memory_order_relaxed);
 }

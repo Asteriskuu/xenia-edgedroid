@@ -260,6 +260,17 @@ class GuestScheduler {
   uint64_t quantum_ticks_ = 0;
   std::unique_ptr<xe::threading::Thread> watchdog_thread_;
   std::unique_ptr<xe::threading::Event> watchdog_event_;
+  // No-progress detection. The stall detector above only catches a CPU that
+  // stops switching fibers; the other wedge mode has every CPU rotating
+  // healthily while the guest presents no frames, because the fibers are all
+  // waiting on something none of them will produce. Triggered off the present
+  // counter, it dumps what every CPU is running or waiting on.
+  static constexpr uint32_t kNoProgressReportTicks = 2000;  // ~2 s
+  uint32_t last_frame_number_ = 0;
+  uint32_t no_progress_ticks_ = 0;
+  bool no_progress_reported_ = false;
+  void ReportNoProgress();
+
   // Watchdog-only stall detection state, touched under lock_.
   static constexpr uint32_t kStallReportTicks = 2000;  // ~2 s at a 1 ms period
   uint64_t stall_last_seq_[kMaxCpus] = {};

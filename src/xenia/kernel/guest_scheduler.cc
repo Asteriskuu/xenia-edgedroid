@@ -1262,6 +1262,82 @@ void GuestScheduler::ReportStatsIfDue() {
       io_calls ? to_us(io_run / io_calls) : 0);
 }
 
+// Names what a fiber is parked on, for the no-progress dump.
+static const char* WaitObjectKind(XObject* object) {
+  if (!object) {
+    return "none";
+  }
+  switch (object->type()) {
+    case XObject::Type::Event:
+      return "event";
+    case XObject::Type::Semaphore:
+      return "semaphore";
+    case XObject::Type::Mutant:
+      return "mutant";
+    case XObject::Type::Thread:
+      return "thread";
+    case XObject::Type::Timer:
+      return "timer";
+    default:
+      return "other";
+  }
+}
+
+void GuestScheduler::ReportNoProgress() {
+  XELOGW(
+      "GuestScheduler: no guest frame presented in {} watchdog ticks while the "
+      "dispatch threads keep switching. Every fiber below is waiting on "
+      "something none of them is producing:",
+      no_progress_ticks_);
+  uint64_t now_ms = Clock::QueryHostUptimeMillis();
+  std::lock_guard<std::mutex> lock(lock_);
+  for (int i = 0; i < kMaxCpus; ++i) {
+    Cpu& cpu = cpus_[i];
+    if (XThread* running = cpu.current_thread) {
+      auto* context = running->thread_state()->context();
+      auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+      XELOGW(
+          "  CPU {} running tid={:08X} '{}' pc~lr={:08X} irql={} "
+          "preempt_requested={} ready_summary={:#x}",
+          i, running->thread_id(), running->thread_name(),
+          uint32_t(context->lr), uint32_t(kpcr->current_irql),
+          uint32_t(context->preempt_requested), cpu.ready_summary);
+    } else {
+      XELOGW("  CPU {} idle, ready_summary={:#x}", i, cpu.ready_summary);
+    }
+    // Parked fibers are the interesting half: the cycle is whatever they are
+    // all waiting for.
+    int listed = 0;
+    for (XThread* t = cpu.blocked_head; t && listed < 8;
+         t = t->scheduler_links().ready_next, ++listed) {
+      auto& links = t->scheduler_links();
+      XObject* obj = t->cooperative_wait_object();
+      auto* context = t->thread_state()->context();
+      int64_t due_in =
+          links.wait_deadline_ms
+              ? int64_t(links.wait_deadline_ms) - int64_t(now_ms)
+              : -1;
+      XELOGW(
+          "    blocked tid={:08X} '{}' pc~lr={:08X} on {} obj={} gated={} "
+          "alertable={} epoch={} deadline_in_ms={}",
+          t->thread_id(), t->thread_name(), uint32_t(context->lr),
+          WaitObjectKind(obj), static_cast<const void*>(obj),
+          links.wait_gated ? 1 : 0, links.wait_alertable ? 1 : 0,
+          links.wait_epoch, due_in);
+    }
+    // Ready-but-not-running fibers matter too: a queue that never drains
+    // means the CPU is rotating between the same few spinners.
+    for (int prio = 31; prio >= 0; --prio) {
+      for (XThread* t = cpu.ready_head[prio]; t;
+           t = t->scheduler_links().ready_next) {
+        auto* context = t->thread_state()->context();
+        XELOGW("    ready   tid={:08X} '{}' pc~lr={:08X} prio={}",
+               t->thread_id(), t->thread_name(), uint32_t(context->lr), prio);
+      }
+    }
+  }
+}
+
 void GuestScheduler::WatchdogLoop() {
   Profiler::ThreadEnter("GuestScheduler Watchdog");
   // Microseconds, not milliseconds: an integer division to ms floors every
@@ -1285,6 +1361,20 @@ void GuestScheduler::WatchdogLoop() {
     if (shutting_down_.load()) {
       break;
     }
+    // No-progress detection, outside lock_ (ReportNoProgress takes it).
+    // Only meaningful once something has been dispatched, so a title still
+    // loading is not reported.
+    uint32_t frame = xe::logging::GetFrameNumber();
+    if (frame != last_frame_number_ || !dispatched_any_.load()) {
+      last_frame_number_ = frame;
+      no_progress_ticks_ = 0;
+      no_progress_reported_ = false;
+    } else if (++no_progress_ticks_ >= kNoProgressReportTicks &&
+               !no_progress_reported_) {
+      no_progress_reported_ = true;
+      ReportNoProgress();
+    }
+
     uint64_t now = Clock::host_tick_count_raw();
     std::lock_guard<std::mutex> lock(lock_);
     for (int i = 0; i < kMaxCpus; ++i) {
