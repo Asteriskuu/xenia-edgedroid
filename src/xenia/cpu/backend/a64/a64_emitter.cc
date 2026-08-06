@@ -30,6 +30,14 @@
 DECLARE_int64(a64_max_stackpoints);
 DECLARE_bool(a64_enable_host_guest_stack_synchronization);
 
+DEFINE_bool(
+    log_safepoint_pc, false,
+    "Record the guest address of every JIT safepoint a fiber passes, so the "
+    "cooperative scheduler's no-progress report can name where a wedged "
+    "fiber last checked in rather than only its link register. Costs a "
+    "materialize and a store on every loop back-edge; diagnostic only.",
+    "CPU");
+
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -926,7 +934,7 @@ uint32_t A64Emitter::MapReg(const hir::Value* v, const uint32_t* map, int count,
   return map[index];
 }
 
-void A64Emitter::EmitPreemptCheck() {
+void A64Emitter::EmitPreemptCheck(uint32_t guest_address) {
   // Only safe at a block head, where the per-block register allocator leaves no
   // guest value live and ForgetFpcrMode has already run, so the unannounced
   // guest->host call cannot lose a register or desync the mode tracking.
@@ -950,6 +958,14 @@ void A64Emitter::EmitPreemptCheck() {
     e.blr(e.x9);
     e.b(after);
   });
+  if (cvars::log_safepoint_pc && guest_address) {
+    // Diagnostic only: costs a materialize + store on every loop back-edge, so
+    // it stays off unless a wedge is being chased.
+    static_assert(offsetof(ppc::PPCContext, last_safepoint_pc) < 16384);
+    mov(w9, guest_address);
+    str(w9, ptr(x20, static_cast<uint32_t>(
+                         offsetof(ppc::PPCContext, last_safepoint_pc))));
+  }
   ldrb(w8, ptr(x20, flag_offset));
   cbnz(w8, do_yield);
   L(after);

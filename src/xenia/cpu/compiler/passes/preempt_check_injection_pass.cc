@@ -70,7 +70,20 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
       }
       if (first) {
         if (first->GetOpcodeNum() != OPCODE_CHECK_PREEMPT) {
-          builder->CheckPreempt()->MoveBefore(first);
+          // Carry the guest address of the safepoint so the backend can record
+          // where a fiber last checked in. A fiber that stops yielding is
+          // otherwise only locatable by its link register, which points at the
+          // last call it made rather than the loop it is stuck in.
+          uint32_t guest_address = 0;
+          for (auto s = b->instr_head; s; s = s->next) {
+            if (s->opcode == &OPCODE_SOURCE_OFFSET_info) {
+              guest_address = uint32_t(s->src1.offset);
+              break;
+            }
+          }
+          Instr* check = builder->CheckPreempt();
+          check->src1.offset = guest_address;
+          check->MoveBefore(first);
         }
         break;
       }

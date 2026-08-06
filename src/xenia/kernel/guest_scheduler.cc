@@ -1297,10 +1297,11 @@ void GuestScheduler::ReportNoProgress() {
       auto* context = running->thread_state()->context();
       auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
       XELOGW(
-          "  CPU {} running tid={:08X} '{}' pc~lr={:08X} irql={} "
-          "preempt_requested={} ready_summary={:#x}",
+          "  CPU {} running tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
+          "irql={} preempt_requested={} ready_summary={:#x}",
           i, running->thread_id(), running->thread_name(),
-          uint32_t(context->lr), uint32_t(kpcr->current_irql),
+          uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
+          uint32_t(kpcr->current_irql),
           uint32_t(context->preempt_requested), cpu.ready_summary);
     } else {
       XELOGW("  CPU {} idle, ready_summary={:#x}", i, cpu.ready_summary);
@@ -1318,9 +1319,10 @@ void GuestScheduler::ReportNoProgress() {
               ? int64_t(links.wait_deadline_ms) - int64_t(now_ms)
               : -1;
       XELOGW(
-          "    blocked tid={:08X} '{}' pc~lr={:08X} on {} obj={} gated={} "
-          "alertable={} epoch={} deadline_in_ms={}",
-          t->thread_id(), t->thread_name(), uint32_t(context->lr),
+          "    blocked tid={:08X} '{}' last_safepoint={:08X} lr={:08X} on {} "
+          "obj={} gated={} alertable={} epoch={} deadline_in_ms={}",
+          t->thread_id(), t->thread_name(),
+          uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
           WaitObjectKind(obj), static_cast<const void*>(obj),
           links.wait_gated ? 1 : 0, links.wait_alertable ? 1 : 0,
           links.wait_epoch, due_in);
@@ -1331,8 +1333,11 @@ void GuestScheduler::ReportNoProgress() {
       for (XThread* t = cpu.ready_head[prio]; t;
            t = t->scheduler_links().ready_next) {
         auto* context = t->thread_state()->context();
-        XELOGW("    ready   tid={:08X} '{}' pc~lr={:08X} prio={}",
-               t->thread_id(), t->thread_name(), uint32_t(context->lr), prio);
+        XELOGW("    ready   tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
+               "prio={}",
+               t->thread_id(), t->thread_name(),
+               uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
+               prio);
       }
     }
   }
@@ -1401,10 +1406,12 @@ void GuestScheduler::WatchdogLoop() {
       auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
       XELOGW(
           "GuestScheduler: CPU {} has not switched fibers in {} watchdog "
-          "ticks. Running tid={:08X} '{}' pc~lr={:08X} irql={} "
-          "preempt_requested={} irql_defers={} lock_defers={} ready_summary={:#x}",
+          "ticks. Running tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
+          "irql={} preempt_requested={} irql_defers={} lock_defers={} "
+          "ready_summary={:#x}",
           i, stall_ticks_[i], running->thread_id(), running->thread_name(),
-          uint32_t(context->lr), uint32_t(kpcr->current_irql),
+          uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
+          uint32_t(kpcr->current_irql),
           uint32_t(context->preempt_requested),
           running->scheduler_links().preempt_defers_irql,
           running->scheduler_links().preempt_defers_lock,
