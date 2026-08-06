@@ -1130,11 +1130,11 @@ bool VulkanRenderTargetCache::Resolve(
     // If everything owning the source is native, copy at 1x1 into shared
     // memory.
     bool copy_native = false;
+    uint32_t dump_base = 0;
+    uint32_t dump_row_length_used = 0;
+    uint32_t dump_rows = 0;
+    uint32_t dump_pitch = 0;
     if (GetPath() == Path::kHostRenderTargets) {
-      uint32_t dump_base;
-      uint32_t dump_row_length_used;
-      uint32_t dump_rows;
-      uint32_t dump_pitch;
       resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used,
                                         dump_rows, dump_pitch);
       copy_native = IsResolveSourceNativeOnly(dump_base, dump_row_length_used,
@@ -1149,14 +1149,7 @@ bool VulkanRenderTargetCache::Resolve(
           return false;
         }
       }
-      // Dump the current contents of the render targets owning the affected
-      // range to edram_buffer_.
-      // TODO(Triang3l): Direct host render target -> shared memory resolve
-      // shaders for non-converting cases.
-      DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch,
-                        copy_native);
     }
-    bool copy_dest_scaled = draw_resolution_scaled && !copy_native;
 
     draw_util::ResolveCopyShaderConstants copy_shader_constants;
     uint32_t copy_group_count_x, copy_group_count_y;
@@ -1165,7 +1158,50 @@ bool VulkanRenderTargetCache::Resolve(
         copy_native ? 1 : draw_resolution_scale_y(), copy_shader_constants,
         copy_group_count_x, copy_group_count_y);
     assert_true(copy_group_count_x && copy_group_count_y);
-    if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
+
+    bool resolved_directly = false;
+    if (GetPath() == Path::kHostRenderTargets) {
+      // Read the render targets straight into shared memory where the copy
+      // wouldn't have converted anything, otherwise dump the current contents
+      // of the ones owning the affected range to edram_buffer_ for it.
+      DirectResolveEligibility direct_resolve_eligibility =
+          GetDirectResolveEligibility(resolve_info, copy_shader);
+      if (cvars::direct_host_resolve &&
+          direct_resolve_eligibility == DirectResolveEligibility::kEligible) {
+        resolved_directly = DirectResolveRenderTargets(
+            resolve_info, copy_shader_constants, dump_base,
+            dump_row_length_used, dump_rows, dump_pitch, shared_memory,
+            texture_cache);
+      }
+      if (direct_resolve_eligibility == DirectResolveEligibility::kEligible &&
+          !resolved_directly) {
+        direct_resolve_eligibility =
+            cvars::direct_host_resolve
+                ? DirectResolveEligibility::kBackendUnavailable
+                : DirectResolveEligibility::kDisabled;
+      }
+      AccumulateDirectResolveStats(direct_resolve_eligibility);
+      if (!resolved_directly) {
+        DumpRenderTargets(dump_base, dump_row_length_used, dump_rows,
+                          dump_pitch, copy_native);
+      }
+    }
+    bool copy_dest_scaled = draw_resolution_scaled && !copy_native;
+
+    if (resolved_directly) {
+      texture_cache.MarkRangeAsResolved(resolve_info.copy_dest_extent_start,
+                                        resolve_info.copy_dest_extent_length,
+                                        false);
+      written_address_out = resolve_info.copy_dest_extent_start;
+      written_length_out = resolve_info.copy_dest_extent_length;
+      if (copy_dest_info_out) {
+        *copy_dest_info_out = resolve_info.copy_dest_info;
+      }
+      if (written_scaled_out) {
+        *written_scaled_out = false;
+      }
+      copied = true;
+    } else if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
       const draw_util::ResolveCopyShaderInfo& copy_shader_info =
           draw_util::resolve_copy_shader_info[size_t(copy_shader)];
 
@@ -6016,7 +6052,9 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(EdramDumpShaderKey key) {
 
   EdramDumpShaderOptions shader_options;
   shader_options.spirv_version = spirv_version_;
-  shader_options.descriptor_set_edram = kDumpDescriptorSetEdram;
+  // The direct resolve variants bind the destination where the dumps bind the
+  // EDRAM buffer - one storage buffer either way, so one pipeline layout.
+  shader_options.descriptor_set_dest = kDumpDescriptorSetEdram;
   shader_options.descriptor_set_source = kDumpDescriptorSetSource;
   shader_options.resolution_scale_x = draw_resolution_scale_x();
   shader_options.resolution_scale_y = draw_resolution_scale_y();
@@ -6039,8 +6077,9 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(EdramDumpShaderKey key) {
       shader_code.data(), sizeof(uint32_t) * shader_code.size());
   if (pipeline == VK_NULL_HANDLE) {
     XELOGE(
-        "VulkanRenderTargetCache: Failed to create a render target dumping "
-        "pipeline for {}-sample render targets with format {}",
+        "VulkanRenderTargetCache: Failed to create a render target {} pipeline "
+        "for {}-sample render targets with format {}",
+        key.direct_resolve ? "direct resolve" : "dumping",
         UINT32_C(1) << uint32_t(key.msaa_samples),
         key.is_depth
             ? xenos::GetDepthRenderTargetFormatName(key.GetDepthFormat())
@@ -6048,6 +6087,216 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(EdramDumpShaderKey key) {
   }
   dump_pipelines_.emplace(key, pipeline);
   return pipeline;
+}
+
+bool VulkanRenderTargetCache::DirectResolveRenderTargets(
+    const draw_util::ResolveInfo& resolve_info,
+    const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
+    uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
+    uint32_t dump_pitch, VulkanSharedMemory& shared_memory,
+    VulkanTextureCache& texture_cache) {
+  assert_true(GetPath() == Path::kHostRenderTargets);
+
+  // The whole buffer bound persistently is what lets copy_dest_base stay an
+  // absolute byte offset, which is what the shader adds to the tiled address.
+  VkDescriptorSet descriptor_set_dest =
+      texture_cache.shared_memory_persistent_descriptor_set();
+  if (descriptor_set_dest == VK_NULL_HANDLE) {
+    static bool no_persistent_dest_logged = false;
+    if (!no_persistent_dest_logged) {
+      no_persistent_dest_logged = true;
+      XELOGW(
+          "VulkanRenderTargetCache: No persistent shared memory descriptor "
+          "set (maxStorageBufferRange below the shared memory size) - every "
+          "resolve will take the EDRAM round trip");
+    }
+    return false;
+  }
+
+  GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,
+                                 dump_pitch, dump_rectangles_);
+  if (dump_rectangles_.empty()) {
+    return false;
+  }
+
+  // Every pipeline has to exist before anything is encoded - once the first
+  // dispatch is in, falling back would resolve the same range twice.
+  dump_invocations_.clear();
+  dump_invocations_.reserve(dump_rectangles_.size());
+  for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+    RenderTargetKey rt_key =
+        static_cast<VulkanRenderTarget*>(rectangle.render_target)->key();
+    EdramDumpShaderKey pipeline_key;
+    pipeline_key.msaa_samples = rt_key.msaa_samples;
+    pipeline_key.resource_format = rt_key.resource_format;
+    pipeline_key.is_depth = rt_key.is_depth;
+    pipeline_key.source_scale_native = rt_key.scale_native;
+    pipeline_key.direct_resolve = 1;
+    if (GetDumpPipeline(pipeline_key) == VK_NULL_HANDLE) {
+      return false;
+    }
+    dump_invocations_.emplace_back(rectangle, pipeline_key);
+  }
+
+  if (!shared_memory.RequestRange(resolve_info.copy_dest_extent_start,
+                                  resolve_info.copy_dest_extent_length)) {
+    XELOGE(
+        "VulkanRenderTargetCache: Failed to obtain the direct resolve "
+        "destination memory region");
+    return false;
+  }
+
+  command_processor_.PushDebugMarker("DirectResolveRenderTargets: base tile %u",
+                                     dump_base);
+
+  shared_memory.Use(VulkanSharedMemory::Usage::kComputeWrite,
+                    std::make_pair(resolve_info.copy_dest_extent_start,
+                                   resolve_info.copy_dest_extent_length));
+
+  // Clear previously set temporary indices.
+  for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+    static_cast<VulkanRenderTarget*>(rectangle.render_target)
+        ->SetTemporarySortIndex(UINT32_MAX);
+  }
+  uint32_t rt_sort_index = 0;
+  for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
+    auto& vulkan_rt =
+        *static_cast<VulkanRenderTarget*>(rectangle.render_target);
+    RenderTargetKey rt_key = vulkan_rt.key();
+    command_processor_.PushImageMemoryBarrier(
+        vulkan_rt.image(),
+        ui::vulkan::util::InitializeSubresourceRange(
+            rt_key.is_depth
+                ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+                : VK_IMAGE_ASPECT_COLOR_BIT),
+        vulkan_rt.current_stage_mask(), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        vulkan_rt.current_access_mask(), VK_ACCESS_SHADER_READ_BIT,
+        vulkan_rt.current_layout(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    vulkan_rt.SetUsage(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (vulkan_rt.temporary_sort_index() == UINT32_MAX) {
+      vulkan_rt.SetTemporarySortIndex(rt_sort_index++);
+    }
+  }
+
+  // Sort the invocations to reduce context and binding switches.
+  std::sort(dump_invocations_.begin(), dump_invocations_.end());
+
+  // The resolve is one destination and one rectangle for every invocation.
+  uint32_t resolve_push_constants[kEdramDumpShaderPushConstantCount];
+  resolve_push_constants[kEdramDumpShaderPushConstantResolveEdramInfo] =
+      copy_shader_constants.dest_relative.edram_info.packed;
+  resolve_push_constants[kEdramDumpShaderPushConstantResolveCoordinateInfo] =
+      copy_shader_constants.dest_relative.coordinate_info.packed;
+  resolve_push_constants[kEdramDumpShaderPushConstantResolveDestInfo] =
+      copy_shader_constants.dest_relative.dest_info.value;
+  resolve_push_constants
+      [kEdramDumpShaderPushConstantResolveDestCoordinateInfo] =
+          copy_shader_constants.dest_relative.dest_coordinate_info.packed;
+  resolve_push_constants[kEdramDumpShaderPushConstantResolveDestBase] =
+      copy_shader_constants.dest_base;
+  resolve_push_constants[kEdramDumpShaderPushConstantResolveHeightDiv8] =
+      resolve_info.height_div_8;
+
+  DeferredCommandBuffer& command_buffer =
+      command_processor_.deferred_command_buffer();
+  bool dest_bound = false, resolve_constants_bound = false;
+  VkDescriptorSet last_source_descriptor_set = VK_NULL_HANDLE;
+  EdramDumpShaderPitches last_pitches;
+  EdramDumpShaderOffsets last_offsets;
+  bool pitches_bound = false, offsets_bound = false;
+  for (const DumpInvocation& invocation : dump_invocations_) {
+    const ResolveCopyDumpRectangle& rectangle = invocation.rectangle;
+    auto& vulkan_rt =
+        *static_cast<VulkanRenderTarget*>(rectangle.render_target);
+    RenderTargetKey rt_key = vulkan_rt.key();
+    command_processor_.BindExternalComputePipeline(
+        GetDumpPipeline(invocation.pipeline_key));
+
+    VkPipelineLayout pipeline_layout = rt_key.is_depth
+                                           ? dump_pipeline_layout_depth_
+                                           : dump_pipeline_layout_color_;
+
+    if (!dest_bound) {
+      dest_bound = true;
+      command_buffer.CmdVkBindDescriptorSets(
+          VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout,
+          kDumpDescriptorSetEdram, 1, &descriptor_set_dest, 0, nullptr);
+    }
+
+    VkDescriptorSet source_descriptor_set =
+        vulkan_rt.GetDescriptorSetTransferSource();
+    if (last_source_descriptor_set != source_descriptor_set) {
+      last_source_descriptor_set = source_descriptor_set;
+      command_buffer.CmdVkBindDescriptorSets(
+          VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout,
+          kDumpDescriptorSetSource, 1, &source_descriptor_set, 0, nullptr);
+    }
+
+    if (!resolve_constants_bound) {
+      resolve_constants_bound = true;
+      command_buffer.CmdVkPushConstants(
+          pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+          sizeof(uint32_t) * kEdramDumpShaderPushConstantResolveEdramInfo,
+          sizeof(uint32_t) * (kEdramDumpShaderPushConstantCount -
+                              kEdramDumpShaderPushConstantResolveEdramInfo),
+          &resolve_push_constants
+              [kEdramDumpShaderPushConstantResolveEdramInfo]);
+    }
+
+    EdramDumpShaderPitches pitches;
+    pitches.dest_pitch = dump_pitch;
+    pitches.source_pitch = rt_key.GetPitchTiles();
+    if (last_pitches != pitches) {
+      last_pitches = pitches;
+      pitches_bound = false;
+    }
+    if (!pitches_bound) {
+      pitches_bound = true;
+      command_buffer.CmdVkPushConstants(
+          pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+          sizeof(uint32_t) * kEdramDumpShaderPushConstantPitches,
+          sizeof(last_pitches), &last_pitches);
+    }
+
+    EdramDumpShaderOffsets offsets;
+    offsets.source_base_tiles = rt_key.base_tiles;
+    ResolveCopyDumpRectangle::Dispatch
+        dispatches[ResolveCopyDumpRectangle::kMaxDispatches];
+    uint32_t dispatch_count =
+        rectangle.GetDispatches(dump_pitch, dump_row_length_used, dispatches);
+    for (uint32_t i = 0; i < dispatch_count; ++i) {
+      const ResolveCopyDumpRectangle::Dispatch& dispatch = dispatches[i];
+      offsets.dispatch_first_tile = dump_base + dispatch.offset;
+      if (last_offsets != offsets) {
+        last_offsets = offsets;
+        offsets_bound = false;
+      }
+      if (!offsets_bound) {
+        offsets_bound = true;
+        command_buffer.CmdVkPushConstants(
+            pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+            sizeof(uint32_t) * kEdramDumpShaderPushConstantOffsets,
+            sizeof(last_offsets), &last_offsets);
+      }
+      command_processor_.SubmitBarriers(true);
+      command_buffer.CmdVkDispatch(
+          (draw_resolution_scale_x() *
+               (xenos::kEdramTileWidthSamples >> uint32_t(rt_key.Is64bpp())) *
+               dispatch.width_tiles +
+           (kEdramDumpShaderSamplesPerGroupX - 1)) /
+              kEdramDumpShaderSamplesPerGroupX,
+          (draw_resolution_scale_y() * xenos::kEdramTileHeightSamples *
+               dispatch.height_tiles +
+           (kEdramDumpShaderSamplesPerGroupY - 1)) /
+              kEdramDumpShaderSamplesPerGroupY,
+          1);
+    }
+  }
+
+  command_processor_.PopDebugMarker();
+  return true;
 }
 
 void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,

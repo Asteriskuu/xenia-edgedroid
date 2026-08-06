@@ -29,6 +29,7 @@
 #include "xenia/gpu/xenos.h"
 
 DECLARE_bool(depth_transfer_not_equal_test);
+DECLARE_bool(direct_host_resolve);
 DECLARE_bool(depth_float24_round);
 DECLARE_bool(depth_float24_convert_in_pixel_shader);
 DECLARE_bool(draw_resolution_scaled_texture_offsets);
@@ -209,6 +210,11 @@ class RenderTargetCache {
   virtual void ClearCache();
 
   virtual void BeginFrame();
+
+  // Ends a frame for the direct_resolve_stats_rate report, emitting it every
+  // that many frames. gpu_time_ns is the backend's cumulative GPU busy time,
+  // or 0 where the backend can't measure it.
+  void CountDirectResolveStatsFrame(uint64_t gpu_time_ns);
 
   virtual bool Update(bool is_rasterization_done,
                       reg::RB_DEPTHCONTROL normalized_depth_control,
@@ -525,7 +531,50 @@ class RenderTargetCache {
       }
       return dispatch_count;
     }
+    uint32_t GetTileCount(uint32_t row_length_used) const {
+      if (!rows) {
+        return 0;
+      }
+      if (rows == 1) {
+        return row_last_end - row_first_start;
+      }
+      return (row_length_used - row_first_start) +
+             (rows - 2) * row_length_used + row_last_end;
+    }
   };
+
+  // Whether a resolve could read the host render targets straight into shared
+  // memory, skipping the dump to the EDRAM buffer and the copy back out of it,
+  // and if not, what stands in the way.
+  enum class DirectResolveEligibility : uint32_t {
+    kEligible,
+    // The EDRAM buffer holds the real data rather than being resolve scratch.
+    kNotHostRenderTargets,
+    // The copy converts formats, which the direct shaders don't reproduce.
+    kConvertingCopyShader,
+    // The scaled destination layout isn't in the direct shaders.
+    kResolutionScaled,
+    // No render target owns any of the source tiles.
+    kNoOwnership,
+    // A source render target's tile layout differs from the one the resolve
+    // reads EDRAM with, so its bits only line up after the round trip.
+    kSourceLayoutMismatch,
+    // Part of the source span is owned by no render target - the round trip
+    // copies whatever EDRAM already holds there.
+    kPartialOwnership,
+    // Eligible, but the backend couldn't encode it - a pipeline that wouldn't
+    // build, or a binding it can't make. Never silently the same as eligible:
+    // a resolve counted here took the round trip.
+    kBackendUnavailable,
+    // Eligible, but direct_host_resolve is off. Kept apart from the above so a
+    // baseline run can't read as a backend that can't do the work.
+    kDisabled,
+
+    kCount,
+  };
+
+  static const char* GetDirectResolveEligibilityName(
+      DirectResolveEligibility eligibility);
 
   virtual uint32_t GetMaxRenderTargetWidth() const = 0;
   virtual uint32_t GetMaxRenderTargetHeight() const = 0;
@@ -602,6 +651,16 @@ class RenderTargetCache {
   bool IsResolveSourceNativeOnly(uint32_t base, uint32_t row_length,
                                  uint32_t rows, uint32_t pitch) const;
 
+  // copy_shader is the one ResolveInfo::GetCopyShader picked for this resolve.
+  DirectResolveEligibility GetDirectResolveEligibility(
+      const draw_util::ResolveInfo& resolve_info,
+      draw_util::ResolveCopyShaderIndex copy_shader) const;
+
+  // Counts one resolve for the direct_resolve_stats_rate report. Pass what the
+  // backend actually did, which may be a fallback even where the eligibility
+  // says otherwise.
+  void AccumulateDirectResolveStats(DirectResolveEligibility eligibility);
+
   // Sets up the needed render targets and transfers to perform a clear in a
   // resolve operation via a host render target clear. resolve_info is expected
   // to be obtained via draw_util::GetResolveInfo. Returns whether any clears
@@ -644,6 +703,15 @@ class RenderTargetCache {
                                           RenderTargetKey dest) const;
 
  private:
+  void ReportDirectResolveStats(uint64_t gpu_time_ns);
+
+  // Resolves since the last direct_resolve_stats_rate report, by whether they
+  // could skip the EDRAM round trip.
+  uint64_t direct_resolve_stats_[size_t(DirectResolveEligibility::kCount)] = {};
+  uint64_t direct_resolve_stats_frames_ = 0;
+  uint64_t direct_resolve_stats_start_ns_ = 0;
+  uint64_t direct_resolve_stats_start_gpu_ns_ = 0;
+
   const RegisterFile& register_file_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;

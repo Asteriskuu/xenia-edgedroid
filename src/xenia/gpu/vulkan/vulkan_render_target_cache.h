@@ -807,6 +807,18 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
   VkPipeline GetDumpPipeline(EdramDumpShaderKey key);
 
+  // Writes contents of the host render targets within those same rectangles
+  // straight into shared memory in the destination's guest texture layout,
+  // skipping edram_buffer_ and the resolve copy that would read it back again.
+  // Returns false without encoding anything if it can't, leaving the caller to
+  // fall back to the round trip.
+  bool DirectResolveRenderTargets(
+      const draw_util::ResolveInfo& resolve_info,
+      const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
+      uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
+      uint32_t dump_pitch, VulkanSharedMemory& shared_memory,
+      VulkanTextureCache& texture_cache);
+
   // Writes contents of host render targets within rectangles from
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_ - with the plain 1x1
   // tile layout if native_layout is set.

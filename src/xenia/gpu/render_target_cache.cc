@@ -9,8 +9,10 @@
 
 #include "xenia/gpu/render_target_cache.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <string>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
@@ -220,6 +222,19 @@ DEFINE_bool(
     "If this is enabled, excessive barriers may be eliminated when switching "
     "between different render targets in separate EDRAM locations.",
     "GPU");
+DEFINE_bool(
+    direct_host_resolve, true,
+    "Resolve host render targets straight into shared memory where the copy "
+    "needs no format conversion, instead of dumping them into the EDRAM buffer "
+    "and copying back out of it. Saves a compute pass and its barrier per "
+    "resolve.\n"
+    "Set to false to always take the EDRAM path.",
+    "GPU");
+DEFINE_int32(direct_resolve_stats_rate, 0,
+             "Log how many resolves took the direct host render target path "
+             "instead of going through the EDRAM buffer, and the frame time "
+             "over the same window, every N frames (0 to disable)",
+             "GPU");
 
 namespace xe {
 namespace gpu {
@@ -1216,6 +1231,154 @@ bool RenderTargetCache::IsResolveSourceNativeOnly(uint32_t base,
     }
   }
   return true;
+}
+
+const char* RenderTargetCache::GetDirectResolveEligibilityName(
+    DirectResolveEligibility eligibility) {
+  switch (eligibility) {
+    case DirectResolveEligibility::kEligible:
+      return "eligible";
+    case DirectResolveEligibility::kNotHostRenderTargets:
+      return "not host render targets";
+    case DirectResolveEligibility::kConvertingCopyShader:
+      return "converting copy shader";
+    case DirectResolveEligibility::kResolutionScaled:
+      return "resolution scaled";
+    case DirectResolveEligibility::kNoOwnership:
+      return "no ownership";
+    case DirectResolveEligibility::kSourceLayoutMismatch:
+      return "source layout mismatch";
+    case DirectResolveEligibility::kPartialOwnership:
+      return "partial ownership";
+    case DirectResolveEligibility::kBackendUnavailable:
+      return "backend unavailable";
+    case DirectResolveEligibility::kDisabled:
+      return "disabled";
+    default:
+      assert_unhandled_case(eligibility);
+      return "unknown";
+  }
+}
+
+RenderTargetCache::DirectResolveEligibility
+RenderTargetCache::GetDirectResolveEligibility(
+    const draw_util::ResolveInfo& resolve_info,
+    draw_util::ResolveCopyShaderIndex copy_shader) const {
+  if (GetPath() != Path::kHostRenderTargets) {
+    return DirectResolveEligibility::kNotHostRenderTargets;
+  }
+  switch (copy_shader) {
+    case draw_util::ResolveCopyShaderIndex::kFast32bpp1x2xMSAA:
+    case draw_util::ResolveCopyShaderIndex::kFast32bpp4xMSAA:
+    case draw_util::ResolveCopyShaderIndex::kFast64bpp1x2xMSAA:
+    case draw_util::ResolveCopyShaderIndex::kFast64bpp4xMSAA:
+      break;
+    default:
+      return DirectResolveEligibility::kConvertingCopyShader;
+  }
+  if (IsDrawResolutionScaled()) {
+    return DirectResolveEligibility::kResolutionScaled;
+  }
+
+  uint32_t base, row_length_used, rows, pitch;
+  resolve_info.GetCopyEdramTileSpan(base, row_length_used, rows, pitch);
+  std::vector<ResolveCopyDumpRectangle> rectangles;
+  GetResolveCopyRectanglesToDump(base, row_length_used, rows, pitch,
+                                 rectangles);
+  if (rectangles.empty()) {
+    return DirectResolveEligibility::kNoOwnership;
+  }
+
+  bool is_depth = resolve_info.IsCopyingDepth();
+  const draw_util::ResolveEdramInfo& edram_info =
+      is_depth ? resolve_info.depth_edram_info : resolve_info.color_edram_info;
+  uint64_t owned_tiles = 0;
+  for (const ResolveCopyDumpRectangle& rectangle : rectangles) {
+    assert_not_null(rectangle.render_target);
+    RenderTargetKey rt_key = rectangle.render_target->key();
+    // The dump packs samples in the render target's own layout and the copy
+    // reads them back in the resolve's, so only matching layouts can drop the
+    // buffer in between. Formats within a layout may still differ - the fast
+    // copy is bitwise and only picks a red/blue swap from the format.
+    if (rt_key.is_depth != uint32_t(is_depth) ||
+        rt_key.msaa_samples != edram_info.msaa_samples ||
+        uint32_t(rt_key.Is64bpp()) != edram_info.format_is_64bpp) {
+      return DirectResolveEligibility::kSourceLayoutMismatch;
+    }
+    owned_tiles += rectangle.GetTileCount(row_length_used);
+  }
+  if (owned_tiles != uint64_t(row_length_used) * rows) {
+    return DirectResolveEligibility::kPartialOwnership;
+  }
+
+  return DirectResolveEligibility::kEligible;
+}
+
+void RenderTargetCache::AccumulateDirectResolveStats(
+    DirectResolveEligibility eligibility) {
+  if (cvars::direct_resolve_stats_rate > 0) {
+    ++direct_resolve_stats_[size_t(eligibility)];
+  }
+}
+
+void RenderTargetCache::CountDirectResolveStatsFrame(uint64_t gpu_time_ns) {
+  if (cvars::direct_resolve_stats_rate <= 0) {
+    return;
+  }
+  if (!direct_resolve_stats_frames_) {
+    direct_resolve_stats_start_ns_ =
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now().time_since_epoch())
+                     .count());
+    direct_resolve_stats_start_gpu_ns_ = gpu_time_ns;
+  }
+  ++direct_resolve_stats_frames_;
+  if (direct_resolve_stats_frames_ >=
+      uint64_t(cvars::direct_resolve_stats_rate)) {
+    ReportDirectResolveStats(gpu_time_ns);
+  }
+}
+
+void RenderTargetCache::ReportDirectResolveStats(uint64_t gpu_time_ns) {
+  double frames = double(direct_resolve_stats_frames_);
+  uint64_t now_ns =
+      uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
+  uint64_t total = 0;
+  for (uint64_t count : direct_resolve_stats_) {
+    total += count;
+  }
+  std::string breakdown;
+  for (size_t i = 0; i < size_t(DirectResolveEligibility::kCount); ++i) {
+    if (!direct_resolve_stats_[i]) {
+      continue;
+    }
+    if (!breakdown.empty()) {
+      breakdown += ", ";
+    }
+    breakdown += fmt::format(
+        "{}={} ({:.1f}%)",
+        GetDirectResolveEligibilityName(DirectResolveEligibility(i)),
+        direct_resolve_stats_[i],
+        100.0 * double(direct_resolve_stats_[i]) / double(total));
+  }
+  std::string gpu_time;
+  if (gpu_time_ns) {
+    gpu_time =
+        fmt::format("{:.3f} GPU ms/frame, ",
+                    double(gpu_time_ns - direct_resolve_stats_start_gpu_ns_) /
+                        (1000000.0 * frames));
+  }
+  XELOGI(
+      "Direct resolve: {}{:.3f} wall ms/frame, {:.2f} resolves/frame over {} "
+      "frames{}{}",
+      gpu_time,
+      double(now_ns - direct_resolve_stats_start_ns_) / (1000000.0 * frames),
+      double(total) / frames, direct_resolve_stats_frames_,
+      breakdown.empty() ? "" : " - ", breakdown);
+  std::memset(direct_resolve_stats_, 0, sizeof(direct_resolve_stats_));
+  direct_resolve_stats_frames_ = 0;
 }
 
 bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(

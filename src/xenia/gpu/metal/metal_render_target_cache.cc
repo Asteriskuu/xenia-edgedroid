@@ -1218,6 +1218,8 @@ void MetalRenderTargetCache::BeginFrame() {
         transfer_tile_instance_buffer_sizes_[1],
         transfer_tile_instance_buffer_sizes_[2]);
   }
+
+  CountDirectResolveStatsFrame(command_processor_.completed_gpu_time_ns());
 }
 
 bool MetalRenderTargetCache::Update(
@@ -2745,7 +2747,7 @@ MTL::ComputePipelineState* MetalRenderTargetCache::GetOrCreateDumpPipeline(
   // The emitter declares the EDRAM buffer with the pre-1.3 BufferBlock and
   // Uniform forms, so it has to be emitted as SPIR-V 1.0.
   shader_options.spirv_version = 0x00010000;
-  shader_options.descriptor_set_edram = 0;
+  shader_options.descriptor_set_dest = 0;
   shader_options.descriptor_set_source = 1;
   shader_options.resolution_scale_x = draw_resolution_scale_x();
   shader_options.resolution_scale_y = draw_resolution_scale_y();
@@ -3367,6 +3369,16 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
     draw_util::ResolveCopyShaderIndex copy_shader = resolve_info.GetCopyShader(
         draw_resolution_scale_x(), draw_resolution_scale_y(), copy_constants,
         group_count_x, group_count_y);
+
+    // Metal has no direct resolve path yet, so what the eligibility calls
+    // eligible is still taking the round trip - report it as such rather than
+    // as work that was skipped.
+    DirectResolveEligibility direct_resolve_eligibility =
+        GetDirectResolveEligibility(resolve_info, copy_shader);
+    AccumulateDirectResolveStats(
+        direct_resolve_eligibility == DirectResolveEligibility::kEligible
+            ? DirectResolveEligibility::kBackendUnavailable
+            : direct_resolve_eligibility);
 
     // Select the appropriate Metal pipeline for this shader.
     MTL::ComputePipelineState* pipeline = nullptr;

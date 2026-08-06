@@ -5209,6 +5209,10 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     primitive_processor_->BeginFrame();
 
     texture_cache_->BeginFrame();
+
+    // Not RenderTargetCache::BeginFrame - this path has never called it, and
+    // its accumulated render target reset isn't wanted here.
+    render_target_cache_->CountDirectResolveStatsFrame(0);
   }
 
   return true;

@@ -25,6 +25,10 @@ namespace gpu {
 // render target path. Backend-independent: the result is SPIR-V, which Vulkan
 // consumes directly and Metal takes through spirv_to_dxil and Apple's Metal
 // Shader Converter.
+//
+// With EdramDumpShaderKey::direct_resolve, the same shader stores into the
+// resolve destination in the guest texture layout instead, doing in one pass
+// what the dump and the resolve copy do in two.
 
 union EdramDumpShaderKey {
   uint32_t key;
@@ -40,6 +44,11 @@ union EdramDumpShaderKey {
     // source_scale_native only.
     // Address the EDRAM buffer with the plain 1x1 tile layout.
     uint32_t native_layout : 1;
+    // Store into the resolve destination rather than the EDRAM buffer,
+    // skipping the round trip. Only for resolves the copy would do bitwise,
+    // and only without resolution scaling - the format-converting copies and
+    // the scaled destination layout stay on the EDRAM path.
+    uint32_t direct_resolve : 1;
   };
 
   EdramDumpShaderKey() : key(0) { static_assert_size(*this, sizeof(key)); }
@@ -85,6 +94,17 @@ enum EdramDumpShaderPushConstant : uint32_t {
   kEdramDumpShaderPushConstantPitches,
   // May be changed multiple times for the same source.
   kEdramDumpShaderPushConstantOffsets,
+
+  // EdramDumpShaderKey::direct_resolve only, and constant across a resolve -
+  // draw_util::ResolveCopyShaderConstants, plus the resolve height, which the
+  // copy shaders don't need because their dispatch is exactly the resolve
+  // rectangle while this one is the tiles covering it.
+  kEdramDumpShaderPushConstantResolveEdramInfo,
+  kEdramDumpShaderPushConstantResolveCoordinateInfo,
+  kEdramDumpShaderPushConstantResolveDestInfo,
+  kEdramDumpShaderPushConstantResolveDestCoordinateInfo,
+  kEdramDumpShaderPushConstantResolveDestBase,
+  kEdramDumpShaderPushConstantResolveHeightDiv8,
 
   kEdramDumpShaderPushConstantCount,
 };
@@ -132,10 +152,11 @@ struct EdramDumpShaderOptions {
   // SPIR-V version to emit, as glslang's SpirvBuilder takes it.
   uint32_t spirv_version = 0x00010000;
 
-  // Descriptor sets of the destination EDRAM buffer and of the source render
+  // Descriptor sets of the destination buffer - the EDRAM buffer, or the
+  // resolve destination for a direct_resolve key - and of the source render
   // target. The source's stencil, when the key is a depth one, is binding 1 of
   // the source set; everything else is binding 0 of its set.
-  uint32_t descriptor_set_edram = 0;
+  uint32_t descriptor_set_dest = 0;
   uint32_t descriptor_set_source = 1;
 
   // Guest-to-host resolution scale, which the tile addressing is computed
