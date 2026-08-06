@@ -44,8 +44,11 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
   for (auto block = builder->first_block(); block != nullptr;
        block = block->next) {
     seen.insert(block);
-    auto instr = block->instr_tail;
-    while (instr && (instr->opcode->flags & OPCODE_FLAG_BRANCH) != 0) {
+    // Scan every instruction: a back-edge is not always in the trailing
+    // branch run. A loop ending its block with a call hides the loop branch
+    // from a tail-backward walk, leaving it to spin with no safepoint.
+    for (auto instr = block->instr_head; instr != nullptr;
+         instr = instr->next) {
       Label* label = nullptr;
       if (instr->opcode == &OPCODE_BRANCH_info) {
         label = instr->src1.label;
@@ -56,7 +59,6 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
       if (label && label->block && seen.count(label->block)) {
         check_blocks.insert(label->block);
       }
-      instr = instr->prev;
     }
   }
   for (auto block : check_blocks) {
