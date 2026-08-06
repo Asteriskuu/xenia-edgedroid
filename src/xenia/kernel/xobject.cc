@@ -413,6 +413,9 @@ void XObject::AbandonCooperativeWait(XThread* thread) {
   if (XObject* object = thread->cooperative_wait_object()) {
     object->LeaveCooperativeWait(thread);
   }
+  // A terminated fiber exits inside the wait, skipping WaitExit, so the gate
+  // pointers into its abandoned wait frame are dropped here.
+  thread->clear_cooperative_wait_shape();
 }
 
 xe::threading::WaitHandle* XObject::GetWaitHandleForCurrentThread(size_t slot) {
@@ -674,13 +677,27 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
       entry_pulse_epochs[i] = objects[i]->cooperative_pulse_epoch();
       handle_ids[i] = objects[i]->handle();
     }
-    // A multi-wait registers no single wait object, so this is the only record
-    // of what it is blocked on.
+    // A multi-wait registers no single wait object, so this is the only
+    // record of what it blocks on. It also gates re-polling: only
+    // Event/Semaphore/Mutant bump the signal epoch, so a set holding any other
+    // type must stay ungated or its transitions wait for the backstop.
+    bool gateable_set = count <= 8;
+    for (size_t i = 0; gateable_set && i < count; ++i) {
+      switch (objects[i]->type()) {
+        case XObject::Type::Event:
+        case XObject::Type::Semaphore:
+        case XObject::Type::Mutant:
+          break;
+        default:
+          gateable_set = false;
+          break;
+      }
+    }
     if (auto* self = XThread::GetCurrentThread()) {
       self->set_cooperative_wait_shape(
           wait_type ? XThread::CooperativeWaitKind::kMultiAny
                     : XThread::CooperativeWaitKind::kMultiAll,
-          handle_ids, count, objects);
+          handle_ids, count, gateable_set ? objects : nullptr);
     }
     return CooperativeWait(
         scheduler, kthread, nullptr, alertable != 0, deadline_ms,

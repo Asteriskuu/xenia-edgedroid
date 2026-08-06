@@ -1012,9 +1012,15 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
     // re-readied on every pass, which is most of the scheduler's churn in
     // titles that park worker pools on WaitForMultipleObjects.
     gated = true;
-  } else if (deadline_ms && !alertable) {
-    // Pure timed sleep with nothing to poll: only the clock can end it, so
-    // park until the deadline instead of waking every kPollBackoffMs.
+  } else if (deadline_ms && !alertable &&
+             static_cast<XThread::CooperativeWaitKind>(
+                 self->scheduler_links().wait_kind) ==
+                 XThread::CooperativeWaitKind::kDelay) {
+    // Pure timed sleep: only the clock can end it, so park until the deadline
+    // instead of waking every kPollBackoffMs. Keyed to the delay wait kind -
+    // a timed wait whose objects could not be tracked (a 9+ object
+    // WaitMultiple) also arrives here objectless with a deadline, and gating
+    // that would leave its signals unseen until the deadline or backstop.
     gated = true;
   }
   {
