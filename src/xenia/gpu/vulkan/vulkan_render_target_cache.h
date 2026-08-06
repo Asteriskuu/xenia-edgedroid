@@ -741,39 +741,6 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     }
   };
 
-  union DumpPitches {
-    uint32_t pitches;
-    struct {
-      // Both in tiles.
-      uint32_t dest_pitch : xenos::kEdramPitchTilesBits;
-      uint32_t source_pitch : xenos::kEdramPitchTilesBits;
-    };
-    DumpPitches() : pitches(0) { static_assert_size(*this, sizeof(pitches)); }
-    bool operator==(const DumpPitches& other_pitches) const {
-      return pitches == other_pitches.pitches;
-    }
-    bool operator!=(const DumpPitches& other_pitches) const {
-      return !(*this == other_pitches);
-    }
-  };
-
-  union DumpOffsets {
-    uint32_t offsets;
-    struct {
-      // May be beyond the EDRAM tile count in case of EDRAM addressing
-      // wrapping, thus + 1 bit.
-      uint32_t dispatch_first_tile : xenos::kEdramBaseTilesBits + 1;
-      uint32_t source_base_tiles : xenos::kEdramBaseTilesBits;
-    };
-    DumpOffsets() : offsets(0) { static_assert_size(*this, sizeof(offsets)); }
-    bool operator==(const DumpOffsets& other_offsets) const {
-      return offsets == other_offsets.offsets;
-    }
-    bool operator!=(const DumpOffsets& other_offsets) const {
-      return !(*this == other_offsets);
-    }
-  };
-
   enum DumpDescriptorSet : uint32_t {
     // Never changes. Same in both color and depth pipeline layouts, keep the
     // first for pipeline layout compatibility, to only have to set it once.

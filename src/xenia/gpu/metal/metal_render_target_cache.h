@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "xenia/gpu/edram_dump_shader.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/trace_writer.h"
@@ -41,18 +42,11 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
     ~MetalRenderTarget() override;
 
     MTL::Texture* texture() const { return texture_; }
-    MTL::Texture* msaa_texture() const { return msaa_texture_; }
     MTL::Texture* draw_texture() const {
       return draw_texture_ ? draw_texture_ : texture_;
     }
     MTL::Texture* transfer_texture() const {
       return transfer_texture_ ? transfer_texture_ : texture_;
-    }
-    MTL::Texture* msaa_draw_texture() const {
-      return msaa_draw_texture_ ? msaa_draw_texture_ : msaa_texture_;
-    }
-    MTL::Texture* msaa_transfer_texture() const {
-      return msaa_transfer_texture_ ? msaa_transfer_texture_ : msaa_texture_;
     }
     MTL::Texture* stencil_view() const { return stencil_view_; }
     void SetStencilView(MTL::Texture* view) { stencil_view_ = view; }
@@ -71,16 +65,9 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
         texture_ = texture;
       }
     }
-    void SetMsaaTexture(MTL::Texture* texture) { msaa_texture_ = texture; }
     void SetDrawTexture(MTL::Texture* texture) { draw_texture_ = texture; }
     void SetTransferTexture(MTL::Texture* texture) {
       transfer_texture_ = texture;
-    }
-    void SetMsaaDrawTexture(MTL::Texture* texture) {
-      msaa_draw_texture_ = texture;
-    }
-    void SetMsaaTransferTexture(MTL::Texture* texture) {
-      msaa_transfer_texture_ = texture;
     }
     bool needs_initial_clear() const { return needs_initial_clear_; }
     void SetNeedsInitialClear(bool needs_initial_clear) {
@@ -92,11 +79,8 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
 
    private:
     MTL::Texture* texture_ = nullptr;
-    MTL::Texture* msaa_texture_ = nullptr;  // If MSAA is enabled
     MTL::Texture* draw_texture_ = nullptr;
     MTL::Texture* transfer_texture_ = nullptr;
-    MTL::Texture* msaa_draw_texture_ = nullptr;
-    MTL::Texture* msaa_transfer_texture_ = nullptr;
     MTL::Texture* stencil_view_ = nullptr;
     uint32_t temporary_sort_index_ = UINT32_MAX;
     bool needs_initial_clear_ = true;
@@ -250,7 +234,6 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
  private:
   void RecordRenderTargetViewCreated();
 
-  static uint32_t GetMetalEdramDumpFormat(RenderTargetKey key);
   MTL::Library* GetOrCreateEdramLoadLibrary(bool msaa);
   MTL::RenderPipelineState* GetOrCreateEdramLoadPipeline(
       MTL::PixelFormat dest_format, uint32_t sample_count);
@@ -277,19 +260,12 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   MTL::Library* edram_load_library_ = nullptr;
   MTL::Library* edram_load_library_msaa_ = nullptr;
 
-  // EDRAM dump compute shaders for host render target → EDRAM copies.
-  // Color, 32bpp.
-  MTL::ComputePipelineState* edram_dump_color_32bpp_1xmsaa_pipeline_ = nullptr;
-  MTL::ComputePipelineState* edram_dump_color_32bpp_2xmsaa_pipeline_ = nullptr;
-  MTL::ComputePipelineState* edram_dump_color_32bpp_4xmsaa_pipeline_ = nullptr;
-  // Color, 64bpp.
-  MTL::ComputePipelineState* edram_dump_color_64bpp_1xmsaa_pipeline_ = nullptr;
-  MTL::ComputePipelineState* edram_dump_color_64bpp_2xmsaa_pipeline_ = nullptr;
-  MTL::ComputePipelineState* edram_dump_color_64bpp_4xmsaa_pipeline_ = nullptr;
-  // Depth (D24x / D24FS8 encoded as 32bpp in EDRAM snapshot).
-  MTL::ComputePipelineState* edram_dump_depth_32bpp_1xmsaa_pipeline_ = nullptr;
-  MTL::ComputePipelineState* edram_dump_depth_32bpp_2xmsaa_pipeline_ = nullptr;
-  MTL::ComputePipelineState* edram_dump_depth_32bpp_4xmsaa_pipeline_ = nullptr;
+  // EDRAM dump compute shaders for host render target -> EDRAM copies, built
+  // on demand from the shared SPIR-V emitter by way of DXIL and the Metal
+  // Shader Converter.
+  std::unordered_map<EdramDumpShaderKey, MTL::ComputePipelineState*,
+                     EdramDumpShaderKey::Hasher>
+      dump_pipelines_;
 
   // Resolve compute shaders (Metal XeSL → MSL metallib)
   MTL::ComputePipelineState* resolve_full_8bpp_pipeline_ = nullptr;
@@ -695,6 +671,11 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   void ClearPendingDrawPassTransfers();
 
   // Writes contents of host render targets within rectangles from
+  // Returns the dump pipeline for a key, compiling it on the first use, or null
+  // if it could not be built. A failed key is cached as null so it is not
+  // retried every resolve.
+  MTL::ComputePipelineState* GetOrCreateDumpPipeline(EdramDumpShaderKey key);
+
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
   void DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used,
                          uint32_t dump_rows, uint32_t dump_pitch,

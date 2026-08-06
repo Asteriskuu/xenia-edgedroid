@@ -39,6 +39,13 @@ constexpr uint32_t kSpace0SharedMemory = 0;
 constexpr uint32_t kSpace0TextureIndicesVertex = 2;
 constexpr uint32_t kSpace0TextureIndicesPixel = 3;
 
+// The internal compute shaders put their source textures in descriptor set 1,
+// and Mesa parks push constants in a high space so they can't collide with the
+// descriptor sets (see MakeRuntimeConf in spirv_to_dxil_compiler.cc).
+constexpr uint32_t kSpaceInternalComputeSource = 1;
+constexpr uint32_t kSpaceInternalComputePushConstants = 31;
+constexpr uint32_t kSlotInternalComputePushConstants = 1;
+
 // Descriptor sets 2 (vertex textures) and 3 (pixel textures) map to the
 // register spaces of the same number.
 constexpr uint32_t kSpaceTexturesVertex = 2;
@@ -182,6 +189,9 @@ MetalShaderConverter::~MetalShaderConverter() {
   if (root_signature_) {
     IRRootSignatureDestroy(root_signature_);
   }
+  if (internal_compute_root_signature_) {
+    IRRootSignatureDestroy(internal_compute_root_signature_);
+  }
 }
 
 bool MetalShaderConverter::Initialize() {
@@ -197,6 +207,14 @@ bool MetalShaderConverter::Initialize() {
     return false;
   }
   if (!QueryRootParameterOffsets()) {
+    return false;
+  }
+
+  internal_compute_root_signature_ = CreateInternalComputeRootSignature();
+  if (!internal_compute_root_signature_) {
+    return false;
+  }
+  if (!QueryInternalComputeRootParameterOffsets()) {
     return false;
   }
 
@@ -293,6 +311,104 @@ IRRootSignature* MetalShaderConverter::CreateRootSignature() const {
   return root_signature;
 }
 
+IRRootSignature* MetalShaderConverter::CreateInternalComputeRootSignature()
+    const {
+  // Two source textures: the color or depth source, and the stencil source of
+  // a depth key. A shader that declares only the first still matches - the
+  // table is a range, not a per-shader declaration.
+  IRDescriptorRange1 source_range = {};
+  source_range.RangeType = IRDescriptorRangeTypeSRV;
+  source_range.NumDescriptors = 2;
+  source_range.BaseShaderRegister = 0;
+  source_range.RegisterSpace = kSpaceInternalComputeSource;
+  source_range.Flags = IRDescriptorRangeFlagNone;
+  source_range.OffsetInDescriptorsFromTableStart = 0;
+
+  IRRootDescriptorTable1 source_table = {};
+  source_table.NumDescriptorRanges = 1;
+  source_table.pDescriptorRanges = &source_range;
+
+  IRRootParameter1
+      parameters[uint32_t(MetalInternalComputeRootParameter::kCount)] = {};
+
+  // Order must match MetalInternalComputeRootParameter - table entries come
+  // back from the reflection without a space or slot to match on.
+  IRRootParameter1& edram_parameter =
+      parameters[uint32_t(MetalInternalComputeRootParameter::kEdramUav)];
+  edram_parameter.ParameterType = IRRootParameterTypeUAV;
+  edram_parameter.Descriptor.ShaderRegister = 0;
+  edram_parameter.Descriptor.RegisterSpace = 0;
+  edram_parameter.Descriptor.Flags = IRRootDescriptorFlagNone;
+  edram_parameter.ShaderVisibility = IRShaderVisibilityAll;
+
+  IRRootParameter1& source_parameter =
+      parameters[uint32_t(MetalInternalComputeRootParameter::kSourceTable)];
+  source_parameter.ParameterType = IRRootParameterTypeDescriptorTable;
+  source_parameter.DescriptorTable = source_table;
+  source_parameter.ShaderVisibility = IRShaderVisibilityAll;
+
+  IRRootParameter1& push_constant_parameter =
+      parameters[uint32_t(MetalInternalComputeRootParameter::kPushConstants)];
+  push_constant_parameter.ParameterType = IRRootParameterTypeCBV;
+  push_constant_parameter.Descriptor.ShaderRegister =
+      kSlotInternalComputePushConstants;
+  push_constant_parameter.Descriptor.RegisterSpace =
+      kSpaceInternalComputePushConstants;
+  push_constant_parameter.Descriptor.Flags = IRRootDescriptorFlagNone;
+  push_constant_parameter.ShaderVisibility = IRShaderVisibilityAll;
+
+  IRRootSignatureDescriptor1 descriptor = {};
+  descriptor.NumParameters =
+      uint32_t(MetalInternalComputeRootParameter::kCount);
+  descriptor.pParameters = parameters;
+  descriptor.NumStaticSamplers = 0;
+  descriptor.pStaticSamplers = nullptr;
+  descriptor.Flags = IRRootSignatureFlagNone;
+
+  IRVersionedRootSignatureDescriptor versioned = {};
+  versioned.version = IRRootSignatureVersion_1_1;
+  versioned.desc_1_1 = descriptor;
+
+  IRError* error = nullptr;
+  IRRootSignature* root_signature =
+      IRRootSignatureCreateFromDescriptor(&versioned, &error);
+  if (error) {
+    const char* message = static_cast<const char*>(IRErrorGetPayload(error));
+    XELOGE(
+        "MetalShaderConverter: failed to create the internal compute root "
+        "signature: {}",
+        message ? message : "unknown error");
+    IRErrorDestroy(error);
+    return nullptr;
+  }
+  return root_signature;
+}
+
+bool MetalShaderConverter::QueryInternalComputeRootParameterOffsets() {
+  constexpr uint32_t kParameterCount =
+      uint32_t(MetalInternalComputeRootParameter::kCount);
+  size_t location_count =
+      IRRootSignatureGetResourceCount(internal_compute_root_signature_);
+  if (location_count != kParameterCount) {
+    XELOGE(
+        "MetalShaderConverter: the internal compute root signature reports {} "
+        "top-level resources, expected {}",
+        location_count, kParameterCount);
+    return false;
+  }
+  std::vector<IRResourceLocation> locations(location_count);
+  IRRootSignatureGetResourceLocations(internal_compute_root_signature_,
+                                      locations.data());
+  for (uint32_t i = 0; i < kParameterCount; ++i) {
+    const IRResourceLocation& location = locations[i];
+    internal_compute_root_parameter_offsets_[i] = location.topLevelOffset;
+    internal_compute_argument_buffer_size_ =
+        std::max(internal_compute_argument_buffer_size_,
+                 uint32_t(location.topLevelOffset + location.sizeBytes));
+  }
+  return true;
+}
+
 bool MetalShaderConverter::QueryRootParameterOffsets() {
   std::fill(std::begin(root_parameter_offsets_),
             std::end(root_parameter_offsets_), UINT32_MAX);
@@ -338,8 +454,26 @@ bool MetalShaderConverter::QueryRootParameterOffsets() {
 MetalShaderConversionResult MetalShaderConverter::Convert(
     MetalShaderStage stage, const std::vector<uint8_t>& dxil,
     bool tessellation_emulation) const {
+  return ConvertWithRootSignature(stage, dxil, root_signature_,
+                                  kCompatibilityFlags, tessellation_emulation);
+}
+
+MetalShaderConversionResult MetalShaderConverter::ConvertInternalCompute(
+    const std::vector<uint8_t>& dxil) const {
+  // No compatibility flags: they exist for guest shader semantics, and
+  // ForceTextureArray in particular would compile the sources as array
+  // textures, which the render target cache does not bind.
+  return ConvertWithRootSignature(MetalShaderStage::kCompute, dxil,
+                                  internal_compute_root_signature_,
+                                  IRCompatibilityFlagNone, false);
+}
+
+MetalShaderConversionResult MetalShaderConverter::ConvertWithRootSignature(
+    MetalShaderStage stage, const std::vector<uint8_t>& dxil,
+    IRRootSignature* root_signature, uint32_t compatibility_flags,
+    bool tessellation_emulation) const {
   MetalShaderConversionResult result;
-  if (!is_available_) {
+  if (!is_available_ || !root_signature) {
     result.error_message = "MetalShaderConverter is not initialized";
     return result;
   }
@@ -361,8 +495,9 @@ MetalShaderConversionResult MetalShaderConverter::Convert(
     return result;
   }
 
-  IRCompilerSetCompatibilityFlags(compiler, kCompatibilityFlags);
-  IRCompilerSetGlobalRootSignature(compiler, root_signature_);
+  IRCompilerSetCompatibilityFlags(compiler,
+                                  IRCompatibilityFlags(compatibility_flags));
+  IRCompilerSetGlobalRootSignature(compiler, root_signature);
   // Mesa embeds no root signature, but the flag also keeps MSC from inferring
   // one and disagreeing with ours.
   IRCompilerIgnoreRootSignature(compiler, true);

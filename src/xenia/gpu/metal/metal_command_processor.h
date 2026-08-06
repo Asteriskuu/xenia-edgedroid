@@ -106,6 +106,9 @@ class MetalCommandProcessor : public CommandProcessor {
   bool AcquireSpirvArgumentBufferSlice(uint32_t bytes, uint32_t alignment,
                                        MTL::Buffer** buffer_out,
                                        NS::UInteger* offset_out);
+  const MetalShaderConverter& metal_shader_converter() const {
+    return metal_shader_converter_;
+  }
   MTL::Buffer* null_buffer() const { return null_buffer_; }
   MTL::SamplerState* null_sampler() const { return null_sampler_; }
 

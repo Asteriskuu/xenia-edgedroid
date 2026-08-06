@@ -1481,9 +1481,10 @@ bool MetalCommandProcessor::SetupContext() {
     }
   }
 
-  if (UseDxilPath() && !metal_shader_converter_.Initialize()) {
-    XELOGE(
-        "Metal: the shader converter is unavailable, no draws can be issued");
+  // Needed on both guest shader paths: the render target cache's internal
+  // compute shaders go through the converter even when the guest shaders don't.
+  if (!metal_shader_converter_.Initialize()) {
+    XELOGE("Metal: the shader converter is unavailable, nothing can render");
     return false;
   }
 

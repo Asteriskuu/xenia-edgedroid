@@ -89,6 +89,43 @@ enum EdramDumpShaderPushConstant : uint32_t {
   kEdramDumpShaderPushConstantCount,
 };
 
+union EdramDumpShaderPitches {
+  uint32_t pitches;
+  struct {
+    // Both in tiles.
+    uint32_t dest_pitch : xenos::kEdramPitchTilesBits;
+    uint32_t source_pitch : xenos::kEdramPitchTilesBits;
+  };
+  EdramDumpShaderPitches() : pitches(0) {
+    static_assert_size(*this, sizeof(pitches));
+  }
+  bool operator==(const EdramDumpShaderPitches& other_pitches) const {
+    return pitches == other_pitches.pitches;
+  }
+  bool operator!=(const EdramDumpShaderPitches& other_pitches) const {
+    return !(*this == other_pitches);
+  }
+};
+
+union EdramDumpShaderOffsets {
+  uint32_t offsets;
+  struct {
+    // May be beyond the EDRAM tile count in case of EDRAM addressing wrapping,
+    // thus + 1 bit.
+    uint32_t dispatch_first_tile : xenos::kEdramBaseTilesBits + 1;
+    uint32_t source_base_tiles : xenos::kEdramBaseTilesBits;
+  };
+  EdramDumpShaderOffsets() : offsets(0) {
+    static_assert_size(*this, sizeof(offsets));
+  }
+  bool operator==(const EdramDumpShaderOffsets& other_offsets) const {
+    return offsets == other_offsets.offsets;
+  }
+  bool operator!=(const EdramDumpShaderOffsets& other_offsets) const {
+    return !(*this == other_offsets);
+  }
+};
+
 // What the emitter can't derive from the key: the binding model to declare the
 // resources in, and the host properties the guest layout is resolved against.
 struct EdramDumpShaderOptions {

@@ -6120,8 +6120,8 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
       command_processor_.deferred_command_buffer();
   bool edram_buffer_bound = false;
   VkDescriptorSet last_source_descriptor_set = VK_NULL_HANDLE;
-  DumpPitches last_pitches;
-  DumpOffsets last_offsets;
+  EdramDumpShaderPitches last_pitches;
+  EdramDumpShaderOffsets last_offsets;
   bool pitches_bound = false, offsets_bound = false;
   for (const DumpInvocation& invocation : dump_invocations_) {
     const ResolveCopyDumpRectangle& rectangle = invocation.rectangle;
@@ -6158,7 +6158,7 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
           kDumpDescriptorSetSource, 1, &source_descriptor_set, 0, nullptr);
     }
 
-    DumpPitches pitches;
+    EdramDumpShaderPitches pitches;
     pitches.dest_pitch = dump_pitch;
     pitches.source_pitch = rt_key.GetPitchTiles();
     if (last_pitches != pitches) {
@@ -6173,7 +6173,7 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
           sizeof(last_pitches), &last_pitches);
     }
 
-    DumpOffsets offsets;
+    EdramDumpShaderOffsets offsets;
     offsets.source_base_tiles = rt_key.base_tiles;
     ResolveCopyDumpRectangle::Dispatch
         dispatches[ResolveCopyDumpRectangle::kMaxDispatches];

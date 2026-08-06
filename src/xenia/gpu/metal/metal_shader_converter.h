@@ -43,6 +43,18 @@ enum class MetalRootParameter : uint32_t {
   kCount,
 };
 
+// Root parameters of the render target cache's internal compute shaders, whose
+// SPIR-V the shared emitters produce: descriptor set 0 is the EDRAM buffer,
+// which Mesa gives u0 space0, set 1 holds the source textures as t0 and t1 of
+// space1, and push constants land in Mesa's push constant CBV at b1 space31.
+enum class MetalInternalComputeRootParameter : uint32_t {
+  kEdramUav,       // UAV u0, space0
+  kSourceTable,    // SRV table, space1
+  kPushConstants,  // CBV b1, space31
+
+  kCount,
+};
+
 enum class MetalShaderStage {
   kVertex,
   kHull,
@@ -115,18 +127,41 @@ class MetalShaderConverter {
       MetalShaderStage stage, const std::vector<uint8_t>& dxil,
       bool tessellation_emulation = false) const;
 
+  // Converts an internal compute shader against the internal root signature
+  // rather than the guest one.
+  MetalShaderConversionResult ConvertInternalCompute(
+      const std::vector<uint8_t>& dxil) const;
+
+  uint32_t internal_compute_argument_buffer_size() const {
+    return internal_compute_argument_buffer_size_;
+  }
+  uint32_t internal_compute_root_parameter_offset(
+      MetalInternalComputeRootParameter parameter) const {
+    return internal_compute_root_parameter_offsets_[uint32_t(parameter)];
+  }
+
  private:
   // Builds the Mesa-layout root signature. Returns null on failure.
   IRRootSignature* CreateRootSignature() const;
+  IRRootSignature* CreateInternalComputeRootSignature() const;
+  MetalShaderConversionResult ConvertWithRootSignature(
+      MetalShaderStage stage, const std::vector<uint8_t>& dxil,
+      IRRootSignature* root_signature, uint32_t compatibility_flags,
+      bool tessellation_emulation) const;
   // Fills root_parameter_offsets_ and argument_buffer_size_ from the root
   // signature's reflection, failing if it does not describe the layout the
   // shaders were compiled against.
   bool QueryRootParameterOffsets();
+  bool QueryInternalComputeRootParameterOffsets();
 
   bool is_available_ = false;
   IRRootSignature* root_signature_ = nullptr;
   uint32_t argument_buffer_size_ = 0;
   uint32_t root_parameter_offsets_[uint32_t(MetalRootParameter::kCount)] = {};
+  IRRootSignature* internal_compute_root_signature_ = nullptr;
+  uint32_t internal_compute_argument_buffer_size_ = 0;
+  uint32_t internal_compute_root_parameter_offsets_[uint32_t(
+      MetalInternalComputeRootParameter::kCount)] = {};
 };
 
 }  // namespace metal
