@@ -19,6 +19,7 @@
 
 #include "xenia/base/hash.h"
 #include "xenia/base/xxhash.h"
+#include "xenia/gpu/edram_dump_shader.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/vulkan/vulkan_shared_memory.h"
 #include "xenia/gpu/vulkan/vulkan_texture_cache.h"
@@ -740,60 +741,6 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     }
   };
 
-  union DumpPipelineKey {
-    uint32_t key;
-    struct {
-      xenos::MsaaSamples msaa_samples : 2;
-      uint32_t resource_format : 4;
-      // Last bit because this affects the pipeline - after sorting, only change
-      // it at most once. Depth buffers have an additional stencil SRV.
-      uint32_t is_depth : 1;
-      // Dumping to the scaled EDRAM layout duplicates this native render
-      // target's guest pixels.
-      uint32_t source_scale_native : 1;
-      // source_scale_native only.
-      // Address the EDRAM buffer with the plain 1x1 tile layout.
-      uint32_t native_layout : 1;
-    };
-
-    DumpPipelineKey() : key(0) { static_assert_size(*this, sizeof(key)); }
-
-    struct Hasher {
-      size_t operator()(const DumpPipelineKey& key) const {
-        return std::hash<uint32_t>{}(key.key);
-      }
-    };
-    bool operator==(const DumpPipelineKey& other_key) const {
-      return key == other_key.key;
-    }
-    bool operator!=(const DumpPipelineKey& other_key) const {
-      return !(*this == other_key);
-    }
-    bool operator<(const DumpPipelineKey& other_key) const {
-      return key < other_key.key;
-    }
-
-    xenos::ColorRenderTargetFormat GetColorFormat() const {
-      assert_false(is_depth);
-      return xenos::ColorRenderTargetFormat(resource_format);
-    }
-    xenos::DepthRenderTargetFormat GetDepthFormat() const {
-      assert_true(is_depth);
-      return xenos::DepthRenderTargetFormat(resource_format);
-    }
-  };
-
-  // There's no strict dependency on the group size in dumping, for simplicity
-  // calculations especially with resolution scaling, dividing manually (as the
-  // group size is not unlimited). The only restriction is that an integer
-  // multiple of it must be 80x16 samples (and no larger than that) for 32bpp,
-  // or 40x16 samples for 64bpp (because only a half of the pair of tiles may
-  // need to be dumped). Using 8x16 since that's 128 - the minimum required
-  // group size on Vulkan, and the maximum number of lanes in a subgroup on
-  // Vulkan.
-  static constexpr uint32_t kDumpSamplesPerGroupX = 8;
-  static constexpr uint32_t kDumpSamplesPerGroupY = 16;
-
   union DumpPitches {
     uint32_t pitches;
     struct {
@@ -838,20 +785,11 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     kDumpDescriptorSetCount,
   };
 
-  enum DumpPushConstant : uint32_t {
-    // May be different for different sources.
-    kDumpPushConstantPitches,
-    // May be changed multiple times for the same source.
-    kDumpPushConstantOffsets,
-
-    kDumpPushConstantCount,
-  };
-
   struct DumpInvocation {
     ResolveCopyDumpRectangle rectangle;
-    DumpPipelineKey pipeline_key;
+    EdramDumpShaderKey pipeline_key;
     DumpInvocation(const ResolveCopyDumpRectangle& rectangle,
-                   const DumpPipelineKey& pipeline_key)
+                   const EdramDumpShaderKey& pipeline_key)
         : rectangle(rectangle), pipeline_key(pipeline_key) {}
     bool operator<(const DumpInvocation& other_invocation) const {
       // Sort by the pipeline key primarily to reduce pipeline state (context)
@@ -900,7 +838,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       const uint64_t* render_target_resolve_clear_values = nullptr,
       const Transfer::Rectangle* resolve_clear_rectangle = nullptr);
 
-  VkPipeline GetDumpPipeline(DumpPipelineKey key);
+  VkPipeline GetDumpPipeline(EdramDumpShaderKey key);
 
   // Writes contents of host render targets within rectangles from
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_ - with the plain 1x1
@@ -952,7 +890,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   VkPipelineLayout dump_pipeline_layout_depth_ = VK_NULL_HANDLE;
   // Compute pipelines for copying host render target contents to the EDRAM
   // buffer. VK_NULL_HANDLE if failed to create.
-  std::unordered_map<DumpPipelineKey, VkPipeline, DumpPipelineKey::Hasher>
+  std::unordered_map<EdramDumpShaderKey, VkPipeline, EdramDumpShaderKey::Hasher>
       dump_pipelines_;
 
   // Temporary storage for Resolve.

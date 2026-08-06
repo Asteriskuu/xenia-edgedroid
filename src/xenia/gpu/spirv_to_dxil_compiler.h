@@ -30,14 +30,16 @@ class SpirvToDxilCompiler {
   // Mesa git revision of the linked library.
   static uint64_t version();
 
-  // Pipeline stage of the SPIR-V module. Covers the guest vertex/pixel shaders
-  // and the host primitive-expansion geometry and tessellation shaders.
+  // Pipeline stage of the SPIR-V module. Covers the guest vertex/pixel shaders,
+  // the host primitive-expansion geometry and tessellation shaders, and the
+  // render target cache's internal compute shaders.
   enum class Stage {
     kVertex,
     kTessellationControl,
     kTessellationEvaluation,
     kGeometry,
     kPixel,
+    kCompute,
   };
 
   // Translates one SPIR-V module to signed DXIL for the given stage. When

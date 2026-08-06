@@ -62,6 +62,9 @@ dxil_spirv_shader_stage ToDxilStage(SpirvToDxilCompiler::Stage stage_in,
     case Stage::kGeometry:
       *stage_name = "geometry";
       return DXIL_SPIRV_SHADER_GEOMETRY;
+    case Stage::kCompute:
+      *stage_name = "compute";
+      return DXIL_SPIRV_SHADER_COMPUTE;
     default:
       *stage_name = "pixel";
       return DXIL_SPIRV_SHADER_FRAGMENT;
