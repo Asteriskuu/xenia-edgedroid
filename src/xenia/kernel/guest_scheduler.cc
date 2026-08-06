@@ -859,11 +859,14 @@ void GuestScheduler::WaitOnFence(xe::threading::Fence& fence) {
     return;
   }
   auto* scheduler = self->kernel_state()->guest_scheduler();
+  self->set_cooperative_wait_shape(XThread::CooperativeWaitKind::kFence,
+                                   nullptr, 0);
   while (!fence.TryWait()) {
     // The signaler touches the fence on this stack, terminate must not free
     // it.
     scheduler->BlockCurrentThread(0, 0, false, false);
   }
+  self->clear_cooperative_wait_shape();
 }
 
 void GuestScheduler::RunBlockingHostCallOffloaded(
@@ -877,9 +880,17 @@ void GuestScheduler::RunBlockingHostCallOffloaded(
     io_queue_.push(&call);
   }
   io_event_->Set();
+  XThread* self = XThread::GetCurrentFiberThread();
+  if (self) {
+    self->set_cooperative_wait_shape(XThread::CooperativeWaitKind::kIoOffload,
+                                     nullptr, 0);
+  }
   while (!call.done.load(std::memory_order_acquire)) {
     // The worker writes |call| on this stack, terminate must not free it.
     BlockCurrentThread(0, 0, false, false);
+  }
+  if (self) {
+    self->clear_cooperative_wait_shape();
   }
 }
 
@@ -996,6 +1007,15 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
       default:
         break;
     }
+  } else if (self->cooperative_wait_set_count()) {
+    // Multi-wait: gated on the summed epoch of its whole set. Without this it
+    // re-readied on every pass, which is most of the scheduler's churn in
+    // titles that park worker pools on WaitForMultipleObjects.
+    gated = true;
+  } else if (deadline_ms && !alertable) {
+    // Pure timed sleep with nothing to poll: only the clock can end it, so
+    // park until the deadline instead of waking every kPollBackoffMs.
+    gated = true;
   }
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -1063,8 +1083,18 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
       XThread* next = links.ready_next;
       // Skip a gated waiter whose wait cannot have resolved yet.
       if (links.wait_gated && !force_all) {
+        // Three gate kinds: a single object's epoch, a multi-wait's summed
+        // epoch, or (neither) a pure timed sleep that only the deadline below
+        // can resolve.
         XObject* obj = t->cooperative_wait_object();
-        if (obj && obj->cooperative_signal_epoch() == links.wait_epoch &&
+        bool may_have_resolved = false;
+        if (obj) {
+          may_have_resolved =
+              obj->cooperative_signal_epoch() != links.wait_epoch;
+        } else if (links.wait_gate_count) {
+          may_have_resolved = t->cooperative_wait_set_epoch() != links.wait_epoch;
+        }
+        if (!may_have_resolved &&
             !(links.wait_deadline_ms && now_ms >= links.wait_deadline_ms) &&
             !(links.wait_alertable && t->HasPendingUserApc())) {
           links.ready_next = nullptr;
@@ -1283,6 +1313,45 @@ static const char* WaitObjectKind(XObject* object) {
   }
 }
 
+namespace {
+const char* CooperativeWaitKindName(uint8_t kind) {
+  switch (static_cast<XThread::CooperativeWaitKind>(kind)) {
+    case XThread::CooperativeWaitKind::kSingle:
+      return "single";
+    case XThread::CooperativeWaitKind::kMultiAny:
+      return "multi-any";
+    case XThread::CooperativeWaitKind::kMultiAll:
+      return "multi-all";
+    case XThread::CooperativeWaitKind::kDelay:
+      return "delay";
+    case XThread::CooperativeWaitKind::kFence:
+      return "fence";
+    case XThread::CooperativeWaitKind::kIoOffload:
+      return "io-offload";
+    default:
+      return "none";
+  }
+}
+
+// "multi-any[4] handles=F8000030,F8000034,..." - the handles cross-reference
+// against the signal ring dumped alongside.
+std::string FormatWaitShape(const XThread::SchedulerLinks& links) {
+  std::string out = CooperativeWaitKindName(links.wait_kind);
+  if (!links.wait_handle_count) {
+    return out;
+  }
+  out += fmt::format("[{}] handles=", links.wait_handle_count);
+  uint32_t shown = links.wait_handle_count < 8 ? links.wait_handle_count : 8;
+  for (uint32_t i = 0; i < shown; ++i) {
+    out += fmt::format("{}{:08X}", i ? "," : "", links.wait_handles[i]);
+  }
+  if (links.wait_handle_count > shown) {
+    out += ",...";
+  }
+  return out;
+}
+}  // namespace
+
 void GuestScheduler::ReportNoProgress() {
   XELOGW(
       "GuestScheduler: no guest frame presented in {} watchdog ticks while the "
@@ -1320,12 +1389,12 @@ void GuestScheduler::ReportNoProgress() {
               : -1;
       XELOGW(
           "    blocked tid={:08X} '{}' last_safepoint={:08X} lr={:08X} on {} "
-          "obj={} gated={} alertable={} epoch={} deadline_in_ms={}",
+          "obj={} wait={} gated={} alertable={} epoch={} deadline_in_ms={}",
           t->thread_id(), t->thread_name(),
           uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
           WaitObjectKind(obj), static_cast<const void*>(obj),
-          links.wait_gated ? 1 : 0, links.wait_alertable ? 1 : 0,
-          links.wait_epoch, due_in);
+          FormatWaitShape(links), links.wait_gated ? 1 : 0,
+          links.wait_alertable ? 1 : 0, links.wait_epoch, due_in);
     }
     // Ready-but-not-running fibers matter too: a queue that never drains
     // means the CPU is rotating between the same few spinners.
@@ -1340,6 +1409,22 @@ void GuestScheduler::ReportNoProgress() {
                prio);
       }
     }
+  }
+  // The other half of the picture: what was actually signalled recently. A
+  // handle the fibers above wait on that never appears here names the producer
+  // that stopped; one that appears repeatedly while a waiter stays parked
+  // points at the wake being lost instead of never sent.
+  auto signals = XObject::RecentCooperativeSignals(64);
+  if (signals.empty()) {
+    XELOGW("  recent cooperative signals: none recorded");
+    return;
+  }
+  XELOGW("  last {} cooperative signals (oldest first):", signals.size());
+  for (const auto& rec : signals) {
+    XELOGW(
+        "    #{} handle={:08X} type={} by_tid={:08X} lr={:08X} uptime_ms={}",
+        rec.seq, rec.handle, uint32_t(rec.type), rec.signaler_thread,
+        rec.signaler_lr, rec.uptime_ms);
   }
 }
 

@@ -16,6 +16,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "xenia/base/threading.h"
 #include "xenia/kernel/kernel.h"
@@ -290,6 +291,22 @@ class XObject {
   // Bumps the epoch, then wakes the dispatch threads. Call after the host
   // primitive is signaled, never before.
   void WakeCooperativeWaiters();
+
+  // Ring of the most recent cooperative wakes, dumped by the scheduler's
+  // no-progress report. A wedge is diagnosed by pairing what the parked fibers
+  // wait on against what was last signalled, and the old boot-window trace ran
+  // out of budget long before any steady-state freeze.
+  struct SignalRecord {
+    uint64_t seq;
+    uint32_t handle;
+    uint32_t signaler_thread;
+    uint32_t signaler_lr;
+    uint32_t uptime_ms;
+    uint8_t type;
+  };
+  static void RecordCooperativeSignal(XObject* object);
+  // Oldest-first, at most |max| entries.
+  static std::vector<SignalRecord> RecentCooperativeSignals(size_t max);
 
   // Registers |thread| as a cooperative waiter on this object and records the
   // registration on the thread, so a terminate that never unwinds the parked

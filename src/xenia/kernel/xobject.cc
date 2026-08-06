@@ -218,6 +218,12 @@ X_KTHREAD* WaitEnter(uint32_t wait_reason, uint32_t processor_mode,
 }
 
 void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
+  // Runs on every cooperative wait exit, so it is also where the diagnostic
+  // wait shape is dropped. Unconditional: a thread that never waits again must
+  // not keep reporting a stale handle set.
+  if (auto* self = XThread::GetCurrentThread()) {
+    self->clear_cooperative_wait_shape();
+  }
   if (!kthread) {
     return;
   }
@@ -246,8 +252,15 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
     }
     // Sampled before polling, so a signal landing after a failed poll changes
     // the epoch and the re-poll is not skipped.
-    uint32_t wait_epoch =
-        wait_object ? wait_object->cooperative_signal_epoch() : 0;
+    // Sampled before polling, so a signal landing after a failed poll changes
+    // it and the re-poll is not skipped. A multi-wait has no single object, so
+    // it uses the summed epoch of its set.
+    uint32_t wait_epoch = 0;
+    if (wait_object) {
+      wait_epoch = wait_object->cooperative_signal_epoch();
+    } else if (auto* self = XThread::GetCurrentThread()) {
+      wait_epoch = self->cooperative_wait_set_epoch();
+    }
     std::optional<X_STATUS> resolved = poll();
     if (resolved) {
       WaitExit(kthread, *resolved);
@@ -330,8 +343,50 @@ bool CooperativeWaiterFifo::HasWaiters() {
   return !waiters_.empty();
 }
 
+namespace {
+// Signal ring. Small, lock-guarded and write-mostly: it is touched once per
+// cooperative wake, which is rare next to the poll traffic it helps explain.
+constexpr size_t kSignalRingSize = 256;
+std::mutex g_signal_ring_lock;
+XObject::SignalRecord g_signal_ring[kSignalRingSize];
+uint64_t g_signal_ring_seq = 0;
+}  // namespace
+
+void XObject::RecordCooperativeSignal(XObject* object) {
+  SignalRecord rec = {};
+  rec.handle = object->handle();
+  rec.type = static_cast<uint8_t>(object->type());
+  rec.uptime_ms = uint32_t(Clock::QueryGuestUptimeMillis());
+  if (auto* thread = XThread::GetCurrentThread()) {
+    rec.signaler_thread = thread->handle();
+    if (auto* state = thread->thread_state()) {
+      rec.signaler_lr = uint32_t(state->context()->lr);
+    }
+  } else {
+    rec.signaler_thread = 0xFFFFFFFF;  // host-side signaller
+  }
+  std::lock_guard<std::mutex> lock(g_signal_ring_lock);
+  rec.seq = ++g_signal_ring_seq;
+  g_signal_ring[(rec.seq - 1) % kSignalRingSize] = rec;
+}
+
+std::vector<XObject::SignalRecord> XObject::RecentCooperativeSignals(
+    size_t max) {
+  std::vector<SignalRecord> out;
+  std::lock_guard<std::mutex> lock(g_signal_ring_lock);
+  uint64_t total = g_signal_ring_seq;
+  size_t have = size_t(total < kSignalRingSize ? total : kSignalRingSize);
+  size_t want = have < max ? have : max;
+  out.reserve(want);
+  for (size_t i = have - want; i < have; ++i) {
+    out.push_back(g_signal_ring[(total - have + i) % kSignalRingSize]);
+  }
+  return out;
+}
+
 void XObject::WakeCooperativeWaiters() {
   cooperative_signal_epoch_.fetch_add(1);
+  RecordCooperativeSignal(this);
   kernel_state()->guest_scheduler()->WakeAll();
 }
 
@@ -388,6 +443,11 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                                        : 0;
     const uint32_t entry_pulse_epoch = cooperative_pulse_epoch();
     EnterCooperativeWait(self);  // FIFO fairness for semaphores
+    if (self) {
+      const uint32_t wait_handle_id = handle();
+      self->set_cooperative_wait_shape(
+          XThread::CooperativeWaitKind::kSingle, &wait_handle_id, 1);
+    }
     X_STATUS status = CooperativeWait(
         scheduler, kthread, this, alertable != 0, deadline_ms,
         [&]() -> std::optional<X_STATUS> {
@@ -609,8 +669,18 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                                                  TimeoutTicksToMs(*opt_timeout))
                                        : 0;
     uint32_t entry_pulse_epochs[kMaxWaitHandles];
+    uint32_t handle_ids[kMaxWaitHandles];
     for (size_t i = 0; i < count; ++i) {
       entry_pulse_epochs[i] = objects[i]->cooperative_pulse_epoch();
+      handle_ids[i] = objects[i]->handle();
+    }
+    // A multi-wait registers no single wait object, so this is the only record
+    // of what it is blocked on.
+    if (auto* self = XThread::GetCurrentThread()) {
+      self->set_cooperative_wait_shape(
+          wait_type ? XThread::CooperativeWaitKind::kMultiAny
+                    : XThread::CooperativeWaitKind::kMultiAll,
+          handle_ids, count, objects);
     }
     return CooperativeWait(
         scheduler, kthread, nullptr, alertable != 0, deadline_ms,

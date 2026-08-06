@@ -1241,12 +1241,18 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
       return X_STATUS_SUCCESS;
     }
     uint64_t deadline = Clock::QueryHostUptimeMillis() + timeout_ms;
+    set_cooperative_wait_shape(CooperativeWaitKind::kDelay, nullptr, 0);
     while (Clock::QueryHostUptimeMillis() < deadline) {
       if (alertable && HasPendingUserApc()) {
+        clear_cooperative_wait_shape();
         return X_STATUS_USER_APC;
       }
-      scheduler->BlockCurrentThread();
+      // Passing the deadline lets the re-poll gate park this fiber until it
+      // expires. Without it the sleep woke every kPollBackoffMs just to
+      // re-check a clock that nothing else can advance.
+      scheduler->BlockCurrentThread(deadline, 0, alertable != 0);
     }
+    clear_cooperative_wait_shape();
     return X_STATUS_SUCCESS;
   }
 
