@@ -2081,7 +2081,8 @@ void MicroProfileFlipCpu()
 								MP_ASSERT(nGroup < MICROPROFILE_MAX_GROUPS);
 								pGroupStackPos[nGroup]++;
 								pStack[nStackPos++] = k;
-								pChildTickStack[nStackPos] = 0;
+								if(nStackPos < MICROPROFILE_STACK_MAX)
+									pChildTickStack[nStackPos] = 0;
 
 							}
 							else if(MP_LOG_META == nType)

@@ -63,6 +63,12 @@
 DEFINE_bool(profiler_dpi_scaling, false,
             "Apply window DPI scaling to the profiler.", "UI");
 DEFINE_bool(show_profiler, false, "Show profiling UI by default.", "UI");
+DEFINE_bool(
+    profiler_dump_html, false,
+    "Dump the profiler capture as a browsable HTML timeline rather than "
+    "aggregate CSV. Carries every logged scope, so it runs to hundreds "
+    "of megabytes.",
+    "UI");
 
 namespace xe {
 
@@ -153,14 +159,21 @@ void Profiler::Dump() {
 #if XE_OPTION_PROFILING_UI
   MicroProfileDumpTimers();
 #endif  // XE_OPTION_PROFILING_UI
-  if (FILE* f = fopen("profile.html", "w")) {
-    MicroProfileDumpHtml(
-        MicroProfileWriteFile, f,
-        MICROPROFILE_MAX_FRAME_HISTORY - MICROPROFILE_GPU_FRAME_DELAY - 3,
-        nullptr);
-    fclose(f);
-    XELOGI("Profiler dump written to profile.html");
+  const int max_frames =
+      MICROPROFILE_MAX_FRAME_HISTORY - MICROPROFILE_GPU_FRAME_DELAY - 3;
+  const char* path = cvars::profiler_dump_html ? "profile.html" : "profile.csv";
+  FILE* f = fopen(path, "w");
+  if (!f) {
+    XELOGE("Failed to open {} for the profiler dump", path);
+    return;
   }
+  if (cvars::profiler_dump_html) {
+    MicroProfileDumpHtml(MicroProfileWriteFile, f, max_frames, nullptr);
+  } else {
+    MicroProfileDumpCsv(MicroProfileWriteFile, f, max_frames);
+  }
+  fclose(f);
+  XELOGI("Profiler dump written to {}", path);
 }
 
 void Profiler::Shutdown() {
