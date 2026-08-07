@@ -134,8 +134,11 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
               const Shader& vertex_shader) override;
 
   // Metal-specific methods
+  // render_encoder_pending tells whether a render encoder is still to be
+  // created from the result - load actions only take effect for one, and an
+  // encoder already recording holds the attachments in tile memory instead.
   MTL::RenderPassDescriptor* GetRenderPassDescriptor(
-      uint32_t expected_sample_count = 1);
+      uint32_t expected_sample_count, bool render_encoder_pending);
 
   bool IsRenderPassDescriptorDirty() const {
     return render_pass_descriptor_dirty_;
@@ -669,6 +672,13 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   bool PreflightPendingDrawPassTransfers(
       const TransferAttachmentFormats& attachment_formats);
   void ClearPendingDrawPassTransfers();
+  // Which attachments of the queued transfers rewrite their destination in
+  // full, and so have nothing worth loading into tile memory.
+  uint32_t GetPendingDrawPassLoadDontCareMask();
+  // Bit 0 is the depth/stencil attachment, bits 1 and up the color ones.
+  void SetCachedRenderPassLoadActions(uint32_t attachment_mask,
+                                      MTL::LoadAction load_action);
+  void ApplyPendingDrawPassLoadActions();
 
   // Writes contents of host render targets within rectangles from
   // Returns the dump pipeline for a key, compiling it on the first use, or null

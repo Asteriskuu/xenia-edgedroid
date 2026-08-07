@@ -1328,8 +1328,8 @@ bool MetalRenderTargetCache::Update(
           static_cast<MetalRenderTarget*>(accumulated_targets[i]);
       if (dest_metal_rt->needs_initial_clear()) {
         dest_metal_rt->SetNeedsInitialClear(false);
+        render_pass_descriptor_dirty_ = true;
       }
-      render_pass_descriptor_dirty_ = true;
     }
     if (fallback_transfer_work) {
       PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
@@ -1360,35 +1360,66 @@ bool MetalRenderTargetCache::Update(
   return true;
 }
 
+void MetalRenderTargetCache::SetCachedRenderPassLoadActions(
+    uint32_t attachment_mask, MTL::LoadAction load_action) {
+  if (!attachment_mask || !cached_render_pass_descriptor_) {
+    return;
+  }
+  if (attachment_mask & 1) {
+    if (auto* depth_attachment =
+            cached_render_pass_descriptor_->depthAttachment()) {
+      depth_attachment->setLoadAction(load_action);
+    }
+    if (auto* stencil_attachment =
+            cached_render_pass_descriptor_->stencilAttachment()) {
+      stencil_attachment->setLoadAction(load_action);
+    }
+  }
+  if (auto* color_attachments =
+          cached_render_pass_descriptor_->colorAttachments()) {
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (!(attachment_mask & (uint32_t(2) << i))) {
+        continue;
+      }
+      if (auto* color_attachment = color_attachments->object(i)) {
+        color_attachment->setLoadAction(load_action);
+      }
+    }
+  }
+}
+
+uint32_t MetalRenderTargetCache::GetPendingDrawPassLoadDontCareMask() {
+  if (!HasPendingDrawPassTransfers()) {
+    return 0;
+  }
+  TransferAttachmentFormats attachment_formats;
+  if (!GetCurrentTransferAttachmentFormats(attachment_formats) ||
+      !PreflightPendingDrawPassTransfers(attachment_formats)) {
+    return 0;
+  }
+  return pending_draw_pass_transfer_mask_ &
+         pending_draw_pass_full_overwrite_mask_;
+}
+
+void MetalRenderTargetCache::ApplyPendingDrawPassLoadActions() {
+  uint32_t dontcare_mask = GetPendingDrawPassLoadDontCareMask();
+  SetCachedRenderPassLoadActions(
+      pending_draw_pass_load_dontcare_mask_ & ~dontcare_mask,
+      MTL::LoadActionLoad);
+  SetCachedRenderPassLoadActions(
+      dontcare_mask & ~pending_draw_pass_load_dontcare_mask_,
+      MTL::LoadActionDontCare);
+  pending_draw_pass_load_dontcare_mask_ = dontcare_mask;
+}
+
 void MetalRenderTargetCache::ClearPendingDrawPassTransfers() {
   // A DontCare load action only holds for the one pass that also encodes the
   // transfers. Patch the descriptor back in place rather than dirtying it: a
   // rebuild would hand the command processor a new descriptor and cost the
   // encoder restart this whole path exists to avoid, and an encoder already
   // created from it has its own copy of the load actions.
-  if (pending_draw_pass_load_dontcare_mask_ && cached_render_pass_descriptor_) {
-    if (pending_draw_pass_load_dontcare_mask_ & 1) {
-      if (auto* depth_attachment =
-              cached_render_pass_descriptor_->depthAttachment()) {
-        depth_attachment->setLoadAction(MTL::LoadActionLoad);
-      }
-      if (auto* stencil_attachment =
-              cached_render_pass_descriptor_->stencilAttachment()) {
-        stencil_attachment->setLoadAction(MTL::LoadActionLoad);
-      }
-    }
-    if (auto* color_attachments =
-            cached_render_pass_descriptor_->colorAttachments()) {
-      for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-        if (!(pending_draw_pass_load_dontcare_mask_ & (uint32_t(2) << i))) {
-          continue;
-        }
-        if (auto* color_attachment = color_attachments->object(i)) {
-          color_attachment->setLoadAction(MTL::LoadActionLoad);
-        }
-      }
-    }
-  }
+  SetCachedRenderPassLoadActions(pending_draw_pass_load_dontcare_mask_,
+                                 MTL::LoadActionLoad);
 
   for (auto& transfers : pending_draw_pass_transfers_) {
     transfers.clear();
@@ -2194,9 +2225,16 @@ MTL::Texture* MetalRenderTargetCache::GetStencilTextureView(
 }
 
 MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
-    uint32_t expected_sample_count) {
+    uint32_t expected_sample_count, bool render_encoder_pending) {
   if (!render_pass_descriptor_dirty_ && cached_render_pass_descriptor_ &&
       cached_render_pass_descriptor_sample_count_ == expected_sample_count) {
+    // Queuing transfers deliberately does not dirty the descriptor, so their
+    // load actions are the one thing this path still has to bring up to date.
+    // An encoder already recording keeps the attachments in tile memory, with
+    // no load left for a DontCare to skip.
+    if (render_encoder_pending) {
+      ApplyPendingDrawPassLoadActions();
+    }
     return cached_render_pass_descriptor_;
   }
   if (cached_render_pass_descriptor_sample_count_ != expected_sample_count) {
@@ -2221,17 +2259,10 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
 
   // Queued transfers that rewrite a destination in full make loading its old
   // contents into tile memory pointless, but only for the pass that actually
-  // encodes them - ClearPendingDrawPassTransfers rebuilds this if it doesn't.
-  pending_draw_pass_load_dontcare_mask_ = 0;
-  if (HasPendingDrawPassTransfers()) {
-    TransferAttachmentFormats attachment_formats;
-    if (GetCurrentTransferAttachmentFormats(attachment_formats) &&
-        PreflightPendingDrawPassTransfers(attachment_formats)) {
-      pending_draw_pass_load_dontcare_mask_ =
-          pending_draw_pass_transfer_mask_ &
-          pending_draw_pass_full_overwrite_mask_;
-    }
-  }
+  // encodes them - ClearPendingDrawPassTransfers restores this if it doesn't.
+  // A rebuild always hands the command processor a new descriptor, so an
+  // encoder is always created from it.
+  pending_draw_pass_load_dontcare_mask_ = GetPendingDrawPassLoadDontCareMask();
   auto pending_load_dontcare = [this](uint32_t pending_index) {
     return (pending_draw_pass_load_dontcare_mask_ &
             (uint32_t(1) << pending_index)) != 0;
@@ -5085,10 +5116,12 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
       }
       if (use_active_render_encoder) {
         transfer_encoder = active_render_encoder;
-        // Whatever the guest left on the encoder must not cull or wireframe
-        // the full-viewport transfer draws.
+        // Whatever the guest left on the encoder must not cull, wireframe or
+        // depth-bias the full-viewport transfer draws.
         transfer_encoder->setCullMode(MTL::CullModeNone);
         transfer_encoder->setTriangleFillMode(MTL::TriangleFillModeFill);
+        transfer_encoder->setDepthBias(0.0f, 0.0f, 0.0f);
+        transfer_encoder->setDepthClipMode(MTL::DepthClipModeClip);
         mark_encoder_mutation(kDrawPassTransferEncoderMutationRasterizer);
         return transfer_encoder;
       }

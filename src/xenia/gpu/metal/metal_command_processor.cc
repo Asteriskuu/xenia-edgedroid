@@ -4889,7 +4889,8 @@ void MetalCommandProcessor::BeginCommandBuffer() {
   MTL::RenderPassDescriptor* pass_descriptor = render_pass_descriptor_;
   if (render_target_cache_) {
     if (MTL::RenderPassDescriptor* cache_desc =
-            render_target_cache_->GetRenderPassDescriptor(1)) {
+            render_target_cache_->GetRenderPassDescriptor(
+                1, !current_render_encoder_)) {
       pass_descriptor = cache_desc;
     }
   }
@@ -4911,7 +4912,8 @@ void MetalCommandProcessor::BeginCommandBuffer() {
           "ownership transfers");
     }
     if (MTL::RenderPassDescriptor* cache_desc =
-            render_target_cache_->GetRenderPassDescriptor(1)) {
+            render_target_cache_->GetRenderPassDescriptor(
+                1, !current_render_encoder_)) {
       pass_descriptor = cache_desc;
     }
   }
