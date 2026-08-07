@@ -211,11 +211,6 @@ class RenderTargetCache {
 
   virtual void BeginFrame();
 
-  // Ends a frame for the direct_resolve_stats_rate report, emitting it every
-  // that many frames. gpu_time_ns is the backend's cumulative GPU busy time,
-  // or 0 where the backend can't measure it.
-  void CountDirectResolveStatsFrame(uint64_t gpu_time_ns);
-
   virtual bool Update(bool is_rasterization_done,
                       reg::RB_DEPTHCONTROL normalized_depth_control,
                       uint32_t normalized_color_mask,
@@ -562,19 +557,7 @@ class RenderTargetCache {
     // Part of the source span is owned by no render target - the round trip
     // copies whatever EDRAM already holds there.
     kPartialOwnership,
-    // Eligible, but the backend couldn't encode it - a pipeline that wouldn't
-    // build, or a binding it can't make. Never silently the same as eligible:
-    // a resolve counted here took the round trip.
-    kBackendUnavailable,
-    // Eligible, but direct_host_resolve is off. Kept apart from the above so a
-    // baseline run can't read as a backend that can't do the work.
-    kDisabled,
-
-    kCount,
   };
-
-  static const char* GetDirectResolveEligibilityName(
-      DirectResolveEligibility eligibility);
 
   virtual uint32_t GetMaxRenderTargetWidth() const = 0;
   virtual uint32_t GetMaxRenderTargetHeight() const = 0;
@@ -656,11 +639,6 @@ class RenderTargetCache {
       const draw_util::ResolveInfo& resolve_info,
       draw_util::ResolveCopyShaderIndex copy_shader) const;
 
-  // Counts one resolve for the direct_resolve_stats_rate report. Pass what the
-  // backend actually did, which may be a fallback even where the eligibility
-  // says otherwise.
-  void AccumulateDirectResolveStats(DirectResolveEligibility eligibility);
-
   // Sets up the needed render targets and transfers to perform a clear in a
   // resolve operation via a host render target clear. resolve_info is expected
   // to be obtained via draw_util::GetResolveInfo. Returns whether any clears
@@ -703,15 +681,6 @@ class RenderTargetCache {
                                           RenderTargetKey dest) const;
 
  private:
-  void ReportDirectResolveStats(uint64_t gpu_time_ns);
-
-  // Resolves since the last direct_resolve_stats_rate report, by whether they
-  // could skip the EDRAM round trip.
-  uint64_t direct_resolve_stats_[size_t(DirectResolveEligibility::kCount)] = {};
-  uint64_t direct_resolve_stats_frames_ = 0;
-  uint64_t direct_resolve_stats_start_ns_ = 0;
-  uint64_t direct_resolve_stats_start_gpu_ns_ = 0;
-
   const RegisterFile& register_file_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;

@@ -9,10 +9,8 @@
 
 #include "xenia/gpu/render_target_cache.h"
 
-#include <chrono>
 #include <cmath>
 #include <cstring>
-#include <string>
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
@@ -230,11 +228,6 @@ DEFINE_bool(
     "resolve.\n"
     "Set to false to always take the EDRAM path.",
     "GPU");
-DEFINE_int32(direct_resolve_stats_rate, 0,
-             "Log how many resolves took the direct host render target path "
-             "instead of going through the EDRAM buffer, and the frame time "
-             "over the same window, every N frames (0 to disable)",
-             "GPU");
 
 namespace xe {
 namespace gpu {
@@ -1233,33 +1226,6 @@ bool RenderTargetCache::IsResolveSourceNativeOnly(uint32_t base,
   return true;
 }
 
-const char* RenderTargetCache::GetDirectResolveEligibilityName(
-    DirectResolveEligibility eligibility) {
-  switch (eligibility) {
-    case DirectResolveEligibility::kEligible:
-      return "eligible";
-    case DirectResolveEligibility::kNotHostRenderTargets:
-      return "not host render targets";
-    case DirectResolveEligibility::kConvertingCopyShader:
-      return "converting copy shader";
-    case DirectResolveEligibility::kResolutionScaled:
-      return "resolution scaled";
-    case DirectResolveEligibility::kNoOwnership:
-      return "no ownership";
-    case DirectResolveEligibility::kSourceLayoutMismatch:
-      return "source layout mismatch";
-    case DirectResolveEligibility::kPartialOwnership:
-      return "partial ownership";
-    case DirectResolveEligibility::kBackendUnavailable:
-      return "backend unavailable";
-    case DirectResolveEligibility::kDisabled:
-      return "disabled";
-    default:
-      assert_unhandled_case(eligibility);
-      return "unknown";
-  }
-}
-
 RenderTargetCache::DirectResolveEligibility
 RenderTargetCache::GetDirectResolveEligibility(
     const draw_util::ResolveInfo& resolve_info,
@@ -1312,73 +1278,6 @@ RenderTargetCache::GetDirectResolveEligibility(
   }
 
   return DirectResolveEligibility::kEligible;
-}
-
-void RenderTargetCache::AccumulateDirectResolveStats(
-    DirectResolveEligibility eligibility) {
-  if (cvars::direct_resolve_stats_rate > 0) {
-    ++direct_resolve_stats_[size_t(eligibility)];
-  }
-}
-
-void RenderTargetCache::CountDirectResolveStatsFrame(uint64_t gpu_time_ns) {
-  if (cvars::direct_resolve_stats_rate <= 0) {
-    return;
-  }
-  if (!direct_resolve_stats_frames_) {
-    direct_resolve_stats_start_ns_ =
-        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                     std::chrono::steady_clock::now().time_since_epoch())
-                     .count());
-    direct_resolve_stats_start_gpu_ns_ = gpu_time_ns;
-  }
-  ++direct_resolve_stats_frames_;
-  if (direct_resolve_stats_frames_ >=
-      uint64_t(cvars::direct_resolve_stats_rate)) {
-    ReportDirectResolveStats(gpu_time_ns);
-  }
-}
-
-void RenderTargetCache::ReportDirectResolveStats(uint64_t gpu_time_ns) {
-  double frames = double(direct_resolve_stats_frames_);
-  uint64_t now_ns =
-      uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
-                   .count());
-  uint64_t total = 0;
-  for (uint64_t count : direct_resolve_stats_) {
-    total += count;
-  }
-  std::string breakdown;
-  for (size_t i = 0; i < size_t(DirectResolveEligibility::kCount); ++i) {
-    if (!direct_resolve_stats_[i]) {
-      continue;
-    }
-    if (!breakdown.empty()) {
-      breakdown += ", ";
-    }
-    breakdown += fmt::format(
-        "{}={} ({:.1f}%)",
-        GetDirectResolveEligibilityName(DirectResolveEligibility(i)),
-        direct_resolve_stats_[i],
-        100.0 * double(direct_resolve_stats_[i]) / double(total));
-  }
-  std::string gpu_time;
-  if (gpu_time_ns) {
-    gpu_time =
-        fmt::format("{:.3f} GPU ms/frame, ",
-                    double(gpu_time_ns - direct_resolve_stats_start_gpu_ns_) /
-                        (1000000.0 * frames));
-  }
-  XELOGI(
-      "Direct resolve: {}{:.3f} wall ms/frame, {:.2f} resolves/frame over {} "
-      "frames{}{}",
-      gpu_time,
-      double(now_ns - direct_resolve_stats_start_ns_) / (1000000.0 * frames),
-      double(total) / frames, direct_resolve_stats_frames_,
-      breakdown.empty() ? "" : " - ", breakdown);
-  std::memset(direct_resolve_stats_, 0, sizeof(direct_resolve_stats_));
-  direct_resolve_stats_frames_ = 0;
 }
 
 bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(

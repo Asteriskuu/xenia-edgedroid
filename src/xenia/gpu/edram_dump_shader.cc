@@ -10,7 +10,6 @@
 #include "xenia/gpu/edram_dump_shader.h"
 
 #include <initializer_list>
-#include <optional>
 #include <vector>
 
 #include "third_party/glslang/SPIRV/GLSL.std.450.h"
@@ -64,6 +63,24 @@ constexpr uint32_t kResolveDestCoordinateInfoSampleSelectShift =
 // XENOS_TEXTURE_MACRO_TILE_HEIGHT_3D_LOG2 in texture_address.xesli.
 constexpr uint32_t kTextureMacroTileHeight3DLog2 = 4;
 
+// XenosTextureTiledAddressCombine in texture_address.xesli.
+constexpr uint32_t CombineTiledAddress(uint32_t outer_inner_bytes,
+                                       uint32_t bank, uint32_t pipe,
+                                       uint32_t y_lsb) {
+  return (y_lsb << 4) | (pipe << 6) | (bank << 11) | (outer_inner_bytes & 0xF) |
+         (((outer_inner_bytes >> 4) & 0x1) << 5) |
+         (((outer_inner_bytes >> 5) & 0x7) << 8) |
+         (outer_inner_bytes >> 8 << 12);
+}
+
+// XenosTextureTiledAddressXInMacroXor - the byte step for x pixels along X,
+// which is not x << bytes_per_block_log2 because the tiled layout interleaves.
+constexpr uint32_t TiledAddressXInMacroXor(uint32_t x,
+                                           uint32_t bytes_per_block_log2) {
+  return CombineTiledAddress((x & 0x7) << bytes_per_block_log2, 0,
+                             (x >> 3) & 0x3, 0);
+}
+
 }  // namespace
 
 std::vector<uint32_t> BuildEdramDumpShaderSpirv(
@@ -87,6 +104,7 @@ std::vector<uint32_t> BuildEdramDumpShaderSpirv(
   spv::Id type_uint = builder.makeUintType(32);
   spv::Id type_uint2 = builder.makeVectorType(type_uint, 2);
   spv::Id type_uint3 = builder.makeVectorType(type_uint, 3);
+  spv::Id type_uint4 = builder.makeVectorType(type_uint, 4);
   spv::Id type_float = builder.makeFloatType(32);
   spv::Id type_bool = builder.makeBoolType();
 
@@ -97,17 +115,18 @@ std::vector<uint32_t> BuildEdramDumpShaderSpirv(
 
   // Bindings.
   // Destination buffer - EDRAM in whole samples, or the resolve destination
-  // addressed in dwords because the guest texture layout isn't sample-aligned.
+  // in the 16-byte blocks a direct resolve's runs of pixels store as.
   bool format_is_64bpp = !key.is_depth && xenos::IsColorRenderTargetFormat64bpp(
                                               key.GetColorFormat());
-  bool dest_is_dwords = key.direct_resolve;
   id_vector_temp.clear();
   id_vector_temp.push_back(builder.makeRuntimeArray(
-      (format_is_64bpp && !dest_is_dwords) ? type_uint2 : type_uint));
+      key.direct_resolve ? type_uint4
+                         : (format_is_64bpp ? type_uint2 : type_uint)));
   // Storage buffers have std430 packing, no padding to 4-component vectors.
   builder.addDecoration(id_vector_temp.back(), spv::DecorationArrayStride,
-                        sizeof(uint32_t)
-                            << uint32_t(format_is_64bpp && !dest_is_dwords));
+                        key.direct_resolve
+                            ? sizeof(uint32_t) * 4
+                            : (sizeof(uint32_t) << uint32_t(format_is_64bpp)));
   spv::Id type_dest = builder.makeStructType(
       id_vector_temp, key.direct_resolve ? "XeResolveDest" : "XeEdram");
   builder.addMemberName(type_dest, 0,
@@ -166,6 +185,7 @@ std::vector<uint32_t> BuildEdramDumpShaderSpirv(
       "resolve_dest_coordinate_info",
       "resolve_dest_base",
       "resolve_height_div_8",
+      "resolve_dispatch_tile",
   };
   static_assert(
       xe::countof(kPushConstantNames) == kEdramDumpShaderPushConstantCount,
@@ -241,14 +261,6 @@ std::vector<uint32_t> BuildEdramDumpShaderSpirv(
                                builder.makeUintConstant(constant));
   };
 
-  // Where a direct resolve stores, and whether this invocation's sample is one
-  // the resolve reads at all. Both are resolved before the source is loaded so
-  // the samples MSAA discards never cost a fetch.
-  spv::Id direct_resolve_dest_dword_index = spv::NoResult;
-  spv::Id direct_resolve_write_condition = spv::NoResult;
-  spv::Id resolve_edram_info = spv::NoResult;
-  spv::Id resolve_dest_info = spv::NoResult;
-
   // For now, as the exact addressing in 64bpp render targets relatively to
   // 32bpp is unknown, treating 64bpp tiles as storing 40x16 samples rather than
   // 80x16 for simplicity of addressing into the texture.
@@ -263,449 +275,168 @@ std::vector<uint32_t> BuildEdramDumpShaderSpirv(
   // Windows, as of June 2022.
   spv::Id global_invocation_id =
       builder.createLoad(input_global_invocation_id, spv::NoPrecision);
-  spv::Id rectangle_sample_x =
-      builder.createCompositeExtract(global_invocation_id, type_uint, 0);
-  // Dumps for fully native resolves address the EDRAM buffer with the plain
-  // 1x1 tile layout.
-  uint32_t layout_scale_x = key.native_layout ? 1 : options.resolution_scale_x;
-  uint32_t layout_scale_y = key.native_layout ? 1 : options.resolution_scale_y;
-  uint32_t tile_width =
-      (xenos::kEdramTileWidthSamples >> uint32_t(format_is_64bpp)) *
-      layout_scale_x;
-  spv::Id const_tile_width = builder.makeUintConstant(tile_width);
-  spv::Id rectangle_tile_index_x = builder.createBinOp(
-      spv::OpUDiv, type_uint, rectangle_sample_x, const_tile_width);
-  spv::Id tile_sample_x = builder.createBinOp(
-      spv::OpUMod, type_uint, rectangle_sample_x, const_tile_width);
-  spv::Id rectangle_sample_y =
-      builder.createCompositeExtract(global_invocation_id, type_uint, 1);
-  uint32_t tile_height = xenos::kEdramTileHeightSamples * layout_scale_y;
-  spv::Id const_tile_height = builder.makeUintConstant(tile_height);
-  spv::Id rectangle_tile_index_y = builder.createBinOp(
-      spv::OpUDiv, type_uint, rectangle_sample_y, const_tile_height);
-  spv::Id tile_sample_y = builder.createBinOp(
-      spv::OpUMod, type_uint, rectangle_sample_y, const_tile_height);
 
-  // Get the tile index in the EDRAM relative to the dump rectangle base tile.
-  spv::Id pitches_constant =
-      load_push_constant(kEdramDumpShaderPushConstantPitches);
-  spv::Id const_uint_0 = builder.makeUintConstant(0);
-  spv::Id const_edram_pitch_tiles_bits =
-      builder.makeUintConstant(xenos::kEdramPitchTilesBits);
-  spv::Id dest_pitch_tiles =
-      builder.createTriOp(spv::OpBitFieldUExtract, type_uint, pitches_constant,
-                          const_uint_0, const_edram_pitch_tiles_bits);
-  spv::Id rectangle_tile_index = builder.createBinOp(
-      spv::OpIAdd, type_uint,
-      builder.createBinOp(spv::OpIMul, type_uint, dest_pitch_tiles,
-                          rectangle_tile_index_y),
-      rectangle_tile_index_x);
-  // Add the base tile in the dispatch to the dispatch-local tile index, not
-  // wrapping yet so in case of a wraparound, the address relative to the base
-  // in the image after subtraction of the base won't be negative.
-  spv::Id offsets_constant =
-      load_push_constant(kEdramDumpShaderPushConstantOffsets);
-  spv::Id const_edram_base_tiles_bits_plus_1 =
-      builder.makeUintConstant(xenos::kEdramBaseTilesBits + 1);
-  spv::Id edram_tile_index_non_wrapped = builder.createBinOp(
-      spv::OpIAdd, type_uint,
-      builder.createTriOp(spv::OpBitFieldUExtract, type_uint, offsets_constant,
-                          const_uint_0, const_edram_base_tiles_bits_plus_1),
-      rectangle_tile_index);
-
-  // Combine the tile sample index and the tile index, wrapping the tile
-  // addressing, into the EDRAM sample index. A direct resolve never touches
-  // EDRAM - and the depth column swap below would only be undone again by the
-  // resolve copy's own addressing, so it drops out entirely.
-  spv::Id edram_sample_address = spv::NoResult;
-  if (!key.direct_resolve) {
-    edram_sample_address = builder.createBinOp(
-        spv::OpIAdd, type_uint,
-        builder.createBinOp(
-            spv::OpIMul, type_uint,
-            builder.makeUintConstant(tile_width * tile_height),
-            builder.createBinOp(
-                spv::OpBitwiseAnd, type_uint, edram_tile_index_non_wrapped,
-                builder.makeUintConstant(xenos::kEdramTileCount - 1))),
-        builder.createBinOp(
-            spv::OpIAdd, type_uint,
-            builder.createBinOp(spv::OpIMul, type_uint, const_tile_width,
-                                tile_sample_y),
-            tile_sample_x));
-    if (key.is_depth) {
-      // Swap 40-sample columns in the depth buffer in the destination address
-      // to get the final address of the sample in the EDRAM.
-      uint32_t tile_width_half = tile_width >> 1;
-      edram_sample_address = builder.createUnaryOp(
-          spv::OpBitcast, type_uint,
-          builder.createBinOp(
-              spv::OpIAdd, type_int,
-              builder.createUnaryOp(spv::OpBitcast, type_int,
-                                    edram_sample_address),
-              builder.createTriOp(
-                  spv::OpSelect, type_int,
-                  builder.createBinOp(
-                      spv::OpULessThan, builder.makeBoolType(), tile_sample_x,
-                      builder.makeUintConstant(tile_width_half)),
-                  builder.makeIntConstant(int32_t(tile_width_half)),
-                  builder.makeIntConstant(-int32_t(tile_width_half)))));
-    }
-  }
-
-  if (key.direct_resolve) {
-    // Locate the sample in the resolve destination, in the guest texture
-    // layout, mirroring resolve.xesli and texture_address.xesli so the result
-    // is bit-identical to what the round trip would have written.
-    resolve_edram_info =
-        load_push_constant(kEdramDumpShaderPushConstantResolveEdramInfo);
-    spv::Id resolve_coordinate_info =
-        load_push_constant(kEdramDumpShaderPushConstantResolveCoordinateInfo);
-    resolve_dest_info =
-        load_push_constant(kEdramDumpShaderPushConstantResolveDestInfo);
-    spv::Id resolve_dest_coordinate_info = load_push_constant(
-        kEdramDumpShaderPushConstantResolveDestCoordinateInfo);
-
-    // The sample's position within the resolve's own tile grid. The dispatch
-    // rectangle is that grid - GetResolveEdramTileSpan derives its base and
-    // pitch from the same ResolveEdramInfo - so dest_pitch_tiles is already
-    // the resolve's pitch, and the tile index only needs rebasing.
-    spv::Id resolve_tile_index = builder.createBinOp(
-        spv::OpISub, type_uint, edram_tile_index_non_wrapped,
-        extract(resolve_edram_info, kResolveEdramInfoBaseTilesShift,
-                xenos::kEdramBaseTilesBits));
-    spv::Id resolve_sample_x =
-        add(multiply(const_tile_width,
-                     builder.createBinOp(spv::OpUMod, type_uint,
-                                         resolve_tile_index, dest_pitch_tiles)),
-            tile_sample_x);
-    spv::Id resolve_sample_y =
-        add(multiply(const_tile_height,
-                     builder.createBinOp(spv::OpUDiv, type_uint,
-                                         resolve_tile_index, dest_pitch_tiles)),
-            tile_sample_y);
-
-    // Undo XeEdramOffsetBytes' sample placement to get the guest pixel: it
-    // scales the pixel by the MSAA dimensions, then adds bit 1 of the sample
-    // index to X and bit 0 to Y. Subtracting those offsets before the shift
-    // also reproduces 1x MSAA, where a nonzero index addresses a neighbouring
-    // pixel rather than selecting a sample. Eligibility guarantees a single
-    // selected sample, so XeResolveFirstSampleIndex is the raw field.
-    spv::Id sample_select =
-        extract(resolve_dest_coordinate_info,
-                kResolveDestCoordinateInfoSampleSelectShift, 3);
-    spv::Id pixel_x =
-        builder.createBinOp(spv::OpISub, type_uint, resolve_sample_x,
-                            bitwise_and(shift_right(sample_select, 1), 1));
-    spv::Id pixel_y =
-        builder.createBinOp(spv::OpISub, type_uint, resolve_sample_y,
-                            bitwise_and(sample_select, 1));
-    auto require = [&](spv::Id condition) {
-      direct_resolve_write_condition =
-          direct_resolve_write_condition == spv::NoResult
-              ? condition
-              : builder.createBinOp(spv::OpLogicalAnd, type_bool,
-                                    direct_resolve_write_condition, condition);
-    };
-    // Only the selected sample of a pixel reaches the destination. Along an
-    // axis with one sample per pixel there's nothing to select and no mask.
-    uint32_t msaa_x_log2 =
-        uint32_t(key.msaa_samples >= xenos::MsaaSamples::k4X);
-    uint32_t msaa_y_log2 =
-        uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X);
-    if (msaa_x_log2) {
-      require(
-          equals(bitwise_and(pixel_x, (uint32_t(1) << msaa_x_log2) - 1), 0));
-      pixel_x = shift_right(pixel_x, msaa_x_log2);
-    }
-    if (msaa_y_log2) {
-      require(
-          equals(bitwise_and(pixel_y, (uint32_t(1) << msaa_y_log2) - 1), 0));
-      pixel_y = shift_right(pixel_y, msaa_y_log2);
-    }
-
-    // Clip to the resolve rectangle - the dispatch covers the tiles containing
-    // it, which round outward on both axes. Pixels before the rectangle's
-    // origin wrap around to huge values and fail the same comparison.
-    spv::Id dest_x = builder.createBinOp(
-        spv::OpISub, type_uint, pixel_x,
-        shift_left(extract(resolve_coordinate_info,
-                           kResolveCoordinateInfoOffsetXShift, 4),
-                   xenos::kResolveAlignmentPixelsLog2));
-    spv::Id dest_y = builder.createBinOp(
-        spv::OpISub, type_uint, pixel_y,
-        shift_left(extract(resolve_coordinate_info,
-                           kResolveCoordinateInfoOffsetYShift, 1),
-                   xenos::kResolveAlignmentPixelsLog2));
-    require(builder.createBinOp(
-        spv::OpULessThan, type_bool, dest_x,
-        shift_left(
-            extract(resolve_coordinate_info, kResolveCoordinateInfoWidthShift,
-                    kResolveCoordinateInfoWidthBits),
-            xenos::kResolveAlignmentPixelsLog2)));
-    require(builder.createBinOp(
-        spv::OpULessThan, type_bool, dest_y,
-        shift_left(
-            load_push_constant(kEdramDumpShaderPushConstantResolveHeightDiv8),
-            xenos::kResolveAlignmentPixelsLog2)));
-
-    // XeResolveDestPixelAddress. The guest and host positions are the same
-    // without resolution scaling.
-    dest_x = add(dest_x,
-                 shift_left(extract(resolve_dest_coordinate_info,
-                                    kResolveDestCoordinateInfoOffsetXShift, 4),
-                            xenos::kResolveAlignmentPixelsLog2));
-    dest_y = add(dest_y,
-                 shift_left(extract(resolve_dest_coordinate_info,
-                                    kResolveDestCoordinateInfoOffsetYShift, 4),
-                            xenos::kResolveAlignmentPixelsLog2));
-    uint32_t bytes_per_block_log2 = 2 + uint32_t(format_is_64bpp);
-    spv::Id dest_pitch_macro_tiles = extract(
-        resolve_dest_coordinate_info, 0, kResolveDestCoordinateInfoPitchBits);
-    // XenosTextureTiledAddressCombine.
-    auto combine = [&](spv::Id outer_inner_bytes, spv::Id bank, spv::Id pipe,
-                       spv::Id y_lsb) {
-      spv::Id address =
-          bitwise_or(bitwise_or(shift_left(y_lsb, 4), shift_left(pipe, 6)),
-                     shift_left(bank, 11));
-      address = bitwise_or(address, bitwise_and(outer_inner_bytes, 0xF));
-      address = bitwise_or(
-          address,
-          shift_left(bitwise_and(shift_right(outer_inner_bytes, 4), 0x1), 5));
-      address = bitwise_or(
-          address,
-          shift_left(bitwise_and(shift_right(outer_inner_bytes, 5), 0x7), 8));
-      return bitwise_or(address,
-                        shift_left(shift_right(outer_inner_bytes, 8), 12));
-    };
-    // XenosTextureTiledAddress2D.
-    spv::Id outer_blocks_2d =
-        shift_left(add(multiply(shift_right(dest_y, 5), dest_pitch_macro_tiles),
-                       shift_right(dest_x, 5)),
-                   6);
-    spv::Id inner_blocks_2d =
-        bitwise_or(shift_left(bitwise_and(shift_right(dest_y, 1), 0x7), 3),
-                   bitwise_and(dest_x, 0x7));
-    spv::Id outer_inner_bytes_2d = shift_left(
-        bitwise_or(outer_blocks_2d, inner_blocks_2d), bytes_per_block_log2);
-    spv::Id bank_2d = bitwise_and(shift_right(dest_y, 4), 0x1);
-    spv::Id pipe_2d = builder.createBinOp(
-        spv::OpBitwiseXor, type_uint, bitwise_and(shift_right(dest_x, 3), 0x3),
-        shift_left(bitwise_and(shift_right(dest_y, 3), 0x1), 1));
-    spv::Id address_2d =
-        combine(outer_inner_bytes_2d, bank_2d, pipe_2d, bitwise_and(dest_y, 1));
-    // XenosTextureTiledAddress3D, for array destinations.
-    spv::Id dest_slice =
-        extract(resolve_dest_info, kResolveDestInfoSliceShift, 3);
-    spv::Id dest_slice_pitch_macro_tiles = shift_left(
-        extract(resolve_dest_coordinate_info,
-                kResolveDestCoordinateInfoHeightShift,
-                kResolveDestCoordinateInfoPitchBits),
-        xenos::kTextureTileWidthHeightLog2 - kTextureMacroTileHeight3DLog2);
-    spv::Id outer_blocks_3d = shift_left(
-        add(multiply(add(multiply(shift_right(dest_slice, 2),
-                                  dest_slice_pitch_macro_tiles),
-                         shift_right(dest_y, kTextureMacroTileHeight3DLog2)),
-                     dest_pitch_macro_tiles),
-            shift_right(dest_x, 5)),
-        7);
-    spv::Id inner_blocks_3d = bitwise_or(
-        bitwise_or(shift_left(bitwise_and(dest_slice, 0x3), 5),
-                   shift_left(bitwise_and(shift_right(dest_y, 1), 0x3), 3)),
-        bitwise_and(dest_x, 0x7));
-    spv::Id outer_inner_bytes_3d = shift_left(
-        bitwise_or(outer_blocks_3d, inner_blocks_3d), bytes_per_block_log2);
-    spv::Id bank_3d = bitwise_and(
-        builder.createBinOp(spv::OpBitwiseXor, type_uint,
-                            shift_right(dest_y, 3), shift_right(dest_slice, 2)),
-        0x1);
-    spv::Id pipe_3d = builder.createBinOp(
-        spv::OpBitwiseXor, type_uint, bitwise_and(shift_right(dest_x, 3), 0x3),
-        shift_left(bank_3d, 1));
-    spv::Id address_3d =
-        combine(outer_inner_bytes_3d, bank_3d, pipe_3d, bitwise_and(dest_y, 1));
-    spv::Id dest_is_array = builder.createBinOp(
-        spv::OpINotEqual, type_bool,
-        bitwise_and(resolve_dest_info, uint32_t(1)
-                                           << kResolveDestInfoIsArrayShift),
-        const_uint_0);
-    spv::Id dest_address =
-        add(builder.createTriOp(spv::OpSelect, type_uint, dest_is_array,
-                                address_3d, address_2d),
-            load_push_constant(kEdramDumpShaderPushConstantResolveDestBase));
-    // The destination is addressed in dwords - the guest texture layout isn't
-    // sample-aligned for 64bpp.
-    direct_resolve_dest_dword_index = shift_right(dest_address, 2);
-  }
-
-  // Get the linear tile index within the source texture.
-  spv::Id source_tile_index = builder.createBinOp(
-      spv::OpISub, type_uint, edram_tile_index_non_wrapped,
-      builder.createTriOp(
-          spv::OpBitFieldUExtract, type_uint, offsets_constant,
-          const_edram_base_tiles_bits_plus_1,
-          builder.makeUintConstant(xenos::kEdramBaseTilesBits)));
-  // Split the linear tile index in the source texture into X and Y in tiles.
-  spv::Id source_pitch_tiles = builder.createTriOp(
-      spv::OpBitFieldUExtract, type_uint, pitches_constant,
-      const_edram_pitch_tiles_bits, const_edram_pitch_tiles_bits);
-  spv::Id source_tile_index_y = builder.createBinOp(
-      spv::OpUDiv, type_uint, source_tile_index, source_pitch_tiles);
-  spv::Id source_tile_index_x = builder.createBinOp(
-      spv::OpUMod, type_uint, source_tile_index, source_pitch_tiles);
-  // Combine the source tile offset and the sample index within the tile.
-  spv::Id source_sample_x = builder.createBinOp(
-      spv::OpIAdd, type_uint,
-      builder.createBinOp(spv::OpIMul, type_uint, const_tile_width,
-                          source_tile_index_x),
-      tile_sample_x);
-  spv::Id source_sample_y = builder.createBinOp(
-      spv::OpIAdd, type_uint,
-      builder.createBinOp(spv::OpIMul, type_uint, const_tile_height,
-                          source_tile_index_y),
-      tile_sample_y);
-  // Get the source pixel coordinate and the sample index within the pixel.
-  spv::Id source_pixel_x = source_sample_x, source_pixel_y = source_sample_y;
-  spv::Id source_sample_id = spv::NoResult;
-  if (source_is_multisampled) {
-    spv::Id const_uint_1 = builder.makeUintConstant(1);
-    source_pixel_y = builder.createBinOp(spv::OpShiftRightLogical, type_uint,
-                                         source_sample_y, const_uint_1);
-    if (key.msaa_samples >= xenos::MsaaSamples::k4X) {
-      source_pixel_x = builder.createBinOp(spv::OpShiftRightLogical, type_uint,
-                                           source_sample_x, const_uint_1);
-      // 4x MSAA source texture sample index - bit 0 for horizontal, bit 1 for
-      // vertical.
-      source_sample_id = builder.createQuadOp(
-          spv::OpBitFieldInsert, type_uint,
-          builder.createBinOp(spv::OpBitwiseAnd, type_uint, source_sample_x,
-                              const_uint_1),
-          source_sample_y, const_uint_1, const_uint_1);
-    } else {
-      // 2x MSAA source texture sample index - convert from the guest to
-      // the Vulkan standard sample locations.
-      source_sample_id = builder.createTriOp(
-          spv::OpSelect, type_uint,
-          builder.createBinOp(
-              spv::OpINotEqual, builder.makeBoolType(),
-              builder.createBinOp(spv::OpBitwiseAnd, type_uint, source_sample_y,
-                                  const_uint_1),
-              const_uint_0),
-          builder.makeUintConstant(draw_util::GetD3D10SampleIndexForGuest2xMSAA(
-              1, options.msaa_2x_attachments_supported)),
-          builder.makeUintConstant(draw_util::GetD3D10SampleIndexForGuest2xMSAA(
-              0, options.msaa_2x_attachments_supported)));
-    }
-  }
-  if (key.source_scale_native && !key.native_layout && draw_resolution_scaled) {
-    // Native source dumped to the scaled EDRAM layout. Duplicate each pixel
-    // into all the scaled sample slots covering it. Done after the sample index
-    // is extracted since MSAA isn't affected by scale.
-    source_pixel_x = builder.createBinOp(
-        spv::OpUDiv, type_uint, source_pixel_x,
-        builder.makeUintConstant(options.resolution_scale_x));
-    source_pixel_y = builder.createBinOp(
-        spv::OpUDiv, type_uint, source_pixel_y,
-        builder.makeUintConstant(options.resolution_scale_y));
-  }
-
-  // Everything from here on is per selected sample, so a direct resolve skips
-  // it for the samples it discards rather than fetching them and throwing the
-  // result away.
-  std::optional<SpirvBuilder::IfBuilder> if_direct_resolve_writes;
-  if (key.direct_resolve) {
-    if_direct_resolve_writes.emplace(direct_resolve_write_condition,
-                                     spv::SelectionControlMaskNone, builder);
-  }
-
-  // Load the source, and pack the value into one or two 32-bit integers.
-  spv::Id packed[2] = {};
-  spv::Builder::TextureParameters source_texture_parameters = {};
-  source_texture_parameters.sampler =
-      builder.createLoad(source_texture, spv::NoPrecision);
-  id_vector_temp.clear();
-  id_vector_temp.push_back(
-      builder.createUnaryOp(spv::OpBitcast, type_int, source_pixel_x));
-  id_vector_temp.push_back(
-      builder.createUnaryOp(spv::OpBitcast, type_int, source_pixel_y));
-  source_texture_parameters.coords =
-      builder.createCompositeConstruct(type_int2, id_vector_temp);
-  if (source_is_multisampled) {
-    source_texture_parameters.sample =
-        builder.createUnaryOp(spv::OpBitcast, type_int, source_sample_id);
-  } else {
-    source_texture_parameters.lod = builder.makeIntConstant(0);
-  }
-  spv::Id source_vec4 = builder.createTextureCall(
-      spv::NoPrecision, builder.makeVectorType(source_component_type, 4), false,
-      true, false, false, false, source_texture_parameters,
-      spv::ImageOperandsMaskNone);
-  if (key.is_depth) {
+  // Loads one source sample and packs it into one or two 32-bit integers, in
+  // the render target's own EDRAM bit layout. The only part the dump and the
+  // direct resolve share - they address their sources and destinations
+  // completely differently.
+  auto load_and_pack = [&](spv::Id source_pixel_x, spv::Id source_pixel_y,
+                           spv::Id source_sample_id, spv::Id(&packed)[2]) {
+    spv::Builder::TextureParameters source_texture_parameters = {};
     source_texture_parameters.sampler =
-        builder.createLoad(source_stencil_texture, spv::NoPrecision);
-    spv::Id source_stencil = builder.createCompositeExtract(
-        builder.createTextureCall(
-            spv::NoPrecision, builder.makeVectorType(type_uint, 4), false, true,
-            false, false, false, source_texture_parameters,
-            spv::ImageOperandsMaskNone),
-        type_uint, 0);
-    spv::Id source_depth32 =
-        builder.createCompositeExtract(source_vec4, type_float, 0);
-    switch (key.GetDepthFormat()) {
-      case xenos::DepthRenderTargetFormat::kD24S8: {
-        // Round to the nearest even integer. This seems to be the correct
-        // conversion, adding +0.5 and rounding towards zero results in red
-        // instead of black in the 4D5307E6 clear shader.
-        packed[0] = builder.createUnaryOp(
-            spv::OpConvertFToU, type_uint,
-            builder.createUnaryBuiltinCall(
-                type_float, ext_inst_glsl_std_450, GLSLstd450RoundEven,
-                builder.createBinOp(
-                    spv::OpFMul, type_float, source_depth32,
-                    builder.makeFloatConstant(float(0xFFFFFF)))));
-      } break;
-      case xenos::DepthRenderTargetFormat::kD24FS8: {
-        packed[0] = SpirvShaderTranslator::PreClampedDepthTo20e4(
-            builder, source_depth32,
-            !options.depth_float24_convert_in_pixel_shader &&
-                options.depth_float24_round,
-            true, ext_inst_glsl_std_450);
-      } break;
+        builder.createLoad(source_texture, spv::NoPrecision);
+    id_vector_temp.clear();
+    id_vector_temp.push_back(
+        builder.createUnaryOp(spv::OpBitcast, type_int, source_pixel_x));
+    id_vector_temp.push_back(
+        builder.createUnaryOp(spv::OpBitcast, type_int, source_pixel_y));
+    source_texture_parameters.coords =
+        builder.createCompositeConstruct(type_int2, id_vector_temp);
+    if (source_is_multisampled) {
+      source_texture_parameters.sample =
+          builder.createUnaryOp(spv::OpBitcast, type_int, source_sample_id);
+    } else {
+      source_texture_parameters.lod = builder.makeIntConstant(0);
     }
-    packed[0] = builder.createQuadOp(
-        spv::OpBitFieldInsert, type_uint, source_stencil, packed[0],
-        builder.makeUintConstant(8), builder.makeUintConstant(24));
-  } else {
-    switch (key.GetColorFormat()) {
-      case xenos::ColorRenderTargetFormat::k_8_8_8_8:
-      case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
-        // k_8_8_8_8_GAMMA is stored as linear in the unorm16 host render
-        // target, so encode RGB linear -> gamma before packing (alpha stays
-        // linear). Reaching the gamma resource format implies
-        // gamma_render_target_as_unorm16.
-        bool is_gamma = key.GetColorFormat() ==
-                        xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
-        spv::Id unorm_round_offset = builder.makeFloatConstant(0.5f);
-        spv::Id unorm_scale = builder.makeFloatConstant(255.0f);
-        spv::Id source_red =
-            builder.createCompositeExtract(source_vec4, type_float, 0);
-        if (is_gamma) {
-          source_red = SpirvShaderTranslator::LinearToPWLGamma(
-              &builder, source_red, true, ext_inst_glsl_std_450);
-        }
-        packed[0] = builder.createUnaryOp(
-            spv::OpConvertFToU, type_uint,
-            builder.createBinOp(spv::OpFAdd, type_float,
-                                builder.createBinOp(spv::OpFMul, type_float,
-                                                    source_red, unorm_scale),
-                                unorm_round_offset));
-        spv::Id component_width = builder.makeUintConstant(8);
-        for (uint32_t i = 1; i < 4; ++i) {
-          spv::Id source_component =
-              builder.createCompositeExtract(source_vec4, type_float, i);
-          if (is_gamma && i < 3) {
-            source_component = SpirvShaderTranslator::LinearToPWLGamma(
-                &builder, source_component, true, ext_inst_glsl_std_450);
+    spv::Id source_vec4 = builder.createTextureCall(
+        spv::NoPrecision, builder.makeVectorType(source_component_type, 4),
+        false, true, false, false, false, source_texture_parameters,
+        spv::ImageOperandsMaskNone);
+    if (key.is_depth) {
+      source_texture_parameters.sampler =
+          builder.createLoad(source_stencil_texture, spv::NoPrecision);
+      spv::Id source_stencil = builder.createCompositeExtract(
+          builder.createTextureCall(
+              spv::NoPrecision, builder.makeVectorType(type_uint, 4), false,
+              true, false, false, false, source_texture_parameters,
+              spv::ImageOperandsMaskNone),
+          type_uint, 0);
+      spv::Id source_depth32 =
+          builder.createCompositeExtract(source_vec4, type_float, 0);
+      switch (key.GetDepthFormat()) {
+        case xenos::DepthRenderTargetFormat::kD24S8: {
+          // Round to the nearest even integer. This seems to be the correct
+          // conversion, adding +0.5 and rounding towards zero results in red
+          // instead of black in the 4D5307E6 clear shader.
+          packed[0] = builder.createUnaryOp(
+              spv::OpConvertFToU, type_uint,
+              builder.createUnaryBuiltinCall(
+                  type_float, ext_inst_glsl_std_450, GLSLstd450RoundEven,
+                  builder.createBinOp(
+                      spv::OpFMul, type_float, source_depth32,
+                      builder.makeFloatConstant(float(0xFFFFFF)))));
+        } break;
+        case xenos::DepthRenderTargetFormat::kD24FS8: {
+          packed[0] = SpirvShaderTranslator::PreClampedDepthTo20e4(
+              builder, source_depth32,
+              !options.depth_float24_convert_in_pixel_shader &&
+                  options.depth_float24_round,
+              true, ext_inst_glsl_std_450);
+        } break;
+      }
+      packed[0] = builder.createQuadOp(
+          spv::OpBitFieldInsert, type_uint, source_stencil, packed[0],
+          builder.makeUintConstant(8), builder.makeUintConstant(24));
+    } else {
+      switch (key.GetColorFormat()) {
+        case xenos::ColorRenderTargetFormat::k_8_8_8_8:
+        case xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA: {
+          // k_8_8_8_8_GAMMA is stored as linear in the unorm16 host render
+          // target, so encode RGB linear -> gamma before packing (alpha stays
+          // linear). Reaching the gamma resource format implies
+          // gamma_render_target_as_unorm16.
+          bool is_gamma = key.GetColorFormat() ==
+                          xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA;
+          spv::Id unorm_round_offset = builder.makeFloatConstant(0.5f);
+          spv::Id unorm_scale = builder.makeFloatConstant(255.0f);
+          spv::Id source_red =
+              builder.createCompositeExtract(source_vec4, type_float, 0);
+          if (is_gamma) {
+            source_red = SpirvShaderTranslator::LinearToPWLGamma(
+                &builder, source_red, true, ext_inst_glsl_std_450);
           }
+          packed[0] = builder.createUnaryOp(
+              spv::OpConvertFToU, type_uint,
+              builder.createBinOp(spv::OpFAdd, type_float,
+                                  builder.createBinOp(spv::OpFMul, type_float,
+                                                      source_red, unorm_scale),
+                                  unorm_round_offset));
+          spv::Id component_width = builder.makeUintConstant(8);
+          for (uint32_t i = 1; i < 4; ++i) {
+            spv::Id source_component =
+                builder.createCompositeExtract(source_vec4, type_float, i);
+            if (is_gamma && i < 3) {
+              source_component = SpirvShaderTranslator::LinearToPWLGamma(
+                  &builder, source_component, true, ext_inst_glsl_std_450);
+            }
+            packed[0] = builder.createQuadOp(
+                spv::OpBitFieldInsert, type_uint, packed[0],
+                builder.createUnaryOp(
+                    spv::OpConvertFToU, type_uint,
+                    builder.createBinOp(
+                        spv::OpFAdd, type_float,
+                        builder.createBinOp(spv::OpFMul, type_float,
+                                            source_component, unorm_scale),
+                        unorm_round_offset)),
+                builder.makeUintConstant(8 * i), component_width);
+          }
+        } break;
+        case xenos::ColorRenderTargetFormat::k_2_10_10_10:
+        case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10: {
+          spv::Id unorm_round_offset = builder.makeFloatConstant(0.5f);
+          spv::Id unorm_scale_rgb = builder.makeFloatConstant(1023.0f);
+          packed[0] = builder.createUnaryOp(
+              spv::OpConvertFToU, type_uint,
+              builder.createBinOp(
+                  spv::OpFAdd, type_float,
+                  builder.createBinOp(spv::OpFMul, type_float,
+                                      builder.createCompositeExtract(
+                                          source_vec4, type_float, 0),
+                                      unorm_scale_rgb),
+                  unorm_round_offset));
+          spv::Id width_rgb = builder.makeUintConstant(10);
+          spv::Id unorm_scale_a = builder.makeFloatConstant(3.0f);
+          spv::Id width_a = builder.makeUintConstant(2);
+          for (uint32_t i = 1; i < 4; ++i) {
+            packed[0] = builder.createQuadOp(
+                spv::OpBitFieldInsert, type_uint, packed[0],
+                builder.createUnaryOp(
+                    spv::OpConvertFToU, type_uint,
+                    builder.createBinOp(
+                        spv::OpFAdd, type_float,
+                        builder.createBinOp(
+                            spv::OpFMul, type_float,
+                            builder.createCompositeExtract(source_vec4,
+                                                           type_float, i),
+                            i == 3 ? unorm_scale_a : unorm_scale_rgb),
+                        unorm_round_offset)),
+                builder.makeUintConstant(10 * i), i == 3 ? width_a : width_rgb);
+          }
+        } break;
+        case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
+        case xenos::ColorRenderTargetFormat::
+            k_2_10_10_10_FLOAT_AS_16_16_16_16: {
+          // Float16 has a wider range for both color and alpha, also NaNs -
+          // clamp and convert.
+          packed[0] = SpirvShaderTranslator::UnclampedFloat32To7e3(
+              builder,
+              builder.createCompositeExtract(source_vec4, type_float, 0),
+              ext_inst_glsl_std_450);
+          spv::Id width_rgb = builder.makeUintConstant(10);
+          for (uint32_t i = 1; i < 3; ++i) {
+            packed[0] = builder.createQuadOp(
+                spv::OpBitFieldInsert, type_uint, packed[0],
+                SpirvShaderTranslator::UnclampedFloat32To7e3(
+                    builder,
+                    builder.createCompositeExtract(source_vec4, type_float, i),
+                    ext_inst_glsl_std_450),
+                builder.makeUintConstant(10 * i), width_rgb);
+          }
+          // Saturate and convert the alpha.
+          spv::Id alpha_saturated = builder.createTriBuiltinCall(
+              type_float, ext_inst_glsl_std_450, GLSLstd450NClamp,
+              builder.createCompositeExtract(source_vec4, type_float, 3),
+              builder.makeFloatConstant(0.0f), builder.makeFloatConstant(1.0f));
           packed[0] = builder.createQuadOp(
               spv::OpBitFieldInsert, type_uint, packed[0],
               builder.createUnaryOp(
@@ -713,115 +444,219 @@ std::vector<uint32_t> BuildEdramDumpShaderSpirv(
                   builder.createBinOp(
                       spv::OpFAdd, type_float,
                       builder.createBinOp(spv::OpFMul, type_float,
-                                          source_component, unorm_scale),
-                      unorm_round_offset)),
-              builder.makeUintConstant(8 * i), component_width);
-        }
-      } break;
-      case xenos::ColorRenderTargetFormat::k_2_10_10_10:
-      case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10: {
-        spv::Id unorm_round_offset = builder.makeFloatConstant(0.5f);
-        spv::Id unorm_scale_rgb = builder.makeFloatConstant(1023.0f);
-        packed[0] = builder.createUnaryOp(
-            spv::OpConvertFToU, type_uint,
-            builder.createBinOp(
-                spv::OpFAdd, type_float,
-                builder.createBinOp(
-                    spv::OpFMul, type_float,
-                    builder.createCompositeExtract(source_vec4, type_float, 0),
-                    unorm_scale_rgb),
-                unorm_round_offset));
-        spv::Id width_rgb = builder.makeUintConstant(10);
-        spv::Id unorm_scale_a = builder.makeFloatConstant(3.0f);
-        spv::Id width_a = builder.makeUintConstant(2);
-        for (uint32_t i = 1; i < 4; ++i) {
-          packed[0] = builder.createQuadOp(
-              spv::OpBitFieldInsert, type_uint, packed[0],
-              builder.createUnaryOp(
-                  spv::OpConvertFToU, type_uint,
-                  builder.createBinOp(
-                      spv::OpFAdd, type_float,
-                      builder.createBinOp(
-                          spv::OpFMul, type_float,
-                          builder.createCompositeExtract(source_vec4,
-                                                         type_float, i),
-                          i == 3 ? unorm_scale_a : unorm_scale_rgb),
-                      unorm_round_offset)),
-              builder.makeUintConstant(10 * i), i == 3 ? width_a : width_rgb);
-        }
-      } break;
-      case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
-      case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16: {
-        // Float16 has a wider range for both color and alpha, also NaNs - clamp
-        // and convert.
-        packed[0] = SpirvShaderTranslator::UnclampedFloat32To7e3(
-            builder, builder.createCompositeExtract(source_vec4, type_float, 0),
-            ext_inst_glsl_std_450);
-        spv::Id width_rgb = builder.makeUintConstant(10);
-        for (uint32_t i = 1; i < 3; ++i) {
-          packed[0] = builder.createQuadOp(
-              spv::OpBitFieldInsert, type_uint, packed[0],
-              SpirvShaderTranslator::UnclampedFloat32To7e3(
-                  builder,
-                  builder.createCompositeExtract(source_vec4, type_float, i),
-                  ext_inst_glsl_std_450),
-              builder.makeUintConstant(10 * i), width_rgb);
-        }
-        // Saturate and convert the alpha.
-        spv::Id alpha_saturated = builder.createTriBuiltinCall(
-            type_float, ext_inst_glsl_std_450, GLSLstd450NClamp,
-            builder.createCompositeExtract(source_vec4, type_float, 3),
-            builder.makeFloatConstant(0.0f), builder.makeFloatConstant(1.0f));
-        packed[0] = builder.createQuadOp(
-            spv::OpBitFieldInsert, type_uint, packed[0],
-            builder.createUnaryOp(
-                spv::OpConvertFToU, type_uint,
-                builder.createBinOp(
-                    spv::OpFAdd, type_float,
-                    builder.createBinOp(spv::OpFMul, type_float,
-                                        alpha_saturated,
-                                        builder.makeFloatConstant(3.0f)),
-                    builder.makeFloatConstant(0.5f))),
-            builder.makeUintConstant(30), builder.makeUintConstant(2));
-      } break;
-      case xenos::ColorRenderTargetFormat::k_16_16:
-      case xenos::ColorRenderTargetFormat::k_16_16_16_16:
-      case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
-      case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT: {
-        // All 64bpp formats, and all 16 bits per component formats, are
-        // represented as integers in ownership transfer for safe handling of
-        // NaN encodings and -32768 / -32767.
-        // TODO(Triang3l): Handle the case when that's not true (no multisampled
-        // sampled images, no 16-bit UNORM, no cross-packing 32bpp aliasing on a
-        // portability subset device or a 64bpp format where that wouldn't help
-        // anyway).
-        spv::Id component_offset_width = builder.makeUintConstant(16);
-        for (uint32_t i = 0; i <= uint32_t(format_is_64bpp); ++i) {
-          packed[i] = builder.createQuadOp(
-              spv::OpBitFieldInsert, type_uint,
-              builder.createCompositeExtract(source_vec4, type_uint, 2 * i),
-              builder.createCompositeExtract(source_vec4, type_uint, 2 * i + 1),
-              component_offset_width, component_offset_width);
-        }
-      } break;
-      // Float32 is transferred as uint32 to preserve NaN encodings. However,
-      // multisampled sampled image support is optional in Vulkan.
-      case xenos::ColorRenderTargetFormat::k_32_FLOAT:
-      case xenos::ColorRenderTargetFormat::k_32_32_FLOAT: {
-        for (uint32_t i = 0; i <= uint32_t(format_is_64bpp); ++i) {
-          spv::Id& packed_ref = packed[i];
-          packed_ref = builder.createCompositeExtract(source_vec4,
-                                                      source_component_type, i);
-          if (!source_is_uint) {
-            packed_ref =
-                builder.createUnaryOp(spv::OpBitcast, type_uint, packed_ref);
+                                          alpha_saturated,
+                                          builder.makeFloatConstant(3.0f)),
+                      builder.makeFloatConstant(0.5f))),
+              builder.makeUintConstant(30), builder.makeUintConstant(2));
+        } break;
+        case xenos::ColorRenderTargetFormat::k_16_16:
+        case xenos::ColorRenderTargetFormat::k_16_16_16_16:
+        case xenos::ColorRenderTargetFormat::k_16_16_FLOAT:
+        case xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT: {
+          // All 64bpp formats, and all 16 bits per component formats, are
+          // represented as integers in ownership transfer for safe handling of
+          // NaN encodings and -32768 / -32767.
+          // TODO(Triang3l): Handle the case when that's not true (no
+          // multisampled sampled images, no 16-bit UNORM, no cross-packing
+          // 32bpp aliasing on a portability subset device or a 64bpp format
+          // where that wouldn't help anyway).
+          spv::Id component_offset_width = builder.makeUintConstant(16);
+          for (uint32_t i = 0; i <= uint32_t(format_is_64bpp); ++i) {
+            packed[i] = builder.createQuadOp(
+                spv::OpBitFieldInsert, type_uint,
+                builder.createCompositeExtract(source_vec4, type_uint, 2 * i),
+                builder.createCompositeExtract(source_vec4, type_uint,
+                                               2 * i + 1),
+                component_offset_width, component_offset_width);
           }
-        }
-      } break;
+        } break;
+        // Float32 is transferred as uint32 to preserve NaN encodings. However,
+        // multisampled sampled image support is optional in Vulkan.
+        case xenos::ColorRenderTargetFormat::k_32_FLOAT:
+        case xenos::ColorRenderTargetFormat::k_32_32_FLOAT: {
+          for (uint32_t i = 0; i <= uint32_t(format_is_64bpp); ++i) {
+            spv::Id& packed_ref = packed[i];
+            packed_ref = builder.createCompositeExtract(
+                source_vec4, source_component_type, i);
+            if (!source_is_uint) {
+              packed_ref =
+                  builder.createUnaryOp(spv::OpBitcast, type_uint, packed_ref);
+            }
+          }
+        } break;
+      }
     }
-  }
+  };
+
+  // Tile geometry and the per-dispatch constants, shared by both paths.
+  // Dumps for fully native resolves address the EDRAM buffer with the plain
+  // 1x1 tile layout.
+  uint32_t layout_scale_x = key.native_layout ? 1 : options.resolution_scale_x;
+  uint32_t layout_scale_y = key.native_layout ? 1 : options.resolution_scale_y;
+  uint32_t tile_width =
+      (xenos::kEdramTileWidthSamples >> uint32_t(format_is_64bpp)) *
+      layout_scale_x;
+  uint32_t tile_height = xenos::kEdramTileHeightSamples * layout_scale_y;
+  spv::Id const_tile_width = builder.makeUintConstant(tile_width);
+  spv::Id const_tile_height = builder.makeUintConstant(tile_height);
+  spv::Id const_uint_0 = builder.makeUintConstant(0);
+  spv::Id const_edram_pitch_tiles_bits =
+      builder.makeUintConstant(xenos::kEdramPitchTilesBits);
+  spv::Id const_edram_base_tiles_bits_plus_1 =
+      builder.makeUintConstant(xenos::kEdramBaseTilesBits + 1);
+  spv::Id pitches_constant =
+      load_push_constant(kEdramDumpShaderPushConstantPitches);
+  spv::Id offsets_constant =
+      load_push_constant(kEdramDumpShaderPushConstantOffsets);
 
   if (!key.direct_resolve) {
+    spv::Id rectangle_sample_x =
+        builder.createCompositeExtract(global_invocation_id, type_uint, 0);
+    spv::Id rectangle_tile_index_x = builder.createBinOp(
+        spv::OpUDiv, type_uint, rectangle_sample_x, const_tile_width);
+    spv::Id tile_sample_x = builder.createBinOp(
+        spv::OpUMod, type_uint, rectangle_sample_x, const_tile_width);
+    spv::Id rectangle_sample_y =
+        builder.createCompositeExtract(global_invocation_id, type_uint, 1);
+    spv::Id rectangle_tile_index_y = builder.createBinOp(
+        spv::OpUDiv, type_uint, rectangle_sample_y, const_tile_height);
+    spv::Id tile_sample_y = builder.createBinOp(
+        spv::OpUMod, type_uint, rectangle_sample_y, const_tile_height);
+
+    // Get the tile index in the EDRAM relative to the dump rectangle base tile.
+    spv::Id dest_pitch_tiles = builder.createTriOp(
+        spv::OpBitFieldUExtract, type_uint, pitches_constant, const_uint_0,
+        const_edram_pitch_tiles_bits);
+    spv::Id rectangle_tile_index = builder.createBinOp(
+        spv::OpIAdd, type_uint,
+        builder.createBinOp(spv::OpIMul, type_uint, dest_pitch_tiles,
+                            rectangle_tile_index_y),
+        rectangle_tile_index_x);
+    // Add the base tile in the dispatch to the dispatch-local tile index, not
+    // wrapping yet so in case of a wraparound, the address relative to the base
+    // in the image after subtraction of the base won't be negative.
+    spv::Id edram_tile_index_non_wrapped = builder.createBinOp(
+        spv::OpIAdd, type_uint,
+        builder.createTriOp(spv::OpBitFieldUExtract, type_uint,
+                            offsets_constant, const_uint_0,
+                            const_edram_base_tiles_bits_plus_1),
+        rectangle_tile_index);
+
+    // Combine the tile sample index and the tile index, wrapping the tile
+    // addressing, into the EDRAM sample index. A direct resolve never touches
+    // EDRAM - and the depth column swap below would only be undone again by the
+    // resolve copy's own addressing, so it drops out entirely.
+    spv::Id edram_sample_address = spv::NoResult;
+    {
+      edram_sample_address = builder.createBinOp(
+          spv::OpIAdd, type_uint,
+          builder.createBinOp(
+              spv::OpIMul, type_uint,
+              builder.makeUintConstant(tile_width * tile_height),
+              builder.createBinOp(
+                  spv::OpBitwiseAnd, type_uint, edram_tile_index_non_wrapped,
+                  builder.makeUintConstant(xenos::kEdramTileCount - 1))),
+          builder.createBinOp(
+              spv::OpIAdd, type_uint,
+              builder.createBinOp(spv::OpIMul, type_uint, const_tile_width,
+                                  tile_sample_y),
+              tile_sample_x));
+      if (key.is_depth) {
+        // Swap 40-sample columns in the depth buffer in the destination address
+        // to get the final address of the sample in the EDRAM.
+        uint32_t tile_width_half = tile_width >> 1;
+        edram_sample_address = builder.createUnaryOp(
+            spv::OpBitcast, type_uint,
+            builder.createBinOp(
+                spv::OpIAdd, type_int,
+                builder.createUnaryOp(spv::OpBitcast, type_int,
+                                      edram_sample_address),
+                builder.createTriOp(
+                    spv::OpSelect, type_int,
+                    builder.createBinOp(
+                        spv::OpULessThan, builder.makeBoolType(), tile_sample_x,
+                        builder.makeUintConstant(tile_width_half)),
+                    builder.makeIntConstant(int32_t(tile_width_half)),
+                    builder.makeIntConstant(-int32_t(tile_width_half)))));
+      }
+    }
+
+    // Get the linear tile index within the source texture.
+    spv::Id source_tile_index = builder.createBinOp(
+        spv::OpISub, type_uint, edram_tile_index_non_wrapped,
+        builder.createTriOp(
+            spv::OpBitFieldUExtract, type_uint, offsets_constant,
+            const_edram_base_tiles_bits_plus_1,
+            builder.makeUintConstant(xenos::kEdramBaseTilesBits)));
+    // Split the linear tile index in the source texture into X and Y in tiles.
+    spv::Id source_pitch_tiles = builder.createTriOp(
+        spv::OpBitFieldUExtract, type_uint, pitches_constant,
+        const_edram_pitch_tiles_bits, const_edram_pitch_tiles_bits);
+    spv::Id source_tile_index_y = builder.createBinOp(
+        spv::OpUDiv, type_uint, source_tile_index, source_pitch_tiles);
+    spv::Id source_tile_index_x = builder.createBinOp(
+        spv::OpUMod, type_uint, source_tile_index, source_pitch_tiles);
+    // Combine the source tile offset and the sample index within the tile.
+    spv::Id source_sample_x = builder.createBinOp(
+        spv::OpIAdd, type_uint,
+        builder.createBinOp(spv::OpIMul, type_uint, const_tile_width,
+                            source_tile_index_x),
+        tile_sample_x);
+    spv::Id source_sample_y = builder.createBinOp(
+        spv::OpIAdd, type_uint,
+        builder.createBinOp(spv::OpIMul, type_uint, const_tile_height,
+                            source_tile_index_y),
+        tile_sample_y);
+    // Get the source pixel coordinate and the sample index within the pixel.
+    spv::Id source_pixel_x = source_sample_x, source_pixel_y = source_sample_y;
+    spv::Id source_sample_id = spv::NoResult;
+    if (source_is_multisampled) {
+      spv::Id const_uint_1 = builder.makeUintConstant(1);
+      source_pixel_y = builder.createBinOp(spv::OpShiftRightLogical, type_uint,
+                                           source_sample_y, const_uint_1);
+      if (key.msaa_samples >= xenos::MsaaSamples::k4X) {
+        source_pixel_x = builder.createBinOp(
+            spv::OpShiftRightLogical, type_uint, source_sample_x, const_uint_1);
+        // 4x MSAA source texture sample index - bit 0 for horizontal, bit 1 for
+        // vertical.
+        source_sample_id = builder.createQuadOp(
+            spv::OpBitFieldInsert, type_uint,
+            builder.createBinOp(spv::OpBitwiseAnd, type_uint, source_sample_x,
+                                const_uint_1),
+            source_sample_y, const_uint_1, const_uint_1);
+      } else {
+        // 2x MSAA source texture sample index - convert from the guest to
+        // the Vulkan standard sample locations.
+        source_sample_id = builder.createTriOp(
+            spv::OpSelect, type_uint,
+            builder.createBinOp(
+                spv::OpINotEqual, builder.makeBoolType(),
+                builder.createBinOp(spv::OpBitwiseAnd, type_uint,
+                                    source_sample_y, const_uint_1),
+                const_uint_0),
+            builder.makeUintConstant(
+                draw_util::GetD3D10SampleIndexForGuest2xMSAA(
+                    1, options.msaa_2x_attachments_supported)),
+            builder.makeUintConstant(
+                draw_util::GetD3D10SampleIndexForGuest2xMSAA(
+                    0, options.msaa_2x_attachments_supported)));
+      }
+    }
+    if (key.source_scale_native && !key.native_layout &&
+        draw_resolution_scaled) {
+      // Native source dumped to the scaled EDRAM layout. Duplicate each pixel
+      // into all the scaled sample slots covering it. Done after the sample
+      // index is extracted since MSAA isn't affected by scale.
+      source_pixel_x = builder.createBinOp(
+          spv::OpUDiv, type_uint, source_pixel_x,
+          builder.makeUintConstant(options.resolution_scale_x));
+      source_pixel_y = builder.createBinOp(
+          spv::OpUDiv, type_uint, source_pixel_y,
+          builder.makeUintConstant(options.resolution_scale_y));
+    }
+
+    spv::Id packed[2] = {};
+    load_and_pack(source_pixel_x, source_pixel_y, source_sample_id, packed);
     // Write the packed value to the EDRAM buffer.
     spv::Id store_value = packed[0];
     if (format_is_64bpp) {
@@ -842,8 +677,178 @@ std::vector<uint32_t> BuildEdramDumpShaderSpirv(
                         builder.createAccessChain(spv::StorageClassUniform,
                                                   dest_buffer, id_vector_temp));
   } else {
+    // One thread writes a run of destination pixels, the run being what the
+    // guest texture layout stores contiguously - so the loads land on
+    // consecutive source texels and the stores are whole 16-byte blocks,
+    // rather than one scattered dword per invocation.
+    uint32_t pixels_per_store =
+        kEdramDumpShaderResolvePixelsPerStore >> uint32_t(format_is_64bpp);
+    uint32_t pixels_per_thread = pixels_per_store * 2;
+
+    spv::Id resolve_edram_info =
+        load_push_constant(kEdramDumpShaderPushConstantResolveEdramInfo);
+    spv::Id resolve_coordinate_info =
+        load_push_constant(kEdramDumpShaderPushConstantResolveCoordinateInfo);
+    spv::Id resolve_dest_info =
+        load_push_constant(kEdramDumpShaderPushConstantResolveDestInfo);
+    spv::Id resolve_dest_coordinate_info = load_push_constant(
+        kEdramDumpShaderPushConstantResolveDestCoordinateInfo);
+
+    // Where this thread's run of pixels is. The dispatch covers one tile
+    // rectangle of one render target's ownership, so the tile it starts at
+    // comes in rather than being divided back out of a linear index.
+    uint32_t msaa_x_log2 =
+        uint32_t(key.msaa_samples >= xenos::MsaaSamples::k4X);
+    uint32_t msaa_y_log2 =
+        uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X);
+    uint32_t tile_pixels_x = tile_width >> msaa_x_log2;
+    uint32_t tile_pixels_y = tile_height >> msaa_y_log2;
+    spv::Id dispatch_tile =
+        load_push_constant(kEdramDumpShaderPushConstantResolveDispatchTile);
+    spv::Id run_x = multiply(
+        builder.createCompositeExtract(global_invocation_id, type_uint, 0),
+        builder.makeUintConstant(pixels_per_thread));
+    spv::Id run_y =
+        builder.createCompositeExtract(global_invocation_id, type_uint, 1);
+
+    // The tile this run falls in, and its position within it. A run never
+    // crosses a tile edge - the tile is a whole number of runs wide and the
+    // dispatch starts on a tile boundary. Tiles are a power of two pixels
+    // tall, but not wide.
+    spv::Id tile_x =
+        add(extract(dispatch_tile, 0, xenos::kEdramPitchTilesBits),
+            builder.createBinOp(spv::OpUDiv, type_uint, run_x,
+                                builder.makeUintConstant(tile_pixels_x)));
+    spv::Id tile_y = add(extract(dispatch_tile, xenos::kEdramPitchTilesBits,
+                                 xenos::kEdramPitchTilesBits),
+                         shift_right(run_y, xe::log2_floor(tile_pixels_y)));
+    spv::Id pixel_in_tile_x = builder.createBinOp(
+        spv::OpUMod, type_uint, run_x, builder.makeUintConstant(tile_pixels_x));
+    spv::Id pixel_in_tile_y = bitwise_and(run_y, tile_pixels_y - 1);
+
+    // The destination pixel, relative to the resolve rectangle. The first tile
+    // starts before it when the rectangle is offset within the tile, and those
+    // pixels wrap around to fail the width comparison.
+    spv::Id resolve_offset_x = shift_left(
+        extract(resolve_coordinate_info, kResolveCoordinateInfoOffsetXShift, 4),
+        xenos::kResolveAlignmentPixelsLog2);
+    spv::Id resolve_offset_y = shift_left(
+        extract(resolve_coordinate_info, kResolveCoordinateInfoOffsetYShift, 1),
+        xenos::kResolveAlignmentPixelsLog2);
+    spv::Id dest_x = builder.createBinOp(
+        spv::OpISub, type_uint,
+        add(multiply(tile_x, builder.makeUintConstant(tile_pixels_x)),
+            pixel_in_tile_x),
+        resolve_offset_x);
+    spv::Id dest_y = builder.createBinOp(
+        spv::OpISub, type_uint,
+        add(multiply(tile_y, builder.makeUintConstant(tile_pixels_y)),
+            pixel_in_tile_y),
+        resolve_offset_y);
+    spv::Id write_condition = builder.createBinOp(
+        spv::OpLogicalAnd, type_bool,
+        builder.createBinOp(spv::OpULessThan, type_bool, dest_x,
+                            shift_left(extract(resolve_coordinate_info,
+                                               kResolveCoordinateInfoWidthShift,
+                                               kResolveCoordinateInfoWidthBits),
+                                       xenos::kResolveAlignmentPixelsLog2)),
+        builder.createBinOp(
+            spv::OpULessThan, type_bool, dest_y,
+            shift_left(load_push_constant(
+                           kEdramDumpShaderPushConstantResolveHeightDiv8),
+                       xenos::kResolveAlignmentPixelsLog2)));
+
+    // The sample this pixel resolves from, following XeEdramOffsetBytes: the
+    // pixel scaled by the MSAA dimensions, plus bit 1 of the sample index on X
+    // and bit 0 on Y. Eligibility guarantees a single selected sample, so
+    // XeResolveFirstSampleIndex is the raw field.
+    spv::Id sample_select =
+        extract(resolve_dest_coordinate_info,
+                kResolveDestCoordinateInfoSampleSelectShift, 3);
+    spv::Id tile_sample_x = add(shift_left(pixel_in_tile_x, msaa_x_log2),
+                                bitwise_and(shift_right(sample_select, 1), 1));
+    spv::Id tile_sample_y = add(shift_left(pixel_in_tile_y, msaa_y_log2),
+                                bitwise_and(sample_select, 1));
+    spv::Id edram_tile_index =
+        add(add(extract(resolve_edram_info, kResolveEdramInfoBaseTilesShift,
+                        xenos::kEdramBaseTilesBits),
+                multiply(
+                    extract(resolve_edram_info, 0, xenos::kEdramPitchTilesBits),
+                    tile_y)),
+            tile_x);
+
+    // The same tile within the source render target, which has its own base
+    // and pitch.
+    spv::Id source_tile_index = builder.createBinOp(
+        spv::OpISub, type_uint, edram_tile_index,
+        builder.createTriOp(
+            spv::OpBitFieldUExtract, type_uint, offsets_constant,
+            const_edram_base_tiles_bits_plus_1,
+            builder.makeUintConstant(xenos::kEdramBaseTilesBits)));
+    spv::Id source_pitch_tiles = builder.createTriOp(
+        spv::OpBitFieldUExtract, type_uint, pitches_constant,
+        const_edram_pitch_tiles_bits, const_edram_pitch_tiles_bits);
+    spv::Id source_sample_x = add(
+        multiply(const_tile_width,
+                 builder.createBinOp(spv::OpUMod, type_uint, source_tile_index,
+                                     source_pitch_tiles)),
+        tile_sample_x);
+    spv::Id source_sample_y = add(
+        multiply(const_tile_height,
+                 builder.createBinOp(spv::OpUDiv, type_uint, source_tile_index,
+                                     source_pitch_tiles)),
+        tile_sample_y);
+
+    // The sample index is uniform across the run - the MSAA shift puts the
+    // selected sample's bits below the pixel, and the run only advances the
+    // pixel.
+    spv::Id source_pixel_x = shift_right(source_sample_x, msaa_x_log2);
+    spv::Id source_pixel_y = shift_right(source_sample_y, msaa_y_log2);
+    spv::Id source_sample_id = spv::NoResult;
+    if (source_is_multisampled) {
+      spv::Id const_uint_1 = builder.makeUintConstant(1);
+      if (key.msaa_samples >= xenos::MsaaSamples::k4X) {
+        // 4x MSAA source texture sample index - bit 0 for horizontal, bit 1
+        // for vertical.
+        source_sample_id = builder.createQuadOp(
+            spv::OpBitFieldInsert, type_uint, bitwise_and(source_sample_x, 1),
+            source_sample_y, const_uint_1, const_uint_1);
+      } else {
+        // 2x MSAA source texture sample index - convert from the guest to the
+        // Vulkan standard sample locations.
+        source_sample_id = builder.createTriOp(
+            spv::OpSelect, type_uint,
+            builder.createBinOp(spv::OpINotEqual, type_bool,
+                                bitwise_and(source_sample_y, 1), const_uint_0),
+            builder.makeUintConstant(
+                draw_util::GetD3D10SampleIndexForGuest2xMSAA(
+                    1, options.msaa_2x_attachments_supported)),
+            builder.makeUintConstant(
+                draw_util::GetD3D10SampleIndexForGuest2xMSAA(
+                    0, options.msaa_2x_attachments_supported)));
+      }
+    }
+
+    SpirvBuilder::IfBuilder if_write(write_condition,
+                                     spv::SelectionControlMaskNone, builder);
+
+    // Dense dwords - one per pixel at 32bpp, two at 64bpp - so that four of
+    // them are exactly one 16-byte store either way.
+    uint32_t dwords_per_pixel = uint32_t(format_is_64bpp) + 1;
+    std::vector<spv::Id> run_packed(size_t(pixels_per_thread) *
+                                    dwords_per_pixel);
+    for (uint32_t i = 0; i < pixels_per_thread; ++i) {
+      spv::Id pixel_packed[2] = {};
+      load_and_pack(
+          i ? add(source_pixel_x, builder.makeUintConstant(i)) : source_pixel_x,
+          source_pixel_y, source_sample_id, pixel_packed);
+      for (uint32_t j = 0; j < dwords_per_pixel; ++j) {
+        run_packed[i * dwords_per_pixel + j] = pixel_packed[j];
+      }
+    }
+
     // Everything the resolve copy would have done to these bits after reading
-    // them back out of EDRAM.
+    // them back out of EDRAM, applied per pixel.
 
     // Red/blue swap, keyed on the resolve's format rather than the render
     // target's - the round trip packs in the render target's layout and swaps
@@ -868,61 +873,26 @@ std::vector<uint32_t> BuildEdramDumpShaderSpirv(
           }
           return result;
         };
-    if (!format_is_64bpp) {
-      // XeResolveSwapRedBlue_8_8_8_8 / XeResolveSwapRedBlue_2_10_10_10.
-      spv::Id swapped_8888 =
-          bitwise_or(bitwise_or(bitwise_and(packed[0], ~uint32_t(0xFF00FF)),
-                                shift_left(bitwise_and(packed[0], 0xFF), 16)),
-                     bitwise_and(shift_right(packed[0], 16), 0xFF));
-      spv::Id swapped_2101010 =
-          bitwise_or(bitwise_or(bitwise_and(packed[0], ~uint32_t(0x3FF003FF)),
-                                shift_left(bitwise_and(packed[0], 0x3FF), 20)),
-                     bitwise_and(shift_right(packed[0], 20), 0x3FF));
-      spv::Id swapped = builder.createTriOp(
-          spv::OpSelect, type_uint,
-          format_is({xenos::ColorRenderTargetFormat::k_8_8_8_8,
-                     xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA}),
-          swapped_8888,
-          builder.createTriOp(
-              spv::OpSelect, type_uint,
-              format_is(
-                  {xenos::ColorRenderTargetFormat::k_2_10_10_10,
-                   xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT,
-                   xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10,
-                   xenos::ColorRenderTargetFormat::
-                       k_2_10_10_10_FLOAT_AS_16_16_16_16}),
-              swapped_2101010, packed[0]));
-      packed[0] = builder.createTriOp(spv::OpSelect, type_uint, dest_swap,
-                                      swapped, packed[0]);
-    } else {
-      // XeResolveSwap4PixelsRedBlue64bpp - the low halves of the two dwords.
-      spv::Id swap_64bpp = builder.createBinOp(
-          spv::OpLogicalAnd, type_bool, dest_swap,
-          format_is({xenos::ColorRenderTargetFormat::k_16_16_16_16,
-                     xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT}));
-      spv::Id swapped_0 = bitwise_or(bitwise_and(packed[0], ~uint32_t(0xFFFF)),
-                                     bitwise_and(packed[1], 0xFFFF));
-      spv::Id swapped_1 = bitwise_or(bitwise_and(packed[1], ~uint32_t(0xFFFF)),
-                                     bitwise_and(packed[0], 0xFFFF));
-      packed[0] = builder.createTriOp(spv::OpSelect, type_uint, swap_64bpp,
-                                      swapped_0, packed[0]);
-      packed[1] = builder.createTriOp(spv::OpSelect, type_uint, swap_64bpp,
-                                      swapped_1, packed[1]);
-    }
+    spv::Id swap_8888 =
+        format_is({xenos::ColorRenderTargetFormat::k_8_8_8_8,
+                   xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA});
+    spv::Id swap_2101010 = format_is(
+        {xenos::ColorRenderTargetFormat::k_2_10_10_10,
+         xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT,
+         xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10,
+         xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16});
+    spv::Id swap_64bpp = builder.createBinOp(
+        spv::OpLogicalAnd, type_bool, dest_swap,
+        format_is({xenos::ColorRenderTargetFormat::k_16_16_16_16,
+                   xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT}));
 
     // Endian swap. The fast copy shaders only ever call XeEndianSwap32 and
     // XeEndianSwap64, neither of which handles 8in128, so no invocation ever
     // needs a neighbour's dwords.
     spv::Id endian = extract(resolve_dest_info, 0, kResolveDestInfoEndianBits);
+    spv::Id is_8in64 = equals(endian, uint32_t(xenos::Endian128::k8in64));
     if (format_is_64bpp) {
       // XeEndianSwap64 exchanges the dwords for 8in64, then swaps as 8in32.
-      spv::Id is_8in64 = equals(endian, uint32_t(xenos::Endian128::k8in64));
-      spv::Id packed_0 = builder.createTriOp(spv::OpSelect, type_uint, is_8in64,
-                                             packed[1], packed[0]);
-      spv::Id packed_1 = builder.createTriOp(spv::OpSelect, type_uint, is_8in64,
-                                             packed[0], packed[1]);
-      packed[0] = packed_0;
-      packed[1] = packed_1;
       endian = builder.createTriOp(
           spv::OpSelect, type_uint, is_8in64,
           builder.makeUintConstant(uint32_t(xenos::Endian128::k8in32)), endian);
@@ -936,46 +906,189 @@ std::vector<uint32_t> BuildEdramDumpShaderSpirv(
     spv::Id swap_halves_in_32 = builder.createBinOp(
         spv::OpLogicalOr, type_bool, endian_is_8in32,
         equals(endian, uint32_t(xenos::Endian128::k16in32)));
-    for (uint32_t i = 0; i <= uint32_t(format_is_64bpp); ++i) {
-      spv::Id value = packed[i];
-      value = builder.createTriOp(
-          spv::OpSelect, type_uint, swap_bytes_in_16,
-          bitwise_or(shift_left(bitwise_and(value, 0x00FF00FF), 8),
-                     shift_right(bitwise_and(value, 0xFF00FF00), 8)),
-          value);
-      value = builder.createTriOp(
-          spv::OpSelect, type_uint, swap_halves_in_32,
-          bitwise_or(shift_left(value, 16), shift_right(value, 16)), value);
-      packed[i] = value;
+
+    for (uint32_t i = 0; i < pixels_per_thread; ++i) {
+      spv::Id* pixel = &run_packed[i * dwords_per_pixel];
+      if (!format_is_64bpp) {
+        // XeResolveSwapRedBlue_8_8_8_8 / XeResolveSwapRedBlue_2_10_10_10.
+        spv::Id swapped_8888 =
+            bitwise_or(bitwise_or(bitwise_and(pixel[0], ~uint32_t(0xFF00FF)),
+                                  shift_left(bitwise_and(pixel[0], 0xFF), 16)),
+                       bitwise_and(shift_right(pixel[0], 16), 0xFF));
+        spv::Id swapped_2101010 =
+            bitwise_or(bitwise_or(bitwise_and(pixel[0], ~uint32_t(0x3FF003FF)),
+                                  shift_left(bitwise_and(pixel[0], 0x3FF), 20)),
+                       bitwise_and(shift_right(pixel[0], 20), 0x3FF));
+        pixel[0] = builder.createTriOp(
+            spv::OpSelect, type_uint, dest_swap,
+            builder.createTriOp(
+                spv::OpSelect, type_uint, swap_8888, swapped_8888,
+                builder.createTriOp(spv::OpSelect, type_uint, swap_2101010,
+                                    swapped_2101010, pixel[0])),
+            pixel[0]);
+      } else {
+        // XeResolveSwap4PixelsRedBlue64bpp - the low halves of the two
+        // dwords.
+        spv::Id swapped_0 = bitwise_or(bitwise_and(pixel[0], ~uint32_t(0xFFFF)),
+                                       bitwise_and(pixel[1], 0xFFFF));
+        spv::Id swapped_1 = bitwise_or(bitwise_and(pixel[1], ~uint32_t(0xFFFF)),
+                                       bitwise_and(pixel[0], 0xFFFF));
+        spv::Id red_blue_0 = builder.createTriOp(
+            spv::OpSelect, type_uint, swap_64bpp, swapped_0, pixel[0]);
+        spv::Id red_blue_1 = builder.createTriOp(
+            spv::OpSelect, type_uint, swap_64bpp, swapped_1, pixel[1]);
+        // Then the 8in64 dword exchange, before the 32-bit swaps below.
+        pixel[0] = builder.createTriOp(spv::OpSelect, type_uint, is_8in64,
+                                       red_blue_1, red_blue_0);
+        pixel[1] = builder.createTriOp(spv::OpSelect, type_uint, is_8in64,
+                                       red_blue_0, red_blue_1);
+      }
+      for (uint32_t j = 0; j <= uint32_t(format_is_64bpp); ++j) {
+        spv::Id value = pixel[j];
+        value = builder.createTriOp(
+            spv::OpSelect, type_uint, swap_bytes_in_16,
+            bitwise_or(shift_left(bitwise_and(value, 0x00FF00FF), 8),
+                       shift_right(bitwise_and(value, 0xFF00FF00), 8)),
+            value);
+        value = builder.createTriOp(
+            spv::OpSelect, type_uint, swap_halves_in_32,
+            bitwise_or(shift_left(value, 16), shift_right(value, 16)), value);
+        pixel[j] = value;
+      }
     }
 
-    for (uint32_t i = 0; i <= uint32_t(format_is_64bpp); ++i) {
+    // XeResolveDestPixelAddress for the start of the run, then
+    // XenosTextureTiledAddressXInMacroXor to step to the second block -
+    // within a run, consecutive pixels are consecutive in the tiled layout,
+    // but the two halves are not adjacent.
+    spv::Id tiled_x = add(
+        dest_x, shift_left(extract(resolve_dest_coordinate_info,
+                                   kResolveDestCoordinateInfoOffsetXShift, 4),
+                           xenos::kResolveAlignmentPixelsLog2));
+    spv::Id tiled_y = add(
+        dest_y, shift_left(extract(resolve_dest_coordinate_info,
+                                   kResolveDestCoordinateInfoOffsetYShift, 4),
+                           xenos::kResolveAlignmentPixelsLog2));
+    uint32_t bytes_per_block_log2 = 2 + uint32_t(format_is_64bpp);
+    spv::Id dest_pitch_macro_tiles = extract(
+        resolve_dest_coordinate_info, 0, kResolveDestCoordinateInfoPitchBits);
+    // XenosTextureTiledAddressCombine.
+    auto combine = [&](spv::Id outer_inner_bytes, spv::Id bank, spv::Id pipe,
+                       spv::Id y_lsb) {
+      spv::Id address =
+          bitwise_or(bitwise_or(shift_left(y_lsb, 4), shift_left(pipe, 6)),
+                     shift_left(bank, 11));
+      address = bitwise_or(address, bitwise_and(outer_inner_bytes, 0xF));
+      address = bitwise_or(
+          address,
+          shift_left(bitwise_and(shift_right(outer_inner_bytes, 4), 0x1), 5));
+      address = bitwise_or(
+          address,
+          shift_left(bitwise_and(shift_right(outer_inner_bytes, 5), 0x7), 8));
+      return bitwise_or(address,
+                        shift_left(shift_right(outer_inner_bytes, 8), 12));
+    };
+    // XenosTextureTiledAddress2D.
+    spv::Id outer_blocks_2d = shift_left(
+        add(multiply(shift_right(tiled_y, 5), dest_pitch_macro_tiles),
+            shift_right(tiled_x, 5)),
+        6);
+    spv::Id inner_blocks_2d =
+        bitwise_or(shift_left(bitwise_and(shift_right(tiled_y, 1), 0x7), 3),
+                   bitwise_and(tiled_x, 0x7));
+    spv::Id outer_inner_bytes_2d = shift_left(
+        bitwise_or(outer_blocks_2d, inner_blocks_2d), bytes_per_block_log2);
+    spv::Id address_2d =
+        combine(outer_inner_bytes_2d, bitwise_and(shift_right(tiled_y, 4), 0x1),
+                builder.createBinOp(
+                    spv::OpBitwiseXor, type_uint,
+                    bitwise_and(shift_right(tiled_x, 3), 0x3),
+                    shift_left(bitwise_and(shift_right(tiled_y, 3), 0x1), 1)),
+                bitwise_and(tiled_y, 1));
+    // XenosTextureTiledAddress3D, for array destinations.
+    spv::Id dest_slice =
+        extract(resolve_dest_info, kResolveDestInfoSliceShift, 3);
+    spv::Id dest_slice_pitch_macro_tiles = shift_left(
+        extract(resolve_dest_coordinate_info,
+                kResolveDestCoordinateInfoHeightShift,
+                kResolveDestCoordinateInfoPitchBits),
+        xenos::kTextureTileWidthHeightLog2 - kTextureMacroTileHeight3DLog2);
+    spv::Id outer_blocks_3d = shift_left(
+        add(multiply(add(multiply(shift_right(dest_slice, 2),
+                                  dest_slice_pitch_macro_tiles),
+                         shift_right(tiled_y, kTextureMacroTileHeight3DLog2)),
+                     dest_pitch_macro_tiles),
+            shift_right(tiled_x, 5)),
+        7);
+    spv::Id inner_blocks_3d = bitwise_or(
+        bitwise_or(shift_left(bitwise_and(dest_slice, 0x3), 5),
+                   shift_left(bitwise_and(shift_right(tiled_y, 1), 0x3), 3)),
+        bitwise_and(tiled_x, 0x7));
+    spv::Id outer_inner_bytes_3d = shift_left(
+        bitwise_or(outer_blocks_3d, inner_blocks_3d), bytes_per_block_log2);
+    spv::Id bank_3d =
+        bitwise_and(builder.createBinOp(spv::OpBitwiseXor, type_uint,
+                                        shift_right(tiled_y, 3),
+                                        shift_right(dest_slice, 2)),
+                    0x1);
+    spv::Id address_3d =
+        combine(outer_inner_bytes_3d, bank_3d,
+                builder.createBinOp(spv::OpBitwiseXor, type_uint,
+                                    bitwise_and(shift_right(tiled_x, 3), 0x3),
+                                    shift_left(bank_3d, 1)),
+                bitwise_and(tiled_y, 1));
+    spv::Id dest_address = builder.createTriOp(
+        spv::OpSelect, type_uint,
+        builder.createBinOp(
+            spv::OpINotEqual, type_bool,
+            bitwise_and(resolve_dest_info, uint32_t(1)
+                                               << kResolveDestInfoIsArrayShift),
+            const_uint_0),
+        address_3d, address_2d);
+    dest_address =
+        add(dest_address,
+            load_push_constant(kEdramDumpShaderPushConstantResolveDestBase));
+
+    for (uint32_t block = 0; block < 2; ++block) {
+      spv::Id block_address =
+          block ? add(dest_address,
+                      builder.makeUintConstant(TiledAddressXInMacroXor(
+                          pixels_per_store, bytes_per_block_log2)))
+                : dest_address;
+      spv::Id block_index = shift_right(block_address, 4);
+      // Four dwords either way - four 32bpp pixels, or two 64bpp ones.
+      uint32_t first_dword = block * pixels_per_store * dwords_per_pixel;
+      id_vector_temp.clear();
+      for (uint32_t i = 0; i < 4; ++i) {
+        id_vector_temp.push_back(run_packed[first_dword + i]);
+      }
+      spv::Id block_value =
+          builder.createCompositeConstruct(type_uint4, id_vector_temp);
       id_vector_temp.clear();
       // The only SSBO structure member.
       id_vector_temp.push_back(builder.makeIntConstant(0));
-      id_vector_temp.push_back(builder.createUnaryOp(
-          spv::OpBitcast, type_int,
-          i ? add(direct_resolve_dest_dword_index, builder.makeUintConstant(1))
-            : direct_resolve_dest_dword_index));
+      id_vector_temp.push_back(
+          builder.createUnaryOp(spv::OpBitcast, type_int, block_index));
       builder.createStore(
-          packed[i], builder.createAccessChain(spv::StorageClassUniform,
-                                               dest_buffer, id_vector_temp));
+          block_value, builder.createAccessChain(spv::StorageClassUniform,
+                                                 dest_buffer, id_vector_temp));
     }
-  }
-
-  if (if_direct_resolve_writes.has_value()) {
-    if_direct_resolve_writes->makeEndIf();
+    if_write.makeEndIf();
   }
 
   // End the main function and make it the entry point.
   builder.leaveFunction();
-  builder.addExecutionMode(main_function, spv::ExecutionModeLocalSize,
-                           kEdramDumpShaderSamplesPerGroupX,
-                           kEdramDumpShaderSamplesPerGroupY, 1);
+  builder.addExecutionMode(
+      main_function, spv::ExecutionModeLocalSize,
+      key.direct_resolve ? kEdramDumpShaderResolveThreadsPerGroupX
+                         : kEdramDumpShaderSamplesPerGroupX,
+      key.direct_resolve ? kEdramDumpShaderResolveThreadsPerGroupY
+                         : kEdramDumpShaderSamplesPerGroupY,
+      1);
   spv::Instruction* entry_point = builder.addEntryPoint(
       spv::ExecutionModelGLCompute, main_function, "main");
-  // Bindings only need to be added to the entry point's interface starting with
-  // SPIR-V 1.4 - emitting 1.0 here, so only inputs / outputs.
+  // Bindings only need to be added to the entry point's interface starting
+  // with SPIR-V 1.4 - emitting 1.0 here, so only inputs / outputs.
   entry_point->addIdOperand(input_global_invocation_id);
 
   // Serialize the shader code.

@@ -1164,23 +1164,14 @@ bool VulkanRenderTargetCache::Resolve(
       // Read the render targets straight into shared memory where the copy
       // wouldn't have converted anything, otherwise dump the current contents
       // of the ones owning the affected range to edram_buffer_ for it.
-      DirectResolveEligibility direct_resolve_eligibility =
-          GetDirectResolveEligibility(resolve_info, copy_shader);
       if (cvars::direct_host_resolve &&
-          direct_resolve_eligibility == DirectResolveEligibility::kEligible) {
+          GetDirectResolveEligibility(resolve_info, copy_shader) ==
+              DirectResolveEligibility::kEligible) {
         resolved_directly = DirectResolveRenderTargets(
             resolve_info, copy_shader_constants, dump_base,
             dump_row_length_used, dump_rows, dump_pitch, shared_memory,
             texture_cache);
       }
-      if (direct_resolve_eligibility == DirectResolveEligibility::kEligible &&
-          !resolved_directly) {
-        direct_resolve_eligibility =
-            cvars::direct_host_resolve
-                ? DirectResolveEligibility::kBackendUnavailable
-                : DirectResolveEligibility::kDisabled;
-      }
-      AccumulateDirectResolveStats(direct_resolve_eligibility);
       if (!resolved_directly) {
         DumpRenderTargets(dump_base, dump_row_length_used, dump_rows,
                           dump_pitch, copy_native);
@@ -6260,6 +6251,17 @@ bool VulkanRenderTargetCache::DirectResolveRenderTargets(
           sizeof(last_pitches), &last_pitches);
     }
 
+    // Tiles cover this many destination pixels, which is what the dispatch is
+    // sized in.
+    uint32_t tile_pixels_x =
+        (xenos::kEdramTileWidthSamples >> uint32_t(rt_key.Is64bpp())) >>
+        uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k4X);
+    uint32_t tile_pixels_y =
+        xenos::kEdramTileHeightSamples >>
+        uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k2X);
+    uint32_t pixels_per_thread =
+        GetEdramDumpShaderResolvePixelsPerThread(rt_key.Is64bpp());
+
     EdramDumpShaderOffsets offsets;
     offsets.source_base_tiles = rt_key.base_tiles;
     ResolveCopyDumpRectangle::Dispatch
@@ -6280,17 +6282,30 @@ bool VulkanRenderTargetCache::DirectResolveRenderTargets(
             sizeof(uint32_t) * kEdramDumpShaderPushConstantOffsets,
             sizeof(last_offsets), &last_offsets);
       }
+
+      // Where the dispatch starts in the resolve's tile grid, which the
+      // threads place themselves against.
+      uint32_t dispatch_tile_relative =
+          offsets.dispatch_first_tile -
+          copy_shader_constants.dest_relative.edram_info.base_tiles;
+      EdramDumpShaderResolveDispatchTile dispatch_tile;
+      dispatch_tile.tile_x = dispatch_tile_relative % dump_pitch;
+      dispatch_tile.tile_y = dispatch_tile_relative / dump_pitch;
+      command_buffer.CmdVkPushConstants(
+          pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+          sizeof(uint32_t) * kEdramDumpShaderPushConstantResolveDispatchTile,
+          sizeof(dispatch_tile), &dispatch_tile);
+
       command_processor_.SubmitBarriers(true);
+      uint32_t threads_x =
+          (dispatch.width_tiles * tile_pixels_x + (pixels_per_thread - 1)) /
+          pixels_per_thread;
       command_buffer.CmdVkDispatch(
-          (draw_resolution_scale_x() *
-               (xenos::kEdramTileWidthSamples >> uint32_t(rt_key.Is64bpp())) *
-               dispatch.width_tiles +
-           (kEdramDumpShaderSamplesPerGroupX - 1)) /
-              kEdramDumpShaderSamplesPerGroupX,
-          (draw_resolution_scale_y() * xenos::kEdramTileHeightSamples *
-               dispatch.height_tiles +
-           (kEdramDumpShaderSamplesPerGroupY - 1)) /
-              kEdramDumpShaderSamplesPerGroupY,
+          (threads_x + (kEdramDumpShaderResolveThreadsPerGroupX - 1)) /
+              kEdramDumpShaderResolveThreadsPerGroupX,
+          (dispatch.height_tiles * tile_pixels_y +
+           (kEdramDumpShaderResolveThreadsPerGroupY - 1)) /
+              kEdramDumpShaderResolveThreadsPerGroupY,
           1);
     }
   }

@@ -48,7 +48,9 @@ enum class MetalRootParameter : uint32_t {
 // which Mesa gives u0 space0, set 1 holds the source textures as t0 and t1 of
 // space1, and push constants land in Mesa's push constant CBV at b1 space31.
 enum class MetalInternalComputeRootParameter : uint32_t {
-  kEdramUav,       // UAV u0, space0
+  // UAV u0, space0 - the EDRAM buffer, or the resolve destination for a
+  // direct resolve.
+  kDestUav,
   kSourceTable,    // SRV table, space1
   kPushConstants,  // CBV b1, space31
 

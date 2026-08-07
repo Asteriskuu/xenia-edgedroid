@@ -676,6 +676,17 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   // retried every resolve.
   MTL::ComputePipelineState* GetOrCreateDumpPipeline(EdramDumpShaderKey key);
 
+  // Writes contents of the host render targets within those same rectangles
+  // straight into shared memory in the destination's guest texture layout,
+  // skipping edram_buffer_ and the resolve copy that would read it back again.
+  // Returns false without encoding anything if it can't, leaving the caller to
+  // fall back to the round trip.
+  bool DirectResolveRenderTargets(
+      const draw_util::ResolveInfo& resolve_info,
+      const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
+      uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
+      uint32_t dump_pitch, MTL::CommandBuffer* command_buffer);
+
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_.
   void DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used,
                          uint32_t dump_rows, uint32_t dump_pitch,

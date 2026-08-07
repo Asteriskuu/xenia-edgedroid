@@ -1218,8 +1218,6 @@ void MetalRenderTargetCache::BeginFrame() {
         transfer_tile_instance_buffer_sizes_[1],
         transfer_tile_instance_buffer_sizes_[2]);
   }
-
-  CountDirectResolveStatsFrame(command_processor_.completed_gpu_time_ns());
 }
 
 bool MetalRenderTargetCache::Update(
@@ -2800,6 +2798,267 @@ MTL::ComputePipelineState* MetalRenderTargetCache::GetOrCreateDumpPipeline(
   return pipeline;
 }
 
+bool MetalRenderTargetCache::DirectResolveRenderTargets(
+    const draw_util::ResolveInfo& resolve_info,
+    const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
+    uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
+    uint32_t dump_pitch, MTL::CommandBuffer* command_buffer) {
+  auto* shared = command_processor_.shared_memory();
+  MTL::Buffer* dest_buffer = shared ? shared->GetBuffer() : nullptr;
+  MTL::CommandQueue* queue = command_processor_.GetMetalCommandQueue();
+  if (!dest_buffer || !queue) {
+    return false;
+  }
+
+  std::vector<ResolveCopyDumpRectangle> rectangles;
+  GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,
+                                 dump_pitch, rectangles);
+  if (rectangles.empty()) {
+    return false;
+  }
+
+  // Every pipeline and source has to resolve before anything is encoded -
+  // skipping a rectangle partway through would leave its part of the
+  // destination stale, with nothing to say so.
+  struct Source {
+    MTL::ComputePipelineState* pipeline;
+    MTL::Texture* texture;
+    MTL::Texture* stencil_texture;
+  };
+  std::vector<Source> sources;
+  sources.reserve(rectangles.size());
+  for (const ResolveCopyDumpRectangle& rectangle : rectangles) {
+    auto* rt = static_cast<MetalRenderTarget*>(rectangle.render_target);
+    if (!rt) {
+      return false;
+    }
+    RenderTargetKey rt_key = rt->key();
+    EdramDumpShaderKey shader_key;
+    shader_key.is_depth = rt_key.is_depth;
+    shader_key.resource_format = rt_key.resource_format;
+    shader_key.msaa_samples = rt_key.msaa_samples;
+    shader_key.direct_resolve = 1;
+    Source source;
+    source.pipeline = GetOrCreateDumpPipeline(shader_key);
+    // The source is the ownership transfer view, whose format the shader was
+    // emitted against - an integer one for the formats where exact bits matter.
+    source.stencil_texture = nullptr;
+    if (rt_key.is_depth) {
+      source.texture = rt->texture();
+      source.stencil_texture = GetStencilTextureView(rt);
+      if (!source.stencil_texture) {
+        return false;
+      }
+    } else {
+      bool source_is_uint = false;
+      GetColorOwnershipTransferPixelFormat(rt_key.GetColorFormat(),
+                                           &source_is_uint);
+      source.texture = source_is_uint ? rt->transfer_texture() : rt->texture();
+    }
+    if (!source.pipeline || !source.texture) {
+      return false;
+    }
+    sources.push_back(source);
+  }
+
+  // The GPU is about to overwrite this range, so any CPU-side data has to be
+  // uploaded first, as it is for the resolve copy.
+  if (!shared->RequestRange(resolve_info.copy_dest_extent_start,
+                            resolve_info.copy_dest_extent_length)) {
+    XELOGE(
+        "MetalRenderTargetCache::DirectResolveRenderTargets: RequestRange "
+        "failed for 0x{:08X} len {}",
+        resolve_info.copy_dest_extent_start,
+        resolve_info.copy_dest_extent_length);
+    return false;
+  }
+
+  ScopedAutoreleasePool autorelease_pool;
+  bool owns_command_buffer = false;
+  MTL::CommandBuffer* cmd = command_buffer;
+  if (!cmd) {
+    cmd = queue->commandBuffer();
+    if (!cmd) {
+      return false;
+    }
+    owns_command_buffer = true;
+  }
+  MTL::ComputeCommandEncoder* encoder = cmd->computeCommandEncoder();
+  if (!encoder) {
+    return false;
+  }
+
+  const MetalShaderConverter& converter =
+      command_processor_.metal_shader_converter();
+
+  EdramDumpShaderPitches pitches;
+  pitches.dest_pitch = dump_pitch;
+
+  // Constant across the resolve, unlike the pitches and offsets.
+  uint32_t push_constants[kEdramDumpShaderPushConstantCount] = {};
+  push_constants[kEdramDumpShaderPushConstantResolveEdramInfo] =
+      copy_shader_constants.dest_relative.edram_info.packed;
+  push_constants[kEdramDumpShaderPushConstantResolveCoordinateInfo] =
+      copy_shader_constants.dest_relative.coordinate_info.packed;
+  push_constants[kEdramDumpShaderPushConstantResolveDestInfo] =
+      copy_shader_constants.dest_relative.dest_info.value;
+  push_constants[kEdramDumpShaderPushConstantResolveDestCoordinateInfo] =
+      copy_shader_constants.dest_relative.dest_coordinate_info.packed;
+  push_constants[kEdramDumpShaderPushConstantResolveDestBase] =
+      copy_shader_constants.dest_base;
+  push_constants[kEdramDumpShaderPushConstantResolveHeightDiv8] =
+      resolve_info.height_div_8;
+
+  bool encode_failed = false;
+  for (size_t rectangle_index = 0;
+       rectangle_index < rectangles.size() && !encode_failed;
+       ++rectangle_index) {
+    const ResolveCopyDumpRectangle& rect = rectangles[rectangle_index];
+    RenderTargetKey rt_key =
+        static_cast<MetalRenderTarget*>(rect.render_target)->key();
+    MTL::Texture* source_texture = sources[rectangle_index].texture;
+    MTL::Texture* stencil_texture = sources[rectangle_index].stencil_texture;
+
+    MTL::Buffer* heap_buffer = nullptr;
+    NS::UInteger heap_offset = 0;
+    if (!command_processor_.AcquireSpirvArgumentBufferSlice(
+            sizeof(IRDescriptorTableEntry) * 2, kInternalComputeSliceAlignment,
+            &heap_buffer, &heap_offset)) {
+      encode_failed = true;
+      break;
+    }
+    auto* heap_entries = reinterpret_cast<IRDescriptorTableEntry*>(
+        static_cast<uint8_t*>(heap_buffer->contents()) + heap_offset);
+    std::memset(heap_entries, 0, sizeof(IRDescriptorTableEntry) * 2);
+    IRDescriptorTableSetTexture(&heap_entries[0], source_texture, 0.0f, 0);
+    if (stencil_texture) {
+      IRDescriptorTableSetTexture(&heap_entries[1], stencil_texture, 0.0f, 0);
+    }
+
+    encoder->setComputePipelineState(sources[rectangle_index].pipeline);
+    encoder->setBuffer(heap_buffer, heap_offset,
+                       NS::UInteger(kIRDescriptorHeapBindPoint));
+    // Nothing reached by GPU address is resident just from being written into
+    // the argument buffer.
+    encoder->useResource(dest_buffer, MTL::ResourceUsageWrite);
+    encoder->useResource(source_texture, MTL::ResourceUsageRead);
+    if (stencil_texture) {
+      encoder->useResource(stencil_texture, MTL::ResourceUsageRead);
+    }
+
+    pitches.source_pitch = rt_key.GetPitchTiles();
+    push_constants[kEdramDumpShaderPushConstantPitches] = pitches.pitches;
+
+    // Tiles cover this many destination pixels, which is what the dispatch is
+    // sized in.
+    uint32_t tile_pixels_x =
+        (xenos::kEdramTileWidthSamples >> uint32_t(rt_key.Is64bpp())) >>
+        uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k4X);
+    uint32_t tile_pixels_y =
+        xenos::kEdramTileHeightSamples >>
+        uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k2X);
+    uint32_t pixels_per_thread =
+        GetEdramDumpShaderResolvePixelsPerThread(rt_key.Is64bpp());
+
+    ResolveCopyDumpRectangle::Dispatch
+        dispatches[ResolveCopyDumpRectangle::kMaxDispatches];
+    uint32_t dispatch_count =
+        rect.GetDispatches(dump_pitch, dump_row_length_used, dispatches);
+    for (uint32_t i = 0; i < dispatch_count; ++i) {
+      const ResolveCopyDumpRectangle::Dispatch& dispatch = dispatches[i];
+      EdramDumpShaderOffsets offsets;
+      offsets.dispatch_first_tile = dump_base + dispatch.offset;
+      offsets.source_base_tiles = rt_key.base_tiles;
+      push_constants[kEdramDumpShaderPushConstantOffsets] = offsets.offsets;
+
+      // Where the dispatch starts in the resolve's tile grid, which the
+      // threads place themselves against.
+      uint32_t dispatch_tile_relative =
+          offsets.dispatch_first_tile -
+          copy_shader_constants.dest_relative.edram_info.base_tiles;
+      EdramDumpShaderResolveDispatchTile dispatch_tile;
+      dispatch_tile.tile_x = dispatch_tile_relative % dump_pitch;
+      dispatch_tile.tile_y = dispatch_tile_relative / dump_pitch;
+      push_constants[kEdramDumpShaderPushConstantResolveDispatchTile] =
+          dispatch_tile.packed;
+
+      // A dispatch gets its own push constants and argument buffer: the GPU
+      // reads them when it runs, so rewriting either between dispatches
+      // already encoded into this pass would corrupt them.
+      MTL::Buffer* push_constant_buffer = nullptr;
+      NS::UInteger push_constant_offset = 0;
+      MTL::Buffer* argument_buffer = nullptr;
+      NS::UInteger argument_buffer_offset = 0;
+      if (!command_processor_.AcquireSpirvArgumentBufferSlice(
+              sizeof(push_constants), kInternalComputeSliceAlignment,
+              &push_constant_buffer, &push_constant_offset) ||
+          !command_processor_.AcquireSpirvArgumentBufferSlice(
+              converter.internal_compute_argument_buffer_size(),
+              kInternalComputeSliceAlignment, &argument_buffer,
+              &argument_buffer_offset)) {
+        encode_failed = true;
+        break;
+      }
+      std::memcpy(static_cast<uint8_t*>(push_constant_buffer->contents()) +
+                      push_constant_offset,
+                  push_constants, sizeof(push_constants));
+
+      auto* argument_buffer_data =
+          static_cast<uint8_t*>(argument_buffer->contents()) +
+          argument_buffer_offset;
+      std::memset(argument_buffer_data, 0,
+                  converter.internal_compute_argument_buffer_size());
+      auto write_root_parameter =
+          [&](MetalInternalComputeRootParameter parameter, uint64_t address) {
+            std::memcpy(
+                argument_buffer_data +
+                    converter.internal_compute_root_parameter_offset(parameter),
+                &address, sizeof(address));
+          };
+      write_root_parameter(MetalInternalComputeRootParameter::kDestUav,
+                           uint64_t(dest_buffer->gpuAddress()));
+      write_root_parameter(MetalInternalComputeRootParameter::kSourceTable,
+                           uint64_t(heap_buffer->gpuAddress()) + heap_offset);
+      write_root_parameter(
+          MetalInternalComputeRootParameter::kPushConstants,
+          uint64_t(push_constant_buffer->gpuAddress()) + push_constant_offset);
+      encoder->setBuffer(argument_buffer, argument_buffer_offset,
+                         NS::UInteger(kIRArgumentBufferBindPoint));
+
+      uint32_t threads_x =
+          (dispatch.width_tiles * tile_pixels_x + (pixels_per_thread - 1)) /
+          pixels_per_thread;
+      encoder->dispatchThreadgroups(
+          MTL::Size::Make(
+              (threads_x + (kEdramDumpShaderResolveThreadsPerGroupX - 1)) /
+                  kEdramDumpShaderResolveThreadsPerGroupX,
+              (dispatch.height_tiles * tile_pixels_y +
+               (kEdramDumpShaderResolveThreadsPerGroupY - 1)) /
+                  kEdramDumpShaderResolveThreadsPerGroupY,
+              1),
+          MTL::Size::Make(kEdramDumpShaderResolveThreadsPerGroupX,
+                          kEdramDumpShaderResolveThreadsPerGroupY, 1));
+    }
+  }
+
+  encoder->endEncoding();
+  if (owns_command_buffer) {
+    cmd->commit();
+    cmd->waitUntilCompleted();
+  }
+  // cmd is autoreleased from commandBuffer() - do not release
+  if (encode_failed) {
+    // Whatever was encoded wrote part of the destination, but the round trip
+    // the caller falls back to rewrites all of it, and later encoders in this
+    // command buffer run after these.
+    XELOGE(
+        "MetalRenderTargetCache::DirectResolveRenderTargets: out of shader "
+        "argument space, falling back to the EDRAM round trip");
+    return false;
+  }
+  return true;
+}
+
 void MetalRenderTargetCache::DumpRenderTargets(
     uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
     uint32_t dump_pitch, MTL::CommandBuffer* command_buffer) {
@@ -2976,7 +3235,7 @@ void MetalRenderTargetCache::DumpRenderTargets(
                     converter.internal_compute_root_parameter_offset(parameter),
                 &address, sizeof(address));
           };
-      write_root_parameter(MetalInternalComputeRootParameter::kEdramUav,
+      write_root_parameter(MetalInternalComputeRootParameter::kDestUav,
                            uint64_t(edram_buffer_->gpuAddress()));
       write_root_parameter(MetalInternalComputeRootParameter::kSourceTable,
                            uint64_t(heap_buffer->gpuAddress()) + heap_offset);
@@ -3343,11 +3602,31 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
   uint32_t dump_base, dump_row_length_used, dump_rows, dump_pitch;
   resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used, dump_rows,
                                     dump_pitch);
-  // Match D3D12/Vulkan: dump host RT ownership into EDRAM, then resolve
-  // from EDRAM to shared memory. Resolve-time blend fallback is not correct
-  // because blending state is per-draw, not per-resolve.
-  DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch,
-                    command_buffer);
+
+  draw_util::ResolveCopyShaderConstants copy_constants;
+  uint32_t group_count_x = 0, group_count_y = 0;
+  draw_util::ResolveCopyShaderIndex copy_shader = resolve_info.GetCopyShader(
+      draw_resolution_scale_x(), draw_resolution_scale_y(), copy_constants,
+      group_count_x, group_count_y);
+
+  // Read the render targets straight into shared memory where the copy
+  // wouldn't have converted anything. Otherwise match D3D12/Vulkan: dump host
+  // RT ownership into EDRAM, then resolve from EDRAM to shared memory.
+  // Resolve-time blend fallback is not correct because blending state is
+  // per-draw, not per-resolve.
+  bool resolved_directly = false;
+  if (::cvars::direct_host_resolve &&
+      GetDirectResolveEligibility(resolve_info, copy_shader) ==
+          DirectResolveEligibility::kEligible) {
+    resolved_directly = DirectResolveRenderTargets(
+        resolve_info, copy_constants, dump_base, dump_row_length_used,
+        dump_rows, dump_pitch, command_buffer);
+  }
+
+  if (!resolved_directly) {
+    DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch,
+                      command_buffer);
+  }
 
   uint32_t dest_base = resolve_info.copy_dest_base;
   uint32_t dest_local_start = resolve_info.copy_dest_extent_start - dest_base;
@@ -3361,25 +3640,56 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
   // formats, so only apply the 4-byte-per-pixel assumption to color.
   uint32_t bytes_per_pixel = 4;
 
-  // Try GPU compute resolve first (RT -> EDRAM -> shared memory), matching
-  // D3D12/Vulkan behavior for the supported cases.
+  // Bookkeeping both paths need once the destination has been written.
+  auto finish_resolve = [&]() {
+    written_address = resolve_info.copy_dest_extent_start;
+    written_length = resolve_info.copy_dest_extent_length;
+
+    // Mark the shared memory range as GPU-written resolve data so texture
+    // caches and trace dumping can see it without an extra CPU copy. This
+    // mirrors D3D12/Vulkan behavior.
+    if (!draw_resolution_scaled) {
+      if (auto* shared_after = command_processor_.shared_memory()) {
+        shared_after->RangeWrittenByGpu(written_address, written_length);
+      }
+    }
+
+    // Mark the range as resolved in the texture cache so that any textures
+    // overlapping this range will be reloaded from the updated shared memory.
+    // This matches D3D12/Vulkan behavior.
+    if (auto* tex_cache = command_processor_.texture_cache()) {
+      tex_cache->MarkRangeAsResolved(written_address, written_length,
+                                     draw_resolution_scaled);
+    }
+
+    bool clear_depth = resolve_info.IsClearingDepth();
+    bool clear_color = resolve_info.IsClearingColor();
+    if (clear_depth || clear_color) {
+      Transfer::Rectangle clear_rectangle;
+      RenderTarget* clear_targets[2] = {};
+      std::vector<Transfer> clear_transfers[2];
+      if (PrepareHostRenderTargetsResolveClear(
+              resolve_info, clear_rectangle, clear_targets[0],
+              clear_transfers[0], clear_targets[1], clear_transfers[1])) {
+        uint64_t clear_values[2];
+        clear_values[0] = resolve_info.rb_depth_clear;
+        clear_values[1] = resolve_info.rb_color_clear |
+                          (uint64_t(resolve_info.rb_color_clear_lo) << 32);
+        PerformTransfersAndResolveClears(2, clear_targets, clear_transfers,
+                                         clear_values, &clear_rectangle,
+                                         command_buffer);
+      }
+    }
+    return true;
+  };
+
+  if (resolved_directly) {
+    return finish_resolve();
+  }
+
+  // Resolve out of EDRAM, matching D3D12/Vulkan behavior for the supported
+  // cases.
   if (edram_buffer_) {
-    draw_util::ResolveCopyShaderConstants copy_constants;
-    uint32_t group_count_x = 0, group_count_y = 0;
-    draw_util::ResolveCopyShaderIndex copy_shader = resolve_info.GetCopyShader(
-        draw_resolution_scale_x(), draw_resolution_scale_y(), copy_constants,
-        group_count_x, group_count_y);
-
-    // Metal has no direct resolve path yet, so what the eligibility calls
-    // eligible is still taking the round trip - report it as such rather than
-    // as work that was skipped.
-    DirectResolveEligibility direct_resolve_eligibility =
-        GetDirectResolveEligibility(resolve_info, copy_shader);
-    AccumulateDirectResolveStats(
-        direct_resolve_eligibility == DirectResolveEligibility::kEligible
-            ? DirectResolveEligibility::kBackendUnavailable
-            : direct_resolve_eligibility);
-
     // Select the appropriate Metal pipeline for this shader.
     MTL::ComputePipelineState* pipeline = nullptr;
     if (draw_resolution_scaled) {
@@ -3581,48 +3891,7 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
             }
             // cmd is autoreleased from commandBuffer() - do not release
 
-            written_address = resolve_info.copy_dest_extent_start;
-            written_length = resolve_info.copy_dest_extent_length;
-
-            // Mark the shared memory range as GPU-written resolve data so
-            // texture caches and trace dumping can see it without an extra
-            // CPU copy. This mirrors D3D12/Vulkan behavior.
-            if (!draw_resolution_scaled) {
-              if (auto* shared_after = command_processor_.shared_memory()) {
-                shared_after->RangeWrittenByGpu(written_address,
-                                                written_length);
-              }
-            }
-
-            // Mark the range as resolved in the texture cache so that any
-            // textures overlapping this range will be reloaded from the
-            // updated shared memory. This matches D3D12/Vulkan behavior.
-            if (auto* tex_cache = command_processor_.texture_cache()) {
-              tex_cache->MarkRangeAsResolved(written_address, written_length,
-                                             draw_resolution_scaled);
-            }
-
-            bool clear_depth = resolve_info.IsClearingDepth();
-            bool clear_color = resolve_info.IsClearingColor();
-            if (clear_depth || clear_color) {
-              Transfer::Rectangle clear_rectangle;
-              RenderTarget* clear_targets[2] = {};
-              std::vector<Transfer> clear_transfers[2];
-              if (PrepareHostRenderTargetsResolveClear(
-                      resolve_info, clear_rectangle, clear_targets[0],
-                      clear_transfers[0], clear_targets[1],
-                      clear_transfers[1])) {
-                uint64_t clear_values[2];
-                clear_values[0] = resolve_info.rb_depth_clear;
-                clear_values[1] =
-                    resolve_info.rb_color_clear |
-                    (uint64_t(resolve_info.rb_color_clear_lo) << 32);
-                PerformTransfersAndResolveClears(
-                    2, clear_targets, clear_transfers, clear_values,
-                    &clear_rectangle, command_buffer);
-              }
-            }
-            return true;
+            return finish_resolve();
           }
         }
       }

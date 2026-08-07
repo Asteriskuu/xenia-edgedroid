@@ -334,7 +334,7 @@ IRRootSignature* MetalShaderConverter::CreateInternalComputeRootSignature()
   // Order must match MetalInternalComputeRootParameter - table entries come
   // back from the reflection without a space or slot to match on.
   IRRootParameter1& edram_parameter =
-      parameters[uint32_t(MetalInternalComputeRootParameter::kEdramUav)];
+      parameters[uint32_t(MetalInternalComputeRootParameter::kDestUav)];
   edram_parameter.ParameterType = IRRootParameterTypeUAV;
   edram_parameter.Descriptor.ShaderRegister = 0;
   edram_parameter.Descriptor.RegisterSpace = 0;

@@ -78,6 +78,22 @@ union EdramDumpShaderKey {
   }
 };
 
+// A direct resolve dispatches over destination pixels rather than EDRAM
+// samples, so that the guest texture layout's contiguous runs line up with
+// whole stores. Four 32bpp pixels (or two 64bpp ones) are 16 adjacent bytes;
+// the next four are elsewhere in the tile, so a thread does two of them.
+constexpr uint32_t kEdramDumpShaderResolvePixelsPerStore = 4;
+constexpr uint32_t kEdramDumpShaderResolvePixelsPerThreadAt32bpp =
+    kEdramDumpShaderResolvePixelsPerStore * 2;
+// Pixels per thread, which is halved for 64bpp - a 16-byte store covers half
+// as many of them.
+constexpr uint32_t GetEdramDumpShaderResolvePixelsPerThread(bool is_64bpp) {
+  return kEdramDumpShaderResolvePixelsPerThreadAt32bpp >> uint32_t(is_64bpp);
+}
+// 64 threads per group, like the resolve copy shaders.
+constexpr uint32_t kEdramDumpShaderResolveThreadsPerGroupX = 8;
+constexpr uint32_t kEdramDumpShaderResolveThreadsPerGroupY = 8;
+
 // There's no strict dependency on the group size in dumping, for simplicity of
 // calculations especially with resolution scaling, dividing manually (as the
 // group size is not unlimited). The only restriction is that an integer
@@ -105,8 +121,23 @@ enum EdramDumpShaderPushConstant : uint32_t {
   kEdramDumpShaderPushConstantResolveDestCoordinateInfo,
   kEdramDumpShaderPushConstantResolveDestBase,
   kEdramDumpShaderPushConstantResolveHeightDiv8,
+  // Where this dispatch's first tile sits in the resolve's tile grid, so the
+  // threads can place themselves without dividing the linear index back out.
+  kEdramDumpShaderPushConstantResolveDispatchTile,
 
   kEdramDumpShaderPushConstantCount,
+};
+
+// kEdramDumpShaderPushConstantResolveDispatchTile.
+union EdramDumpShaderResolveDispatchTile {
+  uint32_t packed;
+  struct {
+    uint32_t tile_x : xenos::kEdramPitchTilesBits;
+    uint32_t tile_y : xenos::kEdramPitchTilesBits;
+  };
+  EdramDumpShaderResolveDispatchTile() : packed(0) {
+    static_assert_size(*this, sizeof(packed));
+  }
 };
 
 union EdramDumpShaderPitches {

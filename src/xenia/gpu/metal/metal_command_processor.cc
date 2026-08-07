@@ -4617,23 +4617,16 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
 
   ++submission_current_;
   pending_completion_handlers_.fetch_add(1, std::memory_order_relaxed);
-  current_command_buffer_->addCompletedHandler(
-      [this](MTL::CommandBuffer* command_buffer) {
-        double gpu_seconds =
-            command_buffer->GPUEndTime() - command_buffer->GPUStartTime();
-        if (gpu_seconds > 0.0) {
-          completed_gpu_time_ns_.fetch_add(uint64_t(gpu_seconds * 1e9),
-                                           std::memory_order_relaxed);
-        }
-        std::lock_guard<std::mutex> lock(completion_mutex_);
-        completed_command_buffers_.fetch_add(1, std::memory_order_release);
-        pending_completion_handlers_.fetch_sub(1, std::memory_order_release);
-        // Notify under the lock: a waiter that evaluated the predicate before
-        // the increment would otherwise miss the wakeup, and
-        // WaitForPendingCompletionHandlers can see the counter reach zero and
-        // let the object be destroyed out from under notify_all().
-        completion_cond_.notify_all();
-      });
+  current_command_buffer_->addCompletedHandler([this](MTL::CommandBuffer*) {
+    std::lock_guard<std::mutex> lock(completion_mutex_);
+    completed_command_buffers_.fetch_add(1, std::memory_order_release);
+    pending_completion_handlers_.fetch_sub(1, std::memory_order_release);
+    // Notify under the lock: a waiter that evaluated the predicate before
+    // the increment would otherwise miss the wakeup, and
+    // WaitForPendingCompletionHandlers can see the counter reach zero and
+    // let the object be destroyed out from under notify_all().
+    completion_cond_.notify_all();
+  });
 
   if (primitive_processor_) {
     primitive_processor_->BeginSubmission();
