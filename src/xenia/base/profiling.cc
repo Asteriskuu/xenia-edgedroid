@@ -21,7 +21,12 @@
 #define MICROPROFILEUI_ENABLED 1
 #define MICROPROFILEUI_IMPL 1
 #endif
-#define MICROPROFILE_PER_THREAD_BUFFER_SIZE (1024 * 1024 * 10)
+// Paid per live guest thread, not per host thread: the cooperative scheduler
+// gives every fiber-backed thread its own log. Sized for the command processor
+// thread, which logs ~25k entries per frame where no other thread exceeds 300;
+// once the ring wraps ahead of a flip, dropped entries mispair enter/leave and
+// poison the aggregate.
+#define MICROPROFILE_PER_THREAD_BUFFER_SIZE (4 * 1024 * 1024)
 #define MICROPROFILE_USE_THREAD_NAME_CALLBACK 1
 #define MICROPROFILE_WEBSERVER_MAXFRAMES 3
 #define MICROPROFILE_PRINTF(...)                               \
@@ -176,6 +181,30 @@ void Profiler::ThreadEnter(const char* name) {
 }
 
 void Profiler::ThreadExit() { MicroProfileOnThreadExit(); }
+
+Profiler::ThreadLogHandle Profiler::CreateThreadLog(const char* name) {
+  MicroProfileInit();
+  std::lock_guard<std::recursive_mutex> lock(MicroProfileMutex());
+  return MicroProfileCreateThreadLog(name ? name : "");
+}
+
+Profiler::ThreadLogHandle Profiler::SwapThreadLog(ThreadLogHandle log) {
+  MicroProfileThreadLog* previous = MicroProfileGetThreadLog();
+  MicroProfileSetThreadLog(static_cast<MicroProfileThreadLog*>(log));
+  return previous;
+}
+
+void Profiler::RetireThreadLog(ThreadLogHandle log) {
+  if (!log) {
+    return;
+  }
+  // MicroProfileOnThreadExit retires whatever log is current and clears it, so
+  // borrow this thread's slot for the call.
+  MicroProfileThreadLog* previous = MicroProfileGetThreadLog();
+  MicroProfileSetThreadLog(static_cast<MicroProfileThreadLog*>(log));
+  MicroProfileOnThreadExit();
+  MicroProfileSetThreadLog(previous == log ? nullptr : previous);
+}
 
 void Profiler::ProfilerWindowInputListener::OnKeyDown(ui::KeyEvent& e) {
   // https://msdn.microsoft.com/en-us/library/windows/desktop/dd375731(v=vs.85).aspx
@@ -390,6 +419,13 @@ void Profiler::Shutdown() {}
 uint32_t Profiler::GetColor(const char* str) { return 0; }
 void Profiler::ThreadEnter(const char* name) {}
 void Profiler::ThreadExit() {}
+Profiler::ThreadLogHandle Profiler::CreateThreadLog(const char* name) {
+  return nullptr;
+}
+Profiler::ThreadLogHandle Profiler::SwapThreadLog(ThreadLogHandle log) {
+  return nullptr;
+}
+void Profiler::RetireThreadLog(ThreadLogHandle log) {}
 void Profiler::ToggleDisplay() {}
 void Profiler::TogglePause() {}
 void Profiler::SetUserIO(size_t z_order, ui::Window* window,

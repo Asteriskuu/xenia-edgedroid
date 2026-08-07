@@ -185,6 +185,22 @@ class Profiler {
   // Deactivates the calling thread for profiling.
   static void ThreadExit();
 
+  // Opaque profiler log. All profiling state, including the scope stack, lives
+  // in one of these, and the profiler keys them by host thread. A unit of
+  // execution that is not a host thread, such as a fiber multiplexed onto a
+  // dispatch thread, needs its own log installed while it runs or its scopes
+  // interleave with every other fiber sharing that thread.
+  using ThreadLogHandle = void*;
+
+  // Creates a log bound to no thread. Null if the profiler is out of slots, in
+  // which case the caller profiles into whatever log is already current.
+  static ThreadLogHandle CreateThreadLog(const char* name);
+  // Makes |log| the calling thread's log, returning the one it replaced.
+  static ThreadLogHandle SwapThreadLog(ThreadLogHandle log);
+  // Returns |log| to the pool. Never pass a log that is currently installed on
+  // another thread.
+  static void RetireThreadLog(ThreadLogHandle log);
+
   static void ToggleDisplay();
   static void TogglePause();
 

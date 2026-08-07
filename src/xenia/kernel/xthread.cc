@@ -462,6 +462,8 @@ X_STATUS XThread::Create() {
     if (thread_name_.empty()) {
       set_name(fmt::format("XThread{:04X}", thread_id_));
     }
+    scheduler_links_.profiler_log =
+        xe::Profiler::CreateThreadLog(thread_name_.c_str());
     kernel_state()->guest_scheduler()->EnsureStarted();
   } else {
     xe::threading::Thread::CreationParameters params;
@@ -661,6 +663,11 @@ void XThread::ReclaimExited() {
   if (self_reference_dropped_.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
+  // Nothing runs on the fiber again, so no dispatch thread can have its log
+  // installed. Retiring here rather than at the exit yield also covers a
+  // thread terminated before it ever ran.
+  xe::Profiler::RetireThreadLog(scheduler_links_.profiler_log);
+  scheduler_links_.profiler_log = nullptr;
   // The guest may already have dropped its handle while the thread ran.
   if (!handles().empty()) {
     ReleaseHandle();

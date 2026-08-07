@@ -17,6 +17,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/mutex.h"
+#include "xenia/base/profiling.h"
 #include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
@@ -602,7 +603,17 @@ void GuestScheduler::SwitchTo(XThread* next) {
   // A flag raised while this fiber was off-CPU is stale, the dispatcher
   // already served it. A raise racing this clear is restored by the watchdog.
   next->thread_state()->context()->preempt_requested = 0;
+  // The profiler keys its scope stack by host thread, so without this every
+  // fiber dispatched here would nest its scopes inside whichever one ran
+  // before it. A yield resumes this line, so the restore below pairs with it.
+  // With no log of its own the fiber shares this dispatch thread's, which
+  // misattributes but still records.
+  void* fiber_log = links.profiler_log;
+  void* dispatch_log = fiber_log ? Profiler::SwapThreadLog(fiber_log) : nullptr;
   next->fiber()->SwitchTo();
+  if (fiber_log) {
+    Profiler::SwapThreadLog(dispatch_log);
+  }
   // Back on the idle fiber.
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -804,6 +815,7 @@ void GuestScheduler::RunBlockingHostCallOffloaded(
 }
 
 void GuestScheduler::IoWorkerLoop() {
+  Profiler::ThreadEnter("GuestScheduler IO");
   while (!shutting_down_.load()) {
     BlockingCall* call = nullptr;
     {
@@ -1021,6 +1033,8 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
 
 void GuestScheduler::RunLoop(int cpu_index) {
   t_current_cpu = cpu_index;
+  Profiler::ThreadEnter(
+      ("GuestScheduler CPU " + std::to_string(cpu_index)).c_str());
   Cpu& cpu = cpus_[cpu_index];
   // Adopt this host thread's stack as this CPU's idle fiber.
   cpu.idle_fiber = xe::threading::Fiber::CreateFromThread();
@@ -1124,6 +1138,7 @@ void GuestScheduler::RunLoop(int cpu_index) {
 }
 
 void GuestScheduler::WatchdogLoop() {
+  Profiler::ThreadEnter("GuestScheduler Watchdog");
   uint64_t period_ms = cvars::guest_scheduler_quantum_us / 1000;
   if (!period_ms) {
     period_ms = 1;

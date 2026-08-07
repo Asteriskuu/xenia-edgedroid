@@ -548,6 +548,10 @@ class XThread : public XObject, public cpu::Thread {
     // Absolute raw-tick end of the granted timeslice, 0 = grant fresh at
     // dispatch. Preemption preserves it so the quantum end still arrives.
     uint64_t quantum_deadline_tick = 0;
+    // xe::Profiler::ThreadLogHandle for this thread's fiber, installed by
+    // SwitchTo for as long as it runs. Void to keep profiling.h, and the UI
+    // headers behind it, out of the kernel headers.
+    void* profiler_log = nullptr;
     // Re-poll gating, written by BlockCurrentThread, read by RereadyBlocked.
     bool wait_gated = false;        // skip re-polls until something below fires
     bool wait_alertable = false;    // also re-poll on a pending user APC
