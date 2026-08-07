@@ -693,6 +693,10 @@ class MetalCommandProcessor : public CommandProcessor {
   std::atomic<uint64_t> completed_gpu_time_ns_{0};
   uint64_t gpu_time_window_start_ns_ = 0;
   uint32_t gpu_time_window_frames_ = 0;
+  // Each render encoder is a tile store plus an attachment reload on a TBDR
+  // GPU, so the count per frame is comparable against Vulkan's render passes.
+  uint64_t render_passes_total_ = 0;
+  uint64_t render_passes_window_start_ = 0;
   uint64_t submission_current_ = 0;
   uint64_t submission_completed_processed_ = 0;
   // Signaled by the submission completion handler so waits for a specific

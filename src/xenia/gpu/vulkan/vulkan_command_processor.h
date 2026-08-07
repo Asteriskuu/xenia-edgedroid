@@ -613,6 +613,23 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   static constexpr uint32_t kMaxFramesInFlight = 3;
   bool frame_open_ = false;
+  // Comparable against the Metal backend's render encoder count: on a TBDR GPU
+  // each one is a tile store plus an attachment reload.
+  uint64_t render_passes_total_ = 0;
+  uint64_t render_passes_window_start_ = 0;
+  uint32_t render_pass_window_frames_ = 0;
+
+  // A timestamp pair per in-flight submission, so the summed GPU busy time is
+  // comparable against the Metal backend's completion-handler figure.
+  static constexpr uint32_t kGpuTimeQuerySubmissions = 8;
+  VkQueryPool gpu_time_query_pool_ = VK_NULL_HANDLE;
+  uint64_t gpu_time_query_submissions_[kGpuTimeQuerySubmissions] = {};
+  uint32_t gpu_time_query_slot_ = 0;
+  uint64_t gpu_time_total_ns_ = 0;
+  uint64_t gpu_time_window_start_ns_ = 0;
+  void CreateGpuTimeQueryPool();
+  void DestroyGpuTimeQueryPool();
+  void CollectCompletedGpuTimeQueries();
   // Guest frame index, since some transient resources can be reused across
   // submissions. Values updated in the beginning of a frame.
   uint64_t frame_current_ = 1;

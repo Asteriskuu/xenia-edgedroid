@@ -1854,10 +1854,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   static constexpr uint32_t kGpuTimeWindowFrames = 60;
   if (++gpu_time_window_frames_ >= kGpuTimeWindowFrames) {
     uint64_t now_ns = completed_gpu_time_ns_.load(std::memory_order_relaxed);
-    COUNT_profile_set("gpu/metal/gpu_busy_us_per_frame",
+    // Covers the submission command buffer only. Command buffers the backend
+    // commits on the side — texture uploads, and the render target cache paths
+    // that own their buffer — are not in this figure.
+    COUNT_profile_set("gpu/gpu_busy_us_per_frame",
                       int64_t((now_ns - gpu_time_window_start_ns_) /
                               (uint64_t(1000) * gpu_time_window_frames_)));
     gpu_time_window_start_ns_ = now_ns;
+
+    COUNT_profile_set(
+        "gpu/render_passes_per_frame",
+        int64_t((render_passes_total_ - render_passes_window_start_) /
+                gpu_time_window_frames_));
+    render_passes_window_start_ = render_passes_total_;
+
     gpu_time_window_frames_ = 0;
   }
 
@@ -4997,6 +5007,7 @@ void MetalCommandProcessor::BeginCommandBuffer() {
       return;
     }
     current_render_encoder_->retain();
+    ++render_passes_total_;
     current_render_encoder_->setLabel(
         NS::String::string("XeniaRenderEncoder", NS::UTF8StringEncoding));
     render_encoder_has_zpd_visibility_ =
