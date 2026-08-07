@@ -399,6 +399,7 @@ class PosixConditionBase {
     if (predicate()) {
       executed = true;
     } else {
+      ScopedParked parked(*this);
       if (timeout == std::chrono::milliseconds::max()) {
         cond_.wait(lock, predicate);
         executed = true;  // Did not time out;
@@ -417,7 +418,13 @@ class PosixConditionBase {
   // multi-waits on wakes every parked thread to re-check handles it does not
   // care about.
   void NotifyAll() {
-    cond_.notify_all();
+    // bionic's pthread_cond_broadcast issues the futex syscall even with no
+    // sleeper. Under the cooperative scheduler guest waits are fibers, so
+    // nearly every signal is uncontended and paid a syscall for nothing.
+    // parked_waiters_ is only touched under mutex_, held by every caller.
+    if (parked_waiters_ != 0) {
+      cond_.notify_all();
+    }
     if (multi_wait_refs_.load(std::memory_order_acquire) != 0) {
       PokeMultiWaiters();
     }
@@ -586,6 +593,18 @@ class PosixConditionBase {
  protected:
   [[nodiscard]] inline virtual bool signaled() const = 0;
   inline virtual void post_execution() = 0;
+  // Threads currently inside a cond_ wait on this object. Guarded by mutex_
+  // (the wait sites hold it on both sides of the park, so the counter is
+  // exact whenever NotifyAll reads it).
+  uint32_t parked_waiters_ = 0;
+  // Scopes a cond_ wait for the parked-waiter count.
+  struct ScopedParked {
+    explicit ScopedParked(PosixConditionBase& c) : c_(c) {
+      ++c_.parked_waiters_;
+    }
+    ~ScopedParked() { --c_.parked_waiters_; }
+    PosixConditionBase& c_;
+  };
   std::condition_variable cond_;
   std::mutex mutex_;
 };

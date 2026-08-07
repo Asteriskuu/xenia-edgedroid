@@ -48,6 +48,8 @@ class CooperativeWaiterFifo {
   // True when |thread| is first in line (or no one is queued).
   bool MayAcquire(XThread* thread);
   bool HasWaiters();
+  // First in line, or null with no waiters queued.
+  XThread* Front();
 
  private:
   std::mutex lock_;
@@ -277,6 +279,10 @@ class XObject {
   // front. Call the Enter/Leave wrappers below rather than these directly.
   virtual void CooperativeWaitBegin(XThread* thread) {}
   virtual void CooperativeWaitEnd(XThread* thread) {}
+  // Permit-gated types return their FIFO front - the only waiter that can act
+  // on a signal - so the scheduler wakes just that thread's CPU. Null means
+  // any watcher may proceed (events) and every watcher's CPU is woken.
+  virtual XThread* CooperativeWakeTarget() { return nullptr; }
   virtual bool CooperativeMayAcquire(XThread* thread) { return true; }
 
  public:

@@ -343,6 +343,11 @@ bool CooperativeWaiterFifo::HasWaiters() {
   return !waiters_.empty();
 }
 
+XThread* CooperativeWaiterFifo::Front() {
+  std::lock_guard<std::mutex> lock(lock_);
+  return waiters_.empty() ? nullptr : waiters_.front();
+}
+
 namespace {
 // Signal ring. Small, lock-guarded and write-mostly: it is touched once per
 // cooperative wake, which is rare next to the poll traffic it helps explain.
@@ -387,7 +392,12 @@ std::vector<XObject::SignalRecord> XObject::RecentCooperativeSignals(
 void XObject::WakeCooperativeWaiters() {
   cooperative_signal_epoch_.fetch_add(1);
   RecordCooperativeSignal(this);
-  kernel_state()->guest_scheduler()->WakeAll();
+  // Wake only the CPUs that can act on this signal instead of every CPU with
+  // any blocked thread - broadcast wakes on every semaphore release were most
+  // of some titles' kernel time (Eternal Sonata: 69% of CPU in futex wakes
+  // and the resulting empty scheduling passes).
+  kernel_state()->guest_scheduler()->WakeForSignal(this,
+                                                   CooperativeWakeTarget());
 }
 
 void XObject::EnterCooperativeWait(XThread* thread) {
