@@ -1004,6 +1004,7 @@ void VulkanRenderTargetCache::ClearCache() {
 }
 
 void VulkanRenderTargetCache::CompletedSubmissionUpdated() {
+  SCOPE_profile_cpu_f("gpu");
   if (transfer_vertex_buffer_pool_) {
     transfer_vertex_buffer_pool_->Reclaim(
         command_processor_.GetCompletedSubmission());
@@ -1943,6 +1944,7 @@ uint32_t VulkanRenderTargetCache::GetMaxRenderTargetHeight() const {
 
 RenderTargetCache::RenderTarget* VulkanRenderTargetCache::CreateRenderTarget(
     RenderTargetKey key) {
+  SCOPE_profile_cpu_f("gpu");
   const ui::vulkan::VulkanDevice* const vulkan_device =
       command_processor_.GetVulkanDevice();
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
@@ -3803,6 +3805,7 @@ bool VulkanRenderTargetCache::DirectResolveRenderTargets(
     uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
     uint32_t dump_pitch, VulkanSharedMemory& shared_memory,
     VulkanTextureCache& texture_cache) {
+  SCOPE_profile_cpu_f("gpu");
   assert_true(GetPath() == Path::kHostRenderTargets);
 
   // The whole buffer bound persistently is what lets copy_dest_base stay an
@@ -4036,6 +4039,7 @@ void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,
                                                 uint32_t dump_rows,
                                                 uint32_t dump_pitch,
                                                 bool native_layout) {
+  SCOPE_profile_cpu_f("gpu");
   assert_true(GetPath() == Path::kHostRenderTargets);
 
   GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,

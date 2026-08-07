@@ -15,6 +15,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/profiling.h"
 #include "xenia/gpu/vulkan/deferred_command_buffer.h"
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
@@ -434,6 +435,7 @@ void VulkanSharedMemory::ClearCache() {
 }
 
 void VulkanSharedMemory::CompletedSubmissionUpdated() {
+  SCOPE_profile_cpu_f("gpu");
   upload_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
 }
 
@@ -611,6 +613,7 @@ bool VulkanSharedMemory::AllocateSparseHostGpuMemoryRange(
 bool VulkanSharedMemory::UploadRanges(
     const std::pair<uint32_t, uint32_t>* upload_page_ranges,
     uint32_t num_upload_ranges) {
+  SCOPE_profile_cpu_f("gpu");
   if (!num_upload_ranges) {
     return true;
   }

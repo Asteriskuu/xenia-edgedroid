@@ -2760,6 +2760,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
 }
 
 void VulkanCommandProcessor::EndRenderPass() {
+  SCOPE_profile_cpu_f("gpu");
   assert_true(submission_open_);
   if (!in_render_pass_) {
     return;

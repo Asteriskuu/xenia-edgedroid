@@ -11,6 +11,7 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
 
@@ -90,6 +91,7 @@ void MetalSharedMemory::ClearCache() { SharedMemory::ClearCache(); }
 bool MetalSharedMemory::UploadRanges(
     const std::pair<uint32_t, uint32_t>* upload_page_ranges,
     uint32_t num_upload_ranges) {
+  SCOPE_profile_cpu_f("gpu");
   // Copy modified ranges from Xbox memory to Metal buffer when not using
   // bytes-no-copy shared memory.
   if (!buffer_ || num_upload_ranges == 0) {

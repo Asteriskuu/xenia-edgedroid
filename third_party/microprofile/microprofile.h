@@ -2821,6 +2821,38 @@ void MicroProfileDumpCsv(MicroProfileWriteCallback CB, void* Handle, int nMaxFra
 			MicroProfilePrintf(CB, Handle, "\"%s\",%f,%lld,%lld\n",S.MetaCounters[j].pName, S.MetaCounters[j].nSumAggregate / (float)nAggregateFrames, (long long)S.MetaCounters[j].nSumAggregateMax, (long long)S.MetaCounters[j].nSumAggregate);
 		}
 	}
+
+	MicroProfilePrintf(CB, Handle, "\n\n");
+	MicroProfilePrintf(CB, Handle, "Counters\n");//only single frame snapshot
+	MicroProfilePrintf(CB, Handle, "name,value,formatted\n");
+	for(uint32_t i = 0; i < S.nNumCounters; ++i)
+	{
+		//names are stored per level, so walk to the root to spell the full path
+		int nStack[16];
+		int nDepth = 0;
+		for(int nNode = (int)i; nNode >= 0 && nDepth < 16; nNode = S.CounterInfo[nNode].nParent)
+		{
+			nStack[nDepth++] = nNode;
+		}
+		char Path[512];
+		uint32_t nPathLen = 0;
+		while(nDepth-- > 0)
+		{
+			const char* pName = S.CounterInfo[nStack[nDepth]].pName;
+			uint32_t nLen = (uint32_t)strlen(pName);
+			if(nPathLen + nLen + 2 >= sizeof(Path))
+				break;
+			if(nPathLen)
+				Path[nPathLen++] = '/';
+			memcpy(Path + nPathLen, pName, nLen);
+			nPathLen += nLen;
+		}
+		Path[nPathLen] = '\0';
+		int64_t nCounter = S.Counters[i].load();
+		char Formatted[64];
+		MicroProfileFormatCounter(S.CounterInfo[i].eFormat, nCounter, Formatted, sizeof(Formatted)-1);
+		MicroProfilePrintf(CB, Handle, "\"%s\",%lld,\"%s\"\n", Path, (long long)nCounter, Formatted);
+	}
 }
 
 #if MICROPROFILE_EMBED_HTML

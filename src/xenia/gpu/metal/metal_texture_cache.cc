@@ -2027,6 +2027,7 @@ void MetalTextureCache::ClearScaledResolveBuffers() {
 
 void MetalTextureCache::CompletedSubmissionUpdated(
     uint64_t completed_submission_index) {
+  SCOPE_profile_cpu_f("gpu");
   TextureCache::CompletedSubmissionUpdated(completed_submission_index);
   if (scaled_resolve_retired_buffers_.empty()) {
     return;
@@ -2531,6 +2532,7 @@ MTL::Texture* MetalTextureCache::GetTextureForBinding(
 MTL::Texture* MetalTextureCache::RequestSwapTexture(
     uint32_t& width_scaled_out, uint32_t& height_scaled_out,
     xenos::TextureFormat& format_out) {
+  SCOPE_profile_cpu_f("gpu");
   static bool logged_valid = false;
   static bool logged_invalid = false;
   enum class SwapFailure : uint8_t {
@@ -2737,6 +2739,7 @@ static MetalTextureCache::SamplerParameters BuildSamplerParametersFromFetch(
 
 MetalTextureCache::SamplerParameters MetalTextureCache::GetSamplerParameters(
     const SpirvShader::SamplerBinding& binding) const {
+  SCOPE_profile_cpu_f("gpu");
   return BuildSamplerParametersFromFetch(
       register_file(), binding.fetch_constant, binding.mag_filter,
       binding.min_filter, binding.mip_filter, binding.aniso_filter);

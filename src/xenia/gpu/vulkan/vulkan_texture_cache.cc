@@ -503,6 +503,7 @@ VulkanTextureCache::~VulkanTextureCache() {
 }
 
 void VulkanTextureCache::BeginSubmission(uint64_t new_submission_index) {
+  SCOPE_profile_cpu_f("gpu");
   TextureCache::BeginSubmission(new_submission_index);
 
   if (!null_images_cleared_) {
@@ -656,6 +657,7 @@ VkImageView VulkanTextureCache::GetActiveBindingOrNullImageView(
 
 VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
     const VulkanShader::SamplerBinding& binding) const {
+  SCOPE_profile_cpu_f("gpu");
   const auto& regs = register_file();
   xenos::xe_gpu_texture_fetch_t fetch =
       regs.GetTextureFetch(binding.fetch_constant);
@@ -971,6 +973,7 @@ uint64_t VulkanTextureCache::GetSubmissionToAwaitOnSamplerOverflow(
 VkImageView VulkanTextureCache::RequestSwapTexture(
     uint32_t& width_scaled_out, uint32_t& height_scaled_out,
     xenos::TextureFormat& format_out) {
+  SCOPE_profile_cpu_f("gpu");
   const auto& regs = register_file();
   xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(0);
   TextureKey key;
@@ -1085,6 +1088,7 @@ uint32_t VulkanTextureCache::GetMaxHostTextureDepthOrArraySize(
 
 std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
     TextureKey key) {
+  SCOPE_profile_cpu_f("gpu");
   VkFormat formats[] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
   const HostFormatPair& host_format = GetHostFormatPair(key);
   if (host_format.format_signed.format == VK_FORMAT_UNDEFINED) {
@@ -1187,6 +1191,7 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(
 bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                                                bool load_base,
                                                                bool load_mips) {
+  SCOPE_profile_cpu_f("gpu");
   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
   TextureKey texture_key = vulkan_texture.key();
 

@@ -25,6 +25,7 @@
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/profiling.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_heap_pool.h"
@@ -1101,6 +1102,7 @@ void MetalRenderTargetCache::ClearCache() {
 }
 
 void MetalRenderTargetCache::BeginFrame() {
+  SCOPE_profile_cpu_f("gpu");
   (void)FlushPendingDrawPassTransfers();
 
   ++frame_id_;
@@ -1126,6 +1128,7 @@ void MetalRenderTargetCache::BeginFrame() {
 bool MetalRenderTargetCache::Update(
     bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask, const Shader& vertex_shader) {
+  SCOPE_profile_cpu_f("gpu");
   // Reaching another update means the command processor never got to encode
   // the queued transfers into a pass. Their ownership is already transferred,
   // so run them standalone before the base update reshuffles ownership again.
@@ -1741,6 +1744,7 @@ bool MetalRenderTargetCache::IsGammaFormatHostStorageSeparate() const {
 
 RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
     RenderTargetKey key) {
+  SCOPE_profile_cpu_f("gpu");
   // Calculate dimensions
   uint32_t width = key.GetWidth();
   uint32_t height =
@@ -2730,6 +2734,7 @@ bool MetalRenderTargetCache::DirectResolveRenderTargets(
     const draw_util::ResolveCopyShaderConstants& copy_shader_constants,
     uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
     uint32_t dump_pitch, MTL::CommandBuffer* command_buffer) {
+  SCOPE_profile_cpu_f("gpu");
   auto* shared = command_processor_.shared_memory();
   MTL::Buffer* dest_buffer = shared ? shared->GetBuffer() : nullptr;
   MTL::CommandQueue* queue = command_processor_.GetMetalCommandQueue();
@@ -2989,6 +2994,7 @@ bool MetalRenderTargetCache::DirectResolveRenderTargets(
 void MetalRenderTargetCache::DumpRenderTargets(
     uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
     uint32_t dump_pitch, MTL::CommandBuffer* command_buffer) {
+  SCOPE_profile_cpu_f("gpu");
   std::vector<ResolveCopyDumpRectangle> rectangles;
   GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows,
                                  dump_pitch, rectangles);
@@ -3480,6 +3486,7 @@ MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateEdramLoadPipeline(
 bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
                                      uint32_t& written_length,
                                      MTL::CommandBuffer* command_buffer) {
+  SCOPE_profile_cpu_f("gpu");
   // Resolving reads the render targets, so anything still queued for a draw
   // pass has to have been applied to them first.
   if (!FlushPendingDrawPassTransfers()) {
@@ -3888,6 +3895,7 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
     MTL::RenderCommandEncoder* active_render_encoder,
     MTL::RenderPassDescriptor* active_render_pass_descriptor,
     DrawPassTransferEncoderMutationMask* mutations_out) {
+  SCOPE_profile_cpu_f("gpu");
   if (mutations_out) {
     *mutations_out = kDrawPassTransferEncoderMutationNone;
   }

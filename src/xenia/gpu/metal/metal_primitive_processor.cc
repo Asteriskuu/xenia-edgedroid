@@ -16,6 +16,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
 
@@ -113,14 +114,17 @@ void MetalPrimitiveProcessor::Shutdown(bool from_destructor) {
 }
 
 void MetalPrimitiveProcessor::CompletedSubmissionUpdated() {
+  SCOPE_profile_cpu_f("gpu");
   // Nothing to do for Metal
 }
 
 void MetalPrimitiveProcessor::BeginSubmission() {
+  SCOPE_profile_cpu_f("gpu");
   // Nothing to do for Metal
 }
 
 void MetalPrimitiveProcessor::BeginFrame() {
+  SCOPE_profile_cpu_f("gpu");
   converted_index_buffers_.clear();
 
   // Clean up old frame index buffers
@@ -143,6 +147,7 @@ void MetalPrimitiveProcessor::BeginFrame() {
 }
 
 void MetalPrimitiveProcessor::EndFrame() {
+  SCOPE_profile_cpu_f("gpu");
   ClearPerFrameCache();
   converted_index_buffers_.clear();
 }
@@ -194,6 +199,7 @@ bool MetalPrimitiveProcessor::InitializeBuiltinIndexBuffer(
 void* MetalPrimitiveProcessor::RequestHostConvertedIndexBufferForCurrentFrame(
     xenos::IndexFormat format, uint32_t index_count, bool coalign_for_simd,
     uint32_t coalignment_original_address, size_t& backend_handle_out) {
+  SCOPE_profile_cpu_f("gpu");
   // Calculate required size
   size_t element_size = format == xenos::IndexFormat::kInt16 ? sizeof(uint16_t)
                                                              : sizeof(uint32_t);

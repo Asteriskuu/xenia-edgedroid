@@ -2569,6 +2569,7 @@ void MetalCommandProcessor::ComputeDrawViewportInfo(
 
 void MetalCommandProcessor::ApplyViewportAndScissor(
     const RegisterFile& regs, const draw_util::ViewportInfo& viewport_info) {
+  SCOPE_profile_cpu_f("gpu");
   uint32_t draw_resolution_scale_x =
       texture_cache_ ? texture_cache_->draw_resolution_scale_x() : 1;
   uint32_t draw_resolution_scale_y =
@@ -4004,6 +4005,7 @@ DxilShader::DxilTranslation* MetalCommandProcessor::GetOrCreateDxilTranslation(
 MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateDxilPipelineState(
     DxilShader::DxilTranslation* vertex_translation,
     DxilShader::DxilTranslation* pixel_translation, const RegisterFile& regs) {
+  SCOPE_profile_cpu_f("gpu");
   MslPipelineCompileRequest request = {};
   uint64_t key = PopulatePipelineCompileRequest(regs, vertex_translation,
                                                 pixel_translation, request);
@@ -5547,6 +5549,7 @@ void MetalCommandProcessor::EndCommandBuffer() {
 
 void MetalCommandProcessor::ApplyDepthStencilState(
     bool primitive_polygonal, reg::RB_DEPTHCONTROL normalized_depth_control) {
+  SCOPE_profile_cpu_f("gpu");
   if (!current_render_encoder_ || !device_) {
     return;
   }
@@ -5682,6 +5685,7 @@ void MetalCommandProcessor::ApplyDepthStencilState(
 }
 
 void MetalCommandProcessor::ApplyRasterizerState(bool primitive_polygonal) {
+  SCOPE_profile_cpu_f("gpu");
   if (!current_render_encoder_ || !render_target_cache_) {
     return;
   }
@@ -6401,6 +6405,7 @@ MTL::RenderPipelineState* MetalCommandProcessor::GetOrCreateMslPipelineState(
     MslShader::MslTranslation* vertex_translation,
     MslShader::MslTranslation* pixel_translation, const RegisterFile& regs,
     MslPipelineCompileStatus* compile_status_out) {
+  SCOPE_profile_cpu_f("gpu");
   if (compile_status_out) {
     *compile_status_out = MslPipelineCompileStatus::kFailed;
   }
