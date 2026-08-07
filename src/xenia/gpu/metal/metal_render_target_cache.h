@@ -18,6 +18,7 @@
 #include <unordered_set>
 
 #include "xenia/gpu/edram_dump_shader.h"
+#include "xenia/gpu/edram_transfer_shader.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/trace_writer.h"
@@ -299,85 +300,6 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
 
   // Transfer shaders (host RT ownership transfers) - modeled after D3D12.
 
-  // TransferMode list mirrors D3D12RenderTargetCache::TransferMode so logs and
-  // structure stay in sync, even if many modes are not implemented yet.
-  enum class TransferMode {
-    kColorToColor,
-    kColorToDepth,
-    kDepthToColor,
-    kDepthToDepth,
-    kColorToStencilBit,
-    kDepthToStencilBit,
-    kColorAndHostDepthToDepth,
-    kDepthAndHostDepthToDepth,
-  };
-
-  struct TransferShaderKey {
-    TransferMode mode;
-    xenos::MsaaSamples source_msaa_samples;
-    xenos::MsaaSamples dest_msaa_samples;
-    xenos::MsaaSamples host_depth_source_msaa_samples;
-    uint32_t source_resource_format;
-    uint32_t dest_resource_format;
-    uint32_t dest_sample_id_from_sample;
-    uint32_t host_depth_source_is_copy;
-
-    bool operator==(const TransferShaderKey& other) const {
-      return mode == other.mode &&
-             source_msaa_samples == other.source_msaa_samples &&
-             dest_msaa_samples == other.dest_msaa_samples &&
-             host_depth_source_msaa_samples ==
-                 other.host_depth_source_msaa_samples &&
-             source_resource_format == other.source_resource_format &&
-             dest_resource_format == other.dest_resource_format &&
-             dest_sample_id_from_sample == other.dest_sample_id_from_sample &&
-             host_depth_source_is_copy == other.host_depth_source_is_copy;
-    }
-    bool operator!=(const TransferShaderKey& other) const {
-      return !(*this == other);
-    }
-    bool operator<(const TransferShaderKey& other) const {
-      if (mode != other.mode) {
-        return mode < other.mode;
-      }
-      if (source_msaa_samples != other.source_msaa_samples) {
-        return source_msaa_samples < other.source_msaa_samples;
-      }
-      if (dest_msaa_samples != other.dest_msaa_samples) {
-        return dest_msaa_samples < other.dest_msaa_samples;
-      }
-      if (host_depth_source_msaa_samples !=
-          other.host_depth_source_msaa_samples) {
-        return host_depth_source_msaa_samples <
-               other.host_depth_source_msaa_samples;
-      }
-      if (source_resource_format != other.source_resource_format) {
-        return source_resource_format < other.source_resource_format;
-      }
-      if (dest_resource_format != other.dest_resource_format) {
-        return dest_resource_format < other.dest_resource_format;
-      }
-      if (dest_sample_id_from_sample != other.dest_sample_id_from_sample) {
-        return dest_sample_id_from_sample < other.dest_sample_id_from_sample;
-      }
-      return host_depth_source_is_copy < other.host_depth_source_is_copy;
-    }
-
-    struct Hasher {
-      size_t operator()(const TransferShaderKey& key) const {
-        size_t h = size_t(key.mode);
-        h ^= (size_t(key.source_msaa_samples) << 4);
-        h ^= (size_t(key.dest_msaa_samples) << 8);
-        h ^= (size_t(key.host_depth_source_msaa_samples) << 12);
-        h ^= (size_t(key.source_resource_format) << 16);
-        h ^= (size_t(key.dest_resource_format) << 24);
-        h ^= (size_t(key.dest_sample_id_from_sample) << 28);
-        h ^= (size_t(key.host_depth_source_is_copy) << 29);
-        return h ^ (h >> 16);
-      }
-    };
-  };
-
   using TransferColorAttachmentFormats =
       std::array<MTL::PixelFormat, xenos::kMaxColorRenderTargets>;
 
@@ -385,7 +307,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   // against, so the whole set is part of its identity. Color attachments other
   // than the destination get an empty write mask.
   struct TransferPipelineKey {
-    TransferShaderKey shader_key;
+    EdramTransferShaderKey shader_key;
     uint32_t color_attachment_index = 0;
     uint32_t native_stencil_output = 0;
     TransferColorAttachmentFormats color_attachment_formats = {};
@@ -399,7 +321,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
         auto combine = [](size_t seed, size_t value) {
           return seed ^ (value + 0x9E3779B9 + (seed << 6) + (seed >> 2));
         };
-        size_t h = TransferShaderKey::Hasher()(key.shader_key);
+        size_t h = EdramTransferShaderKey::Hasher()(key.shader_key);
         h = combine(h, key.color_attachment_index);
         h = combine(h, key.native_stencil_output);
         h = combine(h, size_t(key.depth_attachment_format));
@@ -457,9 +379,9 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
 
   struct TransferInvocation {
     Transfer transfer;
-    TransferShaderKey shader_key;
+    EdramTransferShaderKey shader_key;
     TransferInvocation(const Transfer& transfer,
-                       const TransferShaderKey& shader_key)
+                       const EdramTransferShaderKey& shader_key)
         : transfer(transfer), shader_key(shader_key) {}
     bool operator<(const TransferInvocation& other) const {
       if (shader_key != other.shader_key) {
@@ -487,23 +409,27 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   std::unordered_map<TransferPipelineKey, MTL::RenderPipelineState*,
                      TransferPipelineKey::Hasher>
       transfer_pipelines_;
-  std::unordered_map<TransferPipelineKey, MTL::RenderPipelineState*,
-                     TransferPipelineKey::Hasher>
-      transfer_tile_pipelines_;
+  // The fragment half comes from the shared SPIR-V emitter, one per shader key
+  // through spirv_to_dxil and the Metal Shader Converter. A key that failed is
+  // kept as null so it is not retried on every transfer.
+  std::unordered_map<EdramTransferShaderKey, MTL::Function*,
+                     EdramTransferShaderKey::Hasher>
+      transfer_fragment_functions_;
   std::vector<TransferInvocation> transfer_invocations_;
   MTL::Library* transfer_library_ = nullptr;
+  MTL::Function* transfer_rect_vertex_function_ = nullptr;
   std::unordered_map<TransferClearPipelineKey, MTL::RenderPipelineState*,
                      TransferClearPipelineKey::Hasher>
       transfer_clear_pipelines_;
   static constexpr uint32_t kTransferInstanceBufferCount = 3;
   std::array<MTL::Buffer*, kTransferInstanceBufferCount>
-      transfer_tile_instance_buffers_ = {};
+      transfer_instance_buffers_ = {};
   std::array<size_t, kTransferInstanceBufferCount>
-      transfer_tile_instance_buffer_sizes_ = {};
+      transfer_instance_buffer_sizes_ = {};
   std::array<std::vector<MTL::Buffer*>, kTransferInstanceBufferCount>
-      transfer_tile_instance_retired_buffers_ = {};
-  uint64_t transfer_tile_instance_buffer_frame_id_ = 0;
-  size_t transfer_tile_instance_buffer_offset_ = 0;
+      transfer_instance_retired_buffers_ = {};
+  uint64_t transfer_instance_buffer_frame_id_ = 0;
+  size_t transfer_instance_buffer_offset_ = 0;
   MTL::DepthStencilState* transfer_depth_state_ = nullptr;
   MTL::DepthStencilState* transfer_depth_stencil_output_state_ = nullptr;
   MTL::DepthStencilState* transfer_depth_state_none_ = nullptr;
@@ -591,10 +517,15 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   // A null color_attachment_formats builds for a pass whose only color
   // attachment is the destination, at color_attachment_index; an invalid
   // depth/stencil format on a depth destination means the destination's own.
+  // The fragment shader comes from the shared SPIR-V emitter; the vertex half
+  // only places the rectangle, so it is one function for every key.
+  MTL::Function* GetOrCreateTransferFragmentFunction(
+      EdramTransferShaderKey key);
+  MTL::Function* GetTransferRectVertexFunction();
   MTL::RenderPipelineState* GetOrCreateTransferPipelines(
-      const TransferShaderKey& key, MTL::PixelFormat dest_format,
-      bool dest_is_uint, bool tile_instanced,
-      bool native_stencil_output = false, uint32_t color_attachment_index = 0,
+      const EdramTransferShaderKey& key, MTL::PixelFormat dest_format,
+      bool dest_is_uint, bool native_stencil_output = false,
+      uint32_t color_attachment_index = 0,
       const TransferColorAttachmentFormats* color_attachment_formats = nullptr,
       MTL::PixelFormat depth_attachment_format = MTL::PixelFormatInvalid,
       MTL::PixelFormat stencil_attachment_format = MTL::PixelFormatInvalid);
@@ -649,11 +580,11 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
       MTL::RenderPassDescriptor* active_render_pass_descriptor = nullptr,
       DrawPassTransferEncoderMutationMask* mutations_out = nullptr);
 
-  TransferShaderKey GetTransferShaderKey(
+  EdramTransferShaderKey GetTransferShaderKey(
       RenderTargetKey source_key, RenderTargetKey dest_key,
       const RenderTargetKey* host_depth_source_key,
       bool host_depth_source_is_copy, bool stencil_bit,
-      bool dest_sample_id_from_sample_default) const;
+      uint32_t dest_color_rt_index) const;
   bool BuildTransferRectanglePlans(
       RenderTargetKey dest_key, const std::vector<Transfer>& transfers,
       const Transfer::Rectangle* cutout, bool require_all_rectangles,

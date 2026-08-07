@@ -57,6 +57,23 @@ enum class MetalInternalComputeRootParameter : uint32_t {
   kCount,
 };
 
+// Root parameters of the render target cache's ownership transfer fragment
+// shaders. The emitter numbers its descriptor sets densely per mode, so a
+// second source set only exists for the modes that also read a host depth
+// source, and Mesa gives each set the space of the same number.
+enum class MetalInternalGraphicsRootParameter : uint32_t {
+  kSourceTable0,  // SRV table, space0
+  kSourceTable1,  // SRV table, space1
+  // UAV u0, space0 - the EDRAM buffer, which the host depth copy modes read
+  // the previous owner's depth back out of instead of a texture. Declared with
+  // the same storage buffer form the dump shader's EDRAM buffer uses, so Mesa
+  // gives it a UAV rather than a table entry.
+  kHostDepthBufferUav,
+  kPushConstants,  // CBV b1, space31
+
+  kCount,
+};
+
 enum class MetalShaderStage {
   kVertex,
   kHull,
@@ -142,10 +159,24 @@ class MetalShaderConverter {
     return internal_compute_root_parameter_offsets_[uint32_t(parameter)];
   }
 
+  // Converts an internal graphics shader against the internal graphics root
+  // signature rather than the guest one.
+  MetalShaderConversionResult ConvertInternalGraphics(
+      MetalShaderStage stage, const std::vector<uint8_t>& dxil) const;
+
+  uint32_t internal_graphics_argument_buffer_size() const {
+    return internal_graphics_argument_buffer_size_;
+  }
+  uint32_t internal_graphics_root_parameter_offset(
+      MetalInternalGraphicsRootParameter parameter) const {
+    return internal_graphics_root_parameter_offsets_[uint32_t(parameter)];
+  }
+
  private:
   // Builds the Mesa-layout root signature. Returns null on failure.
   IRRootSignature* CreateRootSignature() const;
   IRRootSignature* CreateInternalComputeRootSignature() const;
+  IRRootSignature* CreateInternalGraphicsRootSignature() const;
   MetalShaderConversionResult ConvertWithRootSignature(
       MetalShaderStage stage, const std::vector<uint8_t>& dxil,
       IRRootSignature* root_signature, uint32_t compatibility_flags,
@@ -155,6 +186,7 @@ class MetalShaderConverter {
   // shaders were compiled against.
   bool QueryRootParameterOffsets();
   bool QueryInternalComputeRootParameterOffsets();
+  bool QueryInternalGraphicsRootParameterOffsets();
 
   bool is_available_ = false;
   IRRootSignature* root_signature_ = nullptr;
@@ -164,6 +196,10 @@ class MetalShaderConverter {
   uint32_t internal_compute_argument_buffer_size_ = 0;
   uint32_t internal_compute_root_parameter_offsets_[uint32_t(
       MetalInternalComputeRootParameter::kCount)] = {};
+  IRRootSignature* internal_graphics_root_signature_ = nullptr;
+  uint32_t internal_graphics_argument_buffer_size_ = 0;
+  uint32_t internal_graphics_root_parameter_offsets_[uint32_t(
+      MetalInternalGraphicsRootParameter::kCount)] = {};
 };
 
 }  // namespace metal

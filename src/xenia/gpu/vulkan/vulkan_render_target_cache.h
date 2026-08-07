@@ -529,31 +529,6 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     }
   };
 
-  union TransferAddressConstant {
-    uint32_t constant;
-    struct {
-      // All in tiles.
-      uint32_t dest_pitch : xenos::kEdramPitchTilesBits;
-      uint32_t source_pitch : xenos::kEdramPitchTilesBits;
-      // Destination base in tiles minus source base in tiles (not vice versa
-      // because this is a transform of the coordinate system, not addresses
-      // themselves).
-      // + 1 bit because this is a signed difference between two EDRAM bases.
-      // 0 for host_depth_source_is_copy (ignored in this case anyway as
-      // destination == source anyway).
-      int32_t source_to_dest : xenos::kEdramBaseTilesBits + 1;
-    };
-    TransferAddressConstant() : constant(0) {
-      static_assert_size(*this, sizeof(constant));
-    }
-    bool operator==(const TransferAddressConstant& other_constant) const {
-      return constant == other_constant.constant;
-    }
-    bool operator!=(const TransferAddressConstant& other_constant) const {
-      return !(*this == other_constant);
-    }
-  };
-
   struct TransferInvocation {
     Transfer transfer;
     EdramTransferShaderKey shader_key;

@@ -3025,8 +3025,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       VK_NULL_HANDLE;
   VkDescriptorSet last_descriptor_set_depth_stencil_textures = VK_NULL_HANDLE;
   VkDescriptorSet last_descriptor_set_color_texture = VK_NULL_HANDLE;
-  TransferAddressConstant last_host_depth_address_constant;
-  TransferAddressConstant last_address_constant;
+  EdramTransferAddressConstant last_host_depth_address_constant;
+  EdramTransferAddressConstant last_address_constant;
 
   for (uint32_t i = 0; i < render_target_count; ++i) {
     RenderTarget* dest_rt = render_targets[i];
@@ -3504,7 +3504,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
           assert_not_null(host_depth_source_vulkan_rt);
           RenderTargetKey host_depth_source_rt_key =
               host_depth_source_vulkan_rt->key();
-          TransferAddressConstant host_depth_address_constant;
+          EdramTransferAddressConstant host_depth_address_constant;
           host_depth_address_constant.dest_pitch = dest_pitch_tiles;
           host_depth_address_constant.source_pitch =
               host_depth_source_rt_key.GetPitchTiles();
@@ -3520,7 +3520,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
         if (transfer_pipeline_layout_info.used_push_constant_dwords &
             kEdramTransferUsedPushConstantDwordAddressBit) {
           RenderTargetKey source_rt_key = source_vulkan_rt.key();
-          TransferAddressConstant address_constant;
+          EdramTransferAddressConstant address_constant;
           address_constant.dest_pitch = dest_pitch_tiles;
           address_constant.source_pitch = source_rt_key.GetPitchTiles();
           address_constant.source_to_dest = int32_t(dest_rt_key.base_tiles) -

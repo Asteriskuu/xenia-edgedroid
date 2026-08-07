@@ -137,6 +137,31 @@ struct EdramTransferModeInfo {
 extern const EdramTransferModeInfo
     kEdramTransferModes[size_t(EdramTransferMode::kCount)];
 
+// Whether the previous owner is read as a colour texture rather than as a
+// depth / stencil pair, and whether a host depth source is read at all - both
+// implied by which descriptor sets the mode's layout declares.
+inline bool EdramTransferSourceIsColor(EdramTransferMode mode) {
+  return (kEdramTransferPipelineLayoutInfos
+              [size_t(kEdramTransferModes[size_t(mode)].pipeline_layout)]
+                  .used_descriptor_sets &
+          kEdramTransferUsedDescriptorSetColorTextureBit) != 0;
+}
+// Whether the host depth source is read back out of the EDRAM buffer rather
+// than from a texture, which is what the copy modes exist for.
+inline bool EdramTransferHostDepthIsCopy(EdramTransferMode mode) {
+  return (kEdramTransferPipelineLayoutInfos
+              [size_t(kEdramTransferModes[size_t(mode)].pipeline_layout)]
+                  .used_descriptor_sets &
+          kEdramTransferUsedDescriptorSetHostDepthBufferBit) != 0;
+}
+inline bool EdramTransferUsesHostDepth(EdramTransferMode mode) {
+  return (kEdramTransferPipelineLayoutInfos
+              [size_t(kEdramTransferModes[size_t(mode)].pipeline_layout)]
+                  .used_descriptor_sets &
+          (kEdramTransferUsedDescriptorSetHostDepthBufferBit |
+           kEdramTransferUsedDescriptorSetHostDepthStencilTexturesBit)) != 0;
+}
+
 union EdramTransferShaderKey {
   uint32_t key;
   struct {
@@ -182,6 +207,34 @@ union EdramTransferShaderKey {
   }
 };
 
+// What a kEdramTransferUsedPushConstantDwordAddress or
+// kEdramTransferUsedPushConstantDwordHostDepthAddress dword holds. The used
+// dwords are packed densely, in the order the enum declares them.
+union EdramTransferAddressConstant {
+  uint32_t constant;
+  struct {
+    // All in tiles.
+    uint32_t dest_pitch : xenos::kEdramPitchTilesBits;
+    uint32_t source_pitch : xenos::kEdramPitchTilesBits;
+    // Destination base in tiles minus source base in tiles (not vice versa
+    // because this is a transform of the coordinate system, not addresses
+    // themselves).
+    // + 1 bit because this is a signed difference between two EDRAM bases.
+    // 0 for host_depth_source_is_copy (ignored in this case anyway as
+    // destination == source anyway).
+    int32_t source_to_dest : xenos::kEdramBaseTilesBits + 1;
+  };
+  EdramTransferAddressConstant() : constant(0) {
+    static_assert_size(*this, sizeof(constant));
+  }
+  bool operator==(const EdramTransferAddressConstant& other_constant) const {
+    return constant == other_constant.constant;
+  }
+  bool operator!=(const EdramTransferAddressConstant& other_constant) const {
+    return !(*this == other_constant);
+  }
+};
+
 // What the emitter can't derive from the key: the binding model to declare the
 // resources in, and the host properties the guest layout is resolved against.
 struct EdramTransferShaderOptions {
@@ -223,6 +276,12 @@ struct EdramTransferShaderOptions {
   // From the cvar of the same name: keep the stencil bit passes' discard rather
   // than letting a fully packed value through.
   bool no_discard_stencil = false;
+
+  // Split the tile index by the EDRAM pitch with a float reciprocal and a
+  // correction rather than an integer divide. The pitch is a push constant, so
+  // the divide cannot be strength-reduced, and it costs a fragment each on GPUs
+  // where integer division is slow.
+  bool fast_pitch_divmod = false;
 };
 
 // Returns the SPIR-V words of the transfer fragment shader for one key.

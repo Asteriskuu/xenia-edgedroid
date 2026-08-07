@@ -192,6 +192,9 @@ MetalShaderConverter::~MetalShaderConverter() {
   if (internal_compute_root_signature_) {
     IRRootSignatureDestroy(internal_compute_root_signature_);
   }
+  if (internal_graphics_root_signature_) {
+    IRRootSignatureDestroy(internal_graphics_root_signature_);
+  }
 }
 
 bool MetalShaderConverter::Initialize() {
@@ -215,6 +218,14 @@ bool MetalShaderConverter::Initialize() {
     return false;
   }
   if (!QueryInternalComputeRootParameterOffsets()) {
+    return false;
+  }
+
+  internal_graphics_root_signature_ = CreateInternalGraphicsRootSignature();
+  if (!internal_graphics_root_signature_) {
+    return false;
+  }
+  if (!QueryInternalGraphicsRootParameterOffsets()) {
     return false;
   }
 
@@ -456,6 +467,115 @@ MetalShaderConversionResult MetalShaderConverter::Convert(
     bool tessellation_emulation) const {
   return ConvertWithRootSignature(stage, dxil, root_signature_,
                                   kCompatibilityFlags, tessellation_emulation);
+}
+
+IRRootSignature* MetalShaderConverter::CreateInternalGraphicsRootSignature()
+    const {
+  // Two textures per set: a depth source also binds its stencil view. A shader
+  // that declares fewer, or only the first set, still matches - a table is a
+  // range, not a per-shader declaration.
+  IRDescriptorRange1 ranges[2] = {};
+  IRRootDescriptorTable1 tables[2] = {};
+  IRRootParameter1
+      parameters[uint32_t(MetalInternalGraphicsRootParameter::kCount)] = {};
+
+  // Order must match MetalInternalGraphicsRootParameter - table entries come
+  // back from the reflection without a space or slot to match on.
+  for (uint32_t i = 0; i < 2; ++i) {
+    IRDescriptorRange1& range = ranges[i];
+    range.RangeType = IRDescriptorRangeTypeSRV;
+    range.NumDescriptors = 2;
+    range.BaseShaderRegister = 0;
+    range.RegisterSpace = i;
+    range.Flags = IRDescriptorRangeFlagNone;
+    range.OffsetInDescriptorsFromTableStart = 0;
+
+    IRRootDescriptorTable1& table = tables[i];
+    table.NumDescriptorRanges = 1;
+    table.pDescriptorRanges = &range;
+
+    IRRootParameter1& parameter = parameters[i];
+    parameter.ParameterType = IRRootParameterTypeDescriptorTable;
+    parameter.DescriptorTable = table;
+    parameter.ShaderVisibility = IRShaderVisibilityAll;
+  }
+
+  IRRootParameter1& host_depth_buffer_parameter = parameters[uint32_t(
+      MetalInternalGraphicsRootParameter::kHostDepthBufferUav)];
+  host_depth_buffer_parameter.ParameterType = IRRootParameterTypeUAV;
+  host_depth_buffer_parameter.Descriptor.ShaderRegister = 0;
+  host_depth_buffer_parameter.Descriptor.RegisterSpace = 0;
+  host_depth_buffer_parameter.Descriptor.Flags = IRRootDescriptorFlagNone;
+  host_depth_buffer_parameter.ShaderVisibility = IRShaderVisibilityAll;
+
+  IRRootParameter1& push_constant_parameter =
+      parameters[uint32_t(MetalInternalGraphicsRootParameter::kPushConstants)];
+  push_constant_parameter.ParameterType = IRRootParameterTypeCBV;
+  push_constant_parameter.Descriptor.ShaderRegister =
+      kSlotInternalComputePushConstants;
+  push_constant_parameter.Descriptor.RegisterSpace =
+      kSpaceInternalComputePushConstants;
+  push_constant_parameter.Descriptor.Flags = IRRootDescriptorFlagNone;
+  push_constant_parameter.ShaderVisibility = IRShaderVisibilityAll;
+
+  IRRootSignatureDescriptor1 descriptor = {};
+  descriptor.NumParameters =
+      uint32_t(MetalInternalGraphicsRootParameter::kCount);
+  descriptor.pParameters = parameters;
+  descriptor.NumStaticSamplers = 0;
+  descriptor.pStaticSamplers = nullptr;
+  descriptor.Flags = IRRootSignatureFlagNone;
+
+  IRVersionedRootSignatureDescriptor versioned = {};
+  versioned.version = IRRootSignatureVersion_1_1;
+  versioned.desc_1_1 = descriptor;
+
+  IRError* error = nullptr;
+  IRRootSignature* root_signature =
+      IRRootSignatureCreateFromDescriptor(&versioned, &error);
+  if (error) {
+    const char* message = static_cast<const char*>(IRErrorGetPayload(error));
+    XELOGE(
+        "MetalShaderConverter: failed to create the internal graphics root "
+        "signature: {}",
+        message ? message : "unknown error");
+    IRErrorDestroy(error);
+    return nullptr;
+  }
+  return root_signature;
+}
+
+bool MetalShaderConverter::QueryInternalGraphicsRootParameterOffsets() {
+  constexpr uint32_t kParameterCount =
+      uint32_t(MetalInternalGraphicsRootParameter::kCount);
+  size_t location_count =
+      IRRootSignatureGetResourceCount(internal_graphics_root_signature_);
+  if (location_count != kParameterCount) {
+    XELOGE(
+        "MetalShaderConverter: the internal graphics root signature reports {} "
+        "top-level resources, expected {}",
+        location_count, kParameterCount);
+    return false;
+  }
+  std::vector<IRResourceLocation> locations(location_count);
+  IRRootSignatureGetResourceLocations(internal_graphics_root_signature_,
+                                      locations.data());
+  for (uint32_t i = 0; i < kParameterCount; ++i) {
+    const IRResourceLocation& location = locations[i];
+    internal_graphics_root_parameter_offsets_[i] = location.topLevelOffset;
+    internal_graphics_argument_buffer_size_ =
+        std::max(internal_graphics_argument_buffer_size_,
+                 uint32_t(location.topLevelOffset + location.sizeBytes));
+  }
+  return true;
+}
+
+MetalShaderConversionResult MetalShaderConverter::ConvertInternalGraphics(
+    MetalShaderStage stage, const std::vector<uint8_t>& dxil) const {
+  // No compatibility flags, for the same reason internal compute uses none.
+  return ConvertWithRootSignature(stage, dxil,
+                                  internal_graphics_root_signature_,
+                                  IRCompatibilityFlagNone, false);
 }
 
 MetalShaderConversionResult MetalShaderConverter::ConvertInternalCompute(

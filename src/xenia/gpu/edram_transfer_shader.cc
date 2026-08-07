@@ -139,6 +139,49 @@ spv::Id GammaByteToLinearMidpoint(SpirvBuilder& builder, spv::Id byte_uint) {
       offset);
 }
 
+// XeFastDivMod from the Metal transfer shaders: the quotient from a float
+// reciprocal, then one correction step in each direction because the estimate
+// can land either side by one. Cheaper than OpUDiv where the divisor is a push
+// constant and integer division is slow.
+void FastDivMod(SpirvBuilder& builder, spv::Id x, spv::Id w,
+                spv::Id& quotient_out, spv::Id& remainder_out) {
+  spv::Id type_uint = builder.makeUintType(32);
+  spv::Id type_bool = builder.makeBoolType();
+  spv::Id type_float = builder.makeFloatType(32);
+  spv::Id w_float = builder.createUnaryOp(spv::OpConvertUToF, type_float, w);
+  spv::Id inv_w = builder.createBinOp(spv::OpFDiv, type_float,
+                                      builder.makeFloatConstant(1.0f), w_float);
+  spv::Id quotient = builder.createUnaryOp(
+      spv::OpConvertFToU, type_uint,
+      builder.createBinOp(
+          spv::OpFMul, type_float,
+          builder.createUnaryOp(spv::OpConvertUToF, type_float, x), inv_w));
+  spv::Id remainder = builder.createBinOp(
+      spv::OpISub, type_uint, x,
+      builder.createBinOp(spv::OpIMul, type_uint, quotient, w));
+  // The estimate was low: the remainder still holds a whole divisor.
+  spv::Id too_low =
+      builder.createBinOp(spv::OpUGreaterThanEqual, type_bool, remainder, w);
+  // The estimate was high: the subtraction wrapped past x.
+  spv::Id too_high =
+      builder.createBinOp(spv::OpUGreaterThan, type_bool, remainder, x);
+  spv::Id one = builder.makeUintConstant(1);
+  quotient_out = builder.createTriOp(
+      spv::OpSelect, type_uint, too_low,
+      builder.createBinOp(spv::OpIAdd, type_uint, quotient, one),
+      builder.createTriOp(
+          spv::OpSelect, type_uint, too_high,
+          builder.createBinOp(spv::OpISub, type_uint, quotient, one),
+          quotient));
+  remainder_out = builder.createTriOp(
+      spv::OpSelect, type_uint, too_low,
+      builder.createBinOp(spv::OpISub, type_uint, remainder, w),
+      builder.createTriOp(
+          spv::OpSelect, type_uint, too_high,
+          builder.createBinOp(spv::OpIAdd, type_uint, remainder, w),
+          remainder));
+}
+
 }  // namespace
 
 std::vector<uint32_t> BuildEdramTransferShaderSpirv(
@@ -990,10 +1033,17 @@ std::vector<uint32_t> BuildEdramTransferShaderSpirv(
       spv::OpBitFieldUExtract, type_uint, address_constant,
       builder.makeUintConstant(xenos::kEdramPitchTilesBits),
       builder.makeUintConstant(xenos::kEdramPitchTilesBits));
-  spv::Id source_tile_index_y = builder.createBinOp(
-      spv::OpUDiv, type_uint, source_tile_index, source_pitch_tiles);
-  spv::Id source_tile_index_x = builder.createBinOp(
-      spv::OpUMod, type_uint, source_tile_index, source_pitch_tiles);
+  spv::Id source_tile_index_y = spv::NoResult;
+  spv::Id source_tile_index_x = spv::NoResult;
+  if (options.fast_pitch_divmod) {
+    FastDivMod(builder, source_tile_index, source_pitch_tiles,
+               source_tile_index_y, source_tile_index_x);
+  } else {
+    source_tile_index_y = builder.createBinOp(
+        spv::OpUDiv, type_uint, source_tile_index, source_pitch_tiles);
+    source_tile_index_x = builder.createBinOp(
+        spv::OpUMod, type_uint, source_tile_index, source_pitch_tiles);
+  }
   // Finally calculate the source texture coordinates.
   spv::Id source_pixel_x_int = builder.createUnaryOp(
       spv::OpBitcast, type_int,
@@ -2087,12 +2137,21 @@ std::vector<uint32_t> BuildEdramTransferShaderSpirv(
                 spv::OpBitFieldUExtract, type_uint, host_depth_address_constant,
                 builder.makeUintConstant(xenos::kEdramPitchTilesBits),
                 builder.makeUintConstant(xenos::kEdramPitchTilesBits));
-            spv::Id host_depth_source_tile_index_y = builder.createBinOp(
-                spv::OpUDiv, type_uint, host_depth_source_tile_index,
-                host_depth_source_pitch_tiles);
-            spv::Id host_depth_source_tile_index_x = builder.createBinOp(
-                spv::OpUMod, type_uint, host_depth_source_tile_index,
-                host_depth_source_pitch_tiles);
+            spv::Id host_depth_source_tile_index_y = spv::NoResult;
+            spv::Id host_depth_source_tile_index_x = spv::NoResult;
+            if (options.fast_pitch_divmod) {
+              FastDivMod(builder, host_depth_source_tile_index,
+                         host_depth_source_pitch_tiles,
+                         host_depth_source_tile_index_y,
+                         host_depth_source_tile_index_x);
+            } else {
+              host_depth_source_tile_index_y = builder.createBinOp(
+                  spv::OpUDiv, type_uint, host_depth_source_tile_index,
+                  host_depth_source_pitch_tiles);
+              host_depth_source_tile_index_x = builder.createBinOp(
+                  spv::OpUMod, type_uint, host_depth_source_tile_index,
+                  host_depth_source_pitch_tiles);
+            }
             // Finally calculate the host depth source texture coordinates.
             spv::Id host_depth_source_pixel_x_int = builder.createUnaryOp(
                 spv::OpBitcast, type_int,

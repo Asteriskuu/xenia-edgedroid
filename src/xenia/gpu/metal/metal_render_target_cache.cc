@@ -54,6 +54,7 @@
 #include "metal_irconverter_runtime.h"
 
 #include "xenia/gpu/edram_dump_shader.h"
+#include "xenia/gpu/edram_transfer_shader.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
 #include "xenia/gpu/spirv_to_dxil_compiler.h"
 #include "xenia/gpu/texture_info.h"
@@ -66,12 +67,6 @@ DEFINE_bool(
     "Metal");
 DEFINE_bool(metal_transfer_fast_divmod, true,
             "Use fast exact div/mod in Metal transfer shaders", "Metal");
-DEFINE_bool(metal_transfer_tile_instancing, false,
-            "Use per-tile instanced draws for Metal transfer shaders", "Metal");
-DEFINE_bool(
-    metal_transfer_msaa_sample_id, true,
-    "Use sample_id in Metal transfer shaders for MSAA (sample-rate shading)",
-    "Metal");
 DEFINE_bool(metal_transfer_in_draw_pass, true,
             "Encode render target ownership transfers at the head of the "
             "guest's own render pass instead of in passes of their own",
@@ -110,33 +105,9 @@ class ScopedAutoreleasePool {
 };
 
 #if XE_PLATFORM_IOS
-constexpr size_t kTransferTileInstanceBufferMaxBytes =
-    64ull * 1024ull * 1024ull;
-constexpr size_t kTransferTileInstanceSoftBaseBytes = 4ull * 1024ull * 1024ull;
-constexpr size_t kTransferTileInstanceSoftLowCoverageBytes =
-    8ull * 1024ull * 1024ull;
-constexpr uint64_t kTransferTileInstanceLowCoverageRatioDivisor = 8ull;
-constexpr uint64_t kTransferTileInstanceMediumCoverageRatioDivisor = 3ull;
-constexpr size_t kTransferTileInstanceSmallRectPenaltyCount = 4;
-constexpr size_t kTransferTileInstanceSmallRectPenaltyNumerator = 1;
-constexpr size_t kTransferTileInstanceSmallRectPenaltyDenominator = 2;
-constexpr size_t kTransferTileInstanceNearCapReserveBytes =
-    8ull * 1024ull * 1024ull;
-constexpr size_t kTransferTileInstanceNearCapUsagePercent = 84;
+constexpr size_t kTransferInstanceBufferMaxBytes = 64ull * 1024ull * 1024ull;
 #else
-constexpr size_t kTransferTileInstanceBufferMaxBytes =
-    256ull * 1024ull * 1024ull;
-constexpr size_t kTransferTileInstanceSoftBaseBytes = 32ull * 1024ull * 1024ull;
-constexpr size_t kTransferTileInstanceSoftLowCoverageBytes =
-    64ull * 1024ull * 1024ull;
-constexpr uint64_t kTransferTileInstanceLowCoverageRatioDivisor = 3ull;
-constexpr uint64_t kTransferTileInstanceMediumCoverageRatioDivisor = 2ull;
-constexpr size_t kTransferTileInstanceSmallRectPenaltyCount = 2;
-constexpr size_t kTransferTileInstanceSmallRectPenaltyNumerator = 3;
-constexpr size_t kTransferTileInstanceSmallRectPenaltyDenominator = 4;
-constexpr size_t kTransferTileInstanceNearCapReserveBytes =
-    32ull * 1024ull * 1024ull;
-constexpr size_t kTransferTileInstanceNearCapUsagePercent = 90;
+constexpr size_t kTransferInstanceBufferMaxBytes = 256ull * 1024ull * 1024ull;
 #endif
 
 MTL::ComputePipelineState* CreateComputePipelineFromEmbeddedLibrary(
@@ -542,53 +513,10 @@ uint32_t MsaaSamplesToCount(xenos::MsaaSamples samples) {
   }
 }
 
-struct TransferAddressConstants {
-  uint32_t dest_pitch;
-  uint32_t source_pitch;
-  int32_t source_to_dest;
-};
-
-struct TransferShaderConstants {
-  TransferAddressConstants address;
-  TransferAddressConstants host_depth_address;
-  uint32_t source_format;
-  uint32_t dest_format;
-  uint32_t source_is_depth;
-  uint32_t dest_is_depth;
-  uint32_t source_is_uint;
-  uint32_t dest_is_uint;
-  uint32_t source_is_64bpp;
-  uint32_t dest_is_64bpp;
-  uint32_t source_msaa_samples;
-  uint32_t dest_msaa_samples;
-  uint32_t host_depth_source_msaa_samples;
-  uint32_t host_depth_source_is_copy;
-  uint32_t depth_round;
-  uint32_t msaa_2x_supported;
-  uint32_t tile_width_samples;
-  uint32_t tile_height_samples;
-  uint32_t dest_tile_width_pixels;
-  uint32_t dest_tile_height_pixels;
-  float dest_tile_width_pixels_inv;
-  float dest_tile_height_pixels_inv;
-  float source_pitch_tiles_inv;
-  float host_depth_source_pitch_tiles_inv;
-  float dest_pixel_to_ndc_x;
-  float dest_pixel_to_ndc_y;
-  uint32_t dest_sample_id;
-  uint32_t stencil_mask;
-  uint32_t stencil_clear;
-};
-
-struct TransferTileInstance {
-  float origin_x;
-  float origin_y;
-  uint32_t tile_index;
-  uint32_t padding;
-  uint32_t source_base_x;
-  uint32_t source_base_y;
-  uint32_t host_base_x;
-  uint32_t host_base_y;
+// Matches TransferVertexConstants in the transfer library's MSL.
+struct TransferVertexConstants {
+  float pixel_to_ndc_x;
+  float pixel_to_ndc_y;
 };
 
 struct TransferRectInstance {
@@ -609,29 +537,6 @@ struct TransferClearColorUintConstants {
 struct TransferClearDepthConstants {
   float depth;
   float padding[3];
-};
-
-enum class TransferOutput {
-  kColor,
-  kDepth,
-  kStencilBit,
-};
-
-struct TransferModeInfo {
-  TransferOutput output;
-  bool source_is_color;
-  bool uses_host_depth;
-};
-
-constexpr TransferModeInfo kTransferModeInfos[] = {
-    {TransferOutput::kColor, true, false},        // kColorToColor
-    {TransferOutput::kDepth, true, false},        // kColorToDepth
-    {TransferOutput::kColor, false, false},       // kDepthToColor
-    {TransferOutput::kDepth, false, false},       // kDepthToDepth
-    {TransferOutput::kStencilBit, true, false},   // kColorToStencilBit
-    {TransferOutput::kStencilBit, false, false},  // kDepthToStencilBit
-    {TransferOutput::kDepth, true, true},         // kColorAndHostDepthToDepth
-    {TransferOutput::kDepth, false, true},        // kDepthAndHostDepthToDepth
 };
 
 }  // namespace
@@ -797,12 +702,12 @@ void MetalRenderTargetCache::Shutdown(bool from_destructor) {
     }
   }
   transfer_pipelines_.clear();
-  for (auto& it : transfer_tile_pipelines_) {
+  for (auto& it : transfer_fragment_functions_) {
     if (it.second) {
       it.second->release();
     }
   }
-  transfer_tile_pipelines_.clear();
+  transfer_fragment_functions_.clear();
   for (auto& it : edram_load_pipelines_) {
     if (it.second) {
       it.second->release();
@@ -857,13 +762,13 @@ void MetalRenderTargetCache::Shutdown(bool from_destructor) {
     transfer_dummy_buffer_->release();
     transfer_dummy_buffer_ = nullptr;
   }
-  for (auto& buffer : transfer_tile_instance_buffers_) {
+  for (auto& buffer : transfer_instance_buffers_) {
     if (buffer) {
       buffer->release();
       buffer = nullptr;
     }
   }
-  for (auto& retired_list : transfer_tile_instance_retired_buffers_) {
+  for (auto& retired_list : transfer_instance_retired_buffers_) {
     for (auto* buffer : retired_list) {
       if (buffer) {
         buffer->release();
@@ -871,8 +776,8 @@ void MetalRenderTargetCache::Shutdown(bool from_destructor) {
     }
     retired_list.clear();
   }
-  transfer_tile_instance_buffer_sizes_.fill(0);
-  transfer_tile_instance_buffer_offset_ = 0;
+  transfer_instance_buffer_sizes_.fill(0);
+  transfer_instance_buffer_offset_ = 0;
   for (size_t i = 0; i < xe::countof(transfer_dummy_color_float_); ++i) {
     if (transfer_dummy_color_float_[i]) {
       transfer_dummy_color_float_[i]->release();
@@ -1210,13 +1115,11 @@ void MetalRenderTargetCache::BeginFrame() {
       (frame_id_ % uint64_t(::cvars::metal_memory_log_rate)) == 0) {
     XELOGI(
         "Metal mem: frame={} rt={} map={} dummy={} pipelines={} "
-        "tile_pipelines={} inst_buf_sizes=[{}, {}, {}]",
+        "transfer_shaders={} inst_buf_sizes=[{}, {}, {}]",
         frame_id_, render_target_map_.size(), render_target_map_.size(),
         dummy_color_targets_.size(), transfer_pipelines_.size(),
-        transfer_tile_pipelines_.size(),
-        transfer_tile_instance_buffer_sizes_[0],
-        transfer_tile_instance_buffer_sizes_[1],
-        transfer_tile_instance_buffer_sizes_[2]);
+        transfer_fragment_functions_.size(), transfer_instance_buffer_sizes_[0],
+        transfer_instance_buffer_sizes_[1], transfer_instance_buffer_sizes_[2]);
   }
 }
 
@@ -1244,13 +1147,13 @@ bool MetalRenderTargetCache::Update(
         0) {
       XELOGI(
           "Metal mem: frame={} rt={} map={} dummy={} pipelines={} "
-          "tile_pipelines={} inst_buf_sizes=[{}, {}, {}]",
+          "transfer_shaders={} inst_buf_sizes=[{}, {}, {}]",
           frame_id_, render_target_map_.size(), render_target_map_.size(),
           dummy_color_targets_.size(), transfer_pipelines_.size(),
-          transfer_tile_pipelines_.size(),
-          transfer_tile_instance_buffer_sizes_[0],
-          transfer_tile_instance_buffer_sizes_[1],
-          transfer_tile_instance_buffer_sizes_[2]);
+          transfer_fragment_functions_.size(),
+          transfer_instance_buffer_sizes_[0],
+          transfer_instance_buffer_sizes_[1],
+          transfer_instance_buffer_sizes_[2]);
     }
   }
 
@@ -1730,8 +1633,6 @@ bool MetalRenderTargetCache::PreflightPendingDrawPassTransfers(
       }
     }
 
-    bool dest_sample_id_default =
-        dest_sample_count > 1 && ::cvars::metal_transfer_msaa_sample_id;
     for (const Transfer& transfer : pending_draw_pass_transfers_[i]) {
       auto* source_rt = static_cast<MetalRenderTarget*>(transfer.source);
       if (!source_rt) {
@@ -1757,22 +1658,17 @@ bool MetalRenderTargetCache::PreflightPendingDrawPassTransfers(
           (dest_key.is_depth && !native_stencil_output) ? 1u : 0u;
       for (uint32_t stencil_bit = 0; stencil_bit <= stencil_bit_passes;
            ++stencil_bit) {
-        TransferShaderKey shader_key = GetTransferShaderKey(
+        EdramTransferShaderKey shader_key = GetTransferShaderKey(
             source_key, dest_key,
             (has_host_depth && !stencil_bit) ? &host_depth_key : nullptr, false,
-            stencil_bit != 0, dest_sample_id_default);
-        for (uint32_t tile_instanced = 0;
-             tile_instanced <=
-             uint32_t(::cvars::metal_transfer_tile_instancing);
-             ++tile_instanced) {
-          if (!GetOrCreateTransferPipelines(
-                  shader_key, dest_format, dest_is_uint, tile_instanced != 0,
-                  native_stencil_output && !stencil_bit, color_attachment_index,
-                  &attachment_formats.color_attachment_formats,
-                  attachment_formats.depth_attachment_format,
-                  attachment_formats.stencil_attachment_format)) {
-            return false;
-          }
+            stencil_bit != 0, color_attachment_index);
+        if (!GetOrCreateTransferPipelines(
+                shader_key, dest_format, dest_is_uint,
+                native_stencil_output && !stencil_bit, color_attachment_index,
+                &attachment_formats.color_attachment_formats,
+                attachment_formats.depth_attachment_format,
+                attachment_formats.stencil_attachment_format)) {
+          return false;
         }
       }
     }
@@ -3935,58 +3831,51 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
   return false;
 }
 
-MetalRenderTargetCache::TransferShaderKey
-MetalRenderTargetCache::GetTransferShaderKey(
+EdramTransferShaderKey MetalRenderTargetCache::GetTransferShaderKey(
     RenderTargetKey source_key, RenderTargetKey dest_key,
     const RenderTargetKey* host_depth_source_key,
     bool host_depth_source_is_copy, bool stencil_bit,
-    bool dest_sample_id_from_sample_default) const {
-  TransferShaderKey shader_key = {};
+    uint32_t dest_color_rt_index) const {
+  EdramTransferShaderKey shader_key;
   shader_key.source_msaa_samples = source_key.msaa_samples;
   shader_key.dest_msaa_samples = dest_key.msaa_samples;
   shader_key.source_resource_format = source_key.resource_format;
   shader_key.dest_resource_format = dest_key.resource_format;
   shader_key.host_depth_source_msaa_samples = xenos::MsaaSamples::k1X;
-  shader_key.host_depth_source_is_copy = 0;
+  shader_key.dest_color_rt_index = dest_color_rt_index;
 
   if (stencil_bit) {
-    shader_key.mode = source_key.is_depth ? TransferMode::kDepthToStencilBit
-                                          : TransferMode::kColorToStencilBit;
+    shader_key.mode = source_key.is_depth
+                          ? EdramTransferMode::kDepthToStencilBit
+                          : EdramTransferMode::kColorToStencilBit;
   } else if (dest_key.is_depth) {
     if (host_depth_source_key) {
-      shader_key.mode = source_key.is_depth
-                            ? TransferMode::kDepthAndHostDepthToDepth
-                            : TransferMode::kColorAndHostDepthToDepth;
-      shader_key.host_depth_source_is_copy = host_depth_source_is_copy ? 1 : 0;
-      shader_key.host_depth_source_msaa_samples =
-          host_depth_source_is_copy ? xenos::MsaaSamples::k1X
-                                    : host_depth_source_key->msaa_samples;
+      // Reading the host depth back out of the EDRAM buffer is a mode of its
+      // own rather than a flag, so the shader declares a buffer instead of a
+      // texture for it.
+      if (host_depth_source_is_copy) {
+        shader_key.mode =
+            source_key.is_depth
+                ? EdramTransferMode::kDepthAndHostDepthCopyToDepth
+                : EdramTransferMode::kColorAndHostDepthCopyToDepth;
+      } else {
+        shader_key.mode = source_key.is_depth
+                              ? EdramTransferMode::kDepthAndHostDepthToDepth
+                              : EdramTransferMode::kColorAndHostDepthToDepth;
+        shader_key.host_depth_source_msaa_samples =
+            host_depth_source_key->msaa_samples;
+      }
     } else {
-      shader_key.mode = source_key.is_depth ? TransferMode::kDepthToDepth
-                                            : TransferMode::kColorToDepth;
+      shader_key.mode = source_key.is_depth ? EdramTransferMode::kDepthToDepth
+                                            : EdramTransferMode::kColorToDepth;
     }
   } else {
-    shader_key.mode = source_key.is_depth ? TransferMode::kDepthToColor
-                                          : TransferMode::kColorToColor;
+    shader_key.mode = source_key.is_depth ? EdramTransferMode::kDepthToColor
+                                          : EdramTransferMode::kColorToColor;
   }
 
-  // Sample-rate shading only buys anything when a multisample source is being
-  // resolved per sample.
-  bool dest_sample_id_from_sample = dest_sample_id_from_sample_default;
-  if (dest_sample_id_from_sample) {
-    const TransferModeInfo& mode_info =
-        kTransferModeInfos[size_t(shader_key.mode)];
-    bool source_is_multisample =
-        source_key.msaa_samples != xenos::MsaaSamples::k1X;
-    bool host_depth_is_multisample =
-        mode_info.uses_host_depth &&
-        shader_key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X &&
-        !shader_key.host_depth_source_is_copy;
-    if (!source_is_multisample && !host_depth_is_multisample) {
-      dest_sample_id_from_sample = false;
-    }
-  }
-  shader_key.dest_sample_id_from_sample = dest_sample_id_from_sample ? 1u : 0u;
+  shader_key.value_convert =
+      IsTransferValueConverted7e3And8888(source_key, dest_key) ? 1 : 0;
   return shader_key;
 }
 
@@ -4271,8 +4160,6 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
             : MTL::PixelFormatInvalid;
 
     uint32_t dest_sample_count = MsaaSamplesToCount(dest_key.msaa_samples);
-    bool transfer_use_sample_id_default =
-        dest_sample_count > 1 && ::cvars::metal_transfer_msaa_sample_id;
     uint32_t dest_width = uint32_t(dest_texture->width());
     uint32_t dest_height = uint32_t(dest_texture->height());
 
@@ -4328,30 +4215,6 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
       return true;
     };
 
-    struct TransferTileBatch {
-      MTL::Buffer* buffer = nullptr;
-      size_t buffer_offset = 0;
-      uint32_t instance_count = 0;
-      MTL::ScissorRect scissor = {};
-    };
-
-    struct TransferTileBatchBuildInfo {
-      TransferTileBatch batch;
-      uint32_t tile_x_start = 0;
-      uint32_t tile_x_end = 0;
-      uint32_t tile_y_start = 0;
-      uint32_t tile_y_end = 0;
-    };
-    bool transfer_tile_instance_budget_hit = false;
-    bool transfer_tile_instance_adaptive_cutoff_hit = false;
-    size_t transfer_tile_instance_adaptive_candidate_bytes = 0;
-    size_t transfer_tile_instance_adaptive_limit_bytes = 0;
-    uint32_t transfer_tile_instance_adaptive_rect_count = 0;
-    bool transfer_tile_instance_predictive_cutoff_hit = false;
-    size_t transfer_tile_instance_predictive_used_bytes = 0;
-    size_t transfer_tile_instance_predictive_candidate_bytes = 0;
-    size_t transfer_tile_instance_predictive_threshold_bytes = 0;
-
     auto allocate_instance_buffer = [&](size_t size, MTL::Buffer*& buffer,
                                         size_t& offset) -> bool {
       if (!device_) {
@@ -4359,11 +4222,11 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
       }
       uint32_t buffer_index =
           uint32_t(frame_id_ % kTransferInstanceBufferCount);
-      if (transfer_tile_instance_buffer_frame_id_ != frame_id_) {
-        transfer_tile_instance_buffer_frame_id_ = frame_id_;
-        transfer_tile_instance_buffer_offset_ = 0;
+      if (transfer_instance_buffer_frame_id_ != frame_id_) {
+        transfer_instance_buffer_frame_id_ = frame_id_;
+        transfer_instance_buffer_offset_ = 0;
         auto& retired_buffers =
-            transfer_tile_instance_retired_buffers_[buffer_index];
+            transfer_instance_retired_buffers_[buffer_index];
         for (auto* retired_buffer : retired_buffers) {
           if (retired_buffer) {
             retired_buffer->release();
@@ -4373,286 +4236,48 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
       }
       constexpr size_t kAlignment = 256;
       size_t aligned_offset =
-          xe::align(transfer_tile_instance_buffer_offset_, size_t(kAlignment));
-      if (size > kTransferTileInstanceBufferMaxBytes ||
-          aligned_offset > kTransferTileInstanceBufferMaxBytes ||
-          aligned_offset > (kTransferTileInstanceBufferMaxBytes - size)) {
-        transfer_tile_instance_budget_hit = true;
+          xe::align(transfer_instance_buffer_offset_, size_t(kAlignment));
+      if (size > kTransferInstanceBufferMaxBytes ||
+          aligned_offset > kTransferInstanceBufferMaxBytes ||
+          aligned_offset > (kTransferInstanceBufferMaxBytes - size)) {
         return false;
       }
       size_t required = aligned_offset + size;
-      if (transfer_tile_instance_buffers_[buffer_index] &&
-          transfer_tile_instance_buffer_sizes_[buffer_index] < required &&
+      if (transfer_instance_buffers_[buffer_index] &&
+          transfer_instance_buffer_sizes_[buffer_index] < required &&
           aligned_offset != 0) {
-        transfer_tile_instance_budget_hit = true;
         return false;
       }
-      if (!transfer_tile_instance_buffers_[buffer_index] ||
-          transfer_tile_instance_buffer_sizes_[buffer_index] < required) {
+      if (!transfer_instance_buffers_[buffer_index] ||
+          transfer_instance_buffer_sizes_[buffer_index] < required) {
         size_t new_size = xe::round_up<size_t>(required, 65536);
-        if (new_size > kTransferTileInstanceBufferMaxBytes) {
-          new_size = kTransferTileInstanceBufferMaxBytes;
+        if (new_size > kTransferInstanceBufferMaxBytes) {
+          new_size = kTransferInstanceBufferMaxBytes;
         }
         if (new_size < required) {
-          transfer_tile_instance_budget_hit = true;
           return false;
         }
-        if (transfer_tile_instance_buffers_[buffer_index]) {
-          transfer_tile_instance_retired_buffers_[buffer_index].push_back(
-              transfer_tile_instance_buffers_[buffer_index]);
-          transfer_tile_instance_buffers_[buffer_index] = nullptr;
+        if (transfer_instance_buffers_[buffer_index]) {
+          transfer_instance_retired_buffers_[buffer_index].push_back(
+              transfer_instance_buffers_[buffer_index]);
+          transfer_instance_buffers_[buffer_index] = nullptr;
         }
         MTL::ResourceOptions options = MTL::ResourceStorageModeShared |
                                        MTL::ResourceCPUCacheModeWriteCombined;
         MTL::Buffer* new_buffer = device_->newBuffer(new_size, options);
         if (!new_buffer) {
-          transfer_tile_instance_buffer_sizes_[buffer_index] = 0;
+          transfer_instance_buffer_sizes_[buffer_index] = 0;
           return false;
         }
-        transfer_tile_instance_buffers_[buffer_index] = new_buffer;
-        transfer_tile_instance_buffer_sizes_[buffer_index] = new_size;
+        transfer_instance_buffers_[buffer_index] = new_buffer;
+        transfer_instance_buffer_sizes_[buffer_index] = new_size;
       }
-      buffer = transfer_tile_instance_buffers_[buffer_index];
+      buffer = transfer_instance_buffers_[buffer_index];
       if (!buffer) {
         return false;
       }
       offset = aligned_offset;
-      transfer_tile_instance_buffer_offset_ = aligned_offset + size;
-      return true;
-    };
-
-    auto build_tile_batches =
-        [&](const Transfer::Rectangle* rectangles, uint32_t rectangle_count,
-            const TransferShaderConstants& constants, bool uses_host_depth,
-            bool host_depth_is_copy,
-            std::vector<TransferTileBatch>& out_batches) -> bool {
-      out_batches.clear();
-      if (!constants.dest_tile_width_pixels ||
-          !constants.dest_tile_height_pixels) {
-        return false;
-      }
-      if (!cmd) {
-        return false;
-      }
-      uint32_t max_tile_x =
-          (dest_width + constants.dest_tile_width_pixels - 1) /
-          constants.dest_tile_width_pixels;
-      uint32_t max_tile_y =
-          (dest_height + constants.dest_tile_height_pixels - 1) /
-          constants.dest_tile_height_pixels;
-      if (!max_tile_x || !max_tile_y) {
-        return false;
-      }
-      --max_tile_x;
-      --max_tile_y;
-      std::vector<TransferTileBatchBuildInfo> build_infos;
-      size_t total_instance_bytes = 0;
-      uint64_t total_covered_pixels = 0;
-      constexpr size_t kAlignment = 256;
-      for (uint32_t rect_index = 0; rect_index < rectangle_count;
-           ++rect_index) {
-        uint32_t scaled_x = 0;
-        uint32_t scaled_y = 0;
-        uint32_t scaled_width = 0;
-        uint32_t scaled_height = 0;
-        if (!get_scaled_rect(rectangles[rect_index], scaled_x, scaled_y,
-                             scaled_width, scaled_height)) {
-          continue;
-        }
-        uint32_t tile_x_start = scaled_x / constants.dest_tile_width_pixels;
-        uint32_t tile_y_start = scaled_y / constants.dest_tile_height_pixels;
-        uint32_t tile_x_end =
-            (scaled_x + scaled_width - 1) / constants.dest_tile_width_pixels;
-        uint32_t tile_y_end =
-            (scaled_y + scaled_height - 1) / constants.dest_tile_height_pixels;
-        tile_x_end = std::min(tile_x_end, max_tile_x);
-        tile_y_end = std::min(tile_y_end, max_tile_y);
-        if (tile_x_start > tile_x_end || tile_y_start > tile_y_end) {
-          continue;
-        }
-        uint32_t tiles_x = tile_x_end - tile_x_start + 1;
-        uint32_t tiles_y = tile_y_end - tile_y_start + 1;
-        uint32_t tile_count = tiles_x * tiles_y;
-        if (!tile_count) {
-          continue;
-        }
-        TransferTileBatchBuildInfo info;
-        info.tile_x_start = tile_x_start;
-        info.tile_x_end = tile_x_end;
-        info.tile_y_start = tile_y_start;
-        info.tile_y_end = tile_y_end;
-        info.batch.instance_count = tile_count;
-        info.batch.scissor.x = scaled_x;
-        info.batch.scissor.y = scaled_y;
-        info.batch.scissor.width = scaled_width;
-        info.batch.scissor.height = scaled_height;
-        total_covered_pixels +=
-            uint64_t(scaled_width) * uint64_t(scaled_height);
-        total_instance_bytes = xe::align(total_instance_bytes, kAlignment);
-        info.batch.buffer_offset = total_instance_bytes;
-        total_instance_bytes +=
-            size_t(tile_count) * sizeof(TransferTileInstance);
-        build_infos.push_back(info);
-      }
-
-      if (build_infos.empty() || !total_instance_bytes) {
-        return false;
-      }
-
-      size_t adaptive_soft_limit_bytes = kTransferTileInstanceSoftBaseBytes;
-      if (dest_width && dest_height) {
-        uint64_t dest_pixels = uint64_t(dest_width) * uint64_t(dest_height);
-        if (total_covered_pixels *
-                kTransferTileInstanceLowCoverageRatioDivisor <=
-            dest_pixels) {
-          adaptive_soft_limit_bytes = kTransferTileInstanceSoftLowCoverageBytes;
-        } else if (total_covered_pixels *
-                       kTransferTileInstanceMediumCoverageRatioDivisor <=
-                   dest_pixels) {
-          adaptive_soft_limit_bytes =
-              (kTransferTileInstanceSoftBaseBytes +
-               kTransferTileInstanceSoftLowCoverageBytes) /
-              2;
-        }
-      }
-      if (build_infos.size() <= kTransferTileInstanceSmallRectPenaltyCount &&
-          adaptive_soft_limit_bytes > (kAlignment * 64)) {
-        size_t penalized_soft_limit_bytes =
-            adaptive_soft_limit_bytes *
-            kTransferTileInstanceSmallRectPenaltyNumerator /
-            kTransferTileInstanceSmallRectPenaltyDenominator;
-        adaptive_soft_limit_bytes =
-            std::max(penalized_soft_limit_bytes, kAlignment * 64);
-      }
-      adaptive_soft_limit_bytes = std::min(adaptive_soft_limit_bytes,
-                                           kTransferTileInstanceBufferMaxBytes);
-      if (total_instance_bytes > adaptive_soft_limit_bytes) {
-        transfer_tile_instance_adaptive_cutoff_hit = true;
-        transfer_tile_instance_adaptive_candidate_bytes = total_instance_bytes;
-        transfer_tile_instance_adaptive_limit_bytes = adaptive_soft_limit_bytes;
-        transfer_tile_instance_adaptive_rect_count =
-            uint32_t(build_infos.size());
-        return false;
-      }
-
-      size_t current_frame_instance_offset = 0;
-      if (transfer_tile_instance_buffer_frame_id_ == frame_id_) {
-        current_frame_instance_offset =
-            xe::align(transfer_tile_instance_buffer_offset_, kAlignment);
-      }
-      size_t near_cap_threshold_by_percent =
-          kTransferTileInstanceBufferMaxBytes *
-          kTransferTileInstanceNearCapUsagePercent / 100;
-      size_t near_cap_threshold_by_reserve = 0;
-      if (kTransferTileInstanceBufferMaxBytes >
-          kTransferTileInstanceNearCapReserveBytes) {
-        near_cap_threshold_by_reserve =
-            kTransferTileInstanceBufferMaxBytes -
-            kTransferTileInstanceNearCapReserveBytes;
-      }
-      size_t near_cap_threshold_bytes = std::min(near_cap_threshold_by_percent,
-                                                 near_cap_threshold_by_reserve);
-      size_t projected_instance_bytes = current_frame_instance_offset;
-      if (projected_instance_bytes >
-              kTransferTileInstanceBufferMaxBytes - total_instance_bytes ||
-          projected_instance_bytes + total_instance_bytes >
-              near_cap_threshold_bytes) {
-        transfer_tile_instance_predictive_cutoff_hit = true;
-        transfer_tile_instance_predictive_used_bytes =
-            current_frame_instance_offset;
-        transfer_tile_instance_predictive_candidate_bytes =
-            total_instance_bytes;
-        transfer_tile_instance_predictive_threshold_bytes =
-            near_cap_threshold_bytes;
-        return false;
-      }
-
-      MTL::Buffer* buffer = nullptr;
-      size_t buffer_base_offset = 0;
-      if (!allocate_instance_buffer(total_instance_bytes, buffer,
-                                    buffer_base_offset)) {
-        return false;
-      }
-
-      uint8_t* base_ptr =
-          reinterpret_cast<uint8_t*>(buffer->contents()) + buffer_base_offset;
-      uint32_t source_pitch_tiles = constants.address.source_pitch;
-      uint32_t source_tile_width_pixels =
-          tile_width_samples >>
-          ((constants.source_is_64bpp != 0u) +
-           (constants.source_msaa_samples >= 4u ? 1u : 0u));
-      uint32_t source_tile_height_pixels =
-          tile_height_samples >>
-          (constants.source_msaa_samples >= 2u ? 1u : 0u);
-      uint32_t host_tile_width_pixels =
-          tile_width_samples >>
-          (constants.host_depth_source_msaa_samples >= 4u ? 1u : 0u);
-      uint32_t host_tile_height_pixels =
-          tile_height_samples >>
-          (constants.host_depth_source_msaa_samples >= 2u ? 1u : 0u);
-
-      for (const auto& info : build_infos) {
-        uint8_t* batch_ptr = base_ptr + info.batch.buffer_offset;
-        auto* instances = reinterpret_cast<TransferTileInstance*>(batch_ptr);
-        uint32_t instance_index = 0;
-        for (uint32_t tile_y = info.tile_y_start; tile_y <= info.tile_y_end;
-             ++tile_y) {
-          uint32_t row_base = tile_y * constants.address.dest_pitch;
-          float origin_y = float(tile_y * constants.dest_tile_height_pixels);
-          for (uint32_t tile_x = info.tile_x_start; tile_x <= info.tile_x_end;
-               ++tile_x) {
-            TransferTileInstance& instance = instances[instance_index++];
-            instance.origin_x =
-                float(tile_x * constants.dest_tile_width_pixels);
-            instance.origin_y = origin_y;
-            instance.tile_index = row_base + tile_x;
-            uint32_t dest_tile_index = instance.tile_index;
-            uint32_t source_tile_index =
-                uint32_t(int32_t(dest_tile_index) +
-                         constants.address.source_to_dest) &
-                (xenos::kEdramTileCount - 1u);
-            uint32_t source_tile_index_y = 0u;
-            uint32_t source_tile_index_x = 0u;
-            if (source_pitch_tiles) {
-              source_tile_index_y = source_tile_index / source_pitch_tiles;
-              source_tile_index_x =
-                  source_tile_index - source_tile_index_y * source_pitch_tiles;
-            }
-            instance.source_base_x =
-                source_tile_index_x * source_tile_width_pixels;
-            instance.source_base_y =
-                source_tile_index_y * source_tile_height_pixels;
-            instance.host_base_x = 0;
-            instance.host_base_y = 0;
-            if (uses_host_depth && !host_depth_is_copy) {
-              uint32_t host_pitch_tiles =
-                  constants.host_depth_address.source_pitch;
-              uint32_t host_tile_index =
-                  uint32_t(int32_t(dest_tile_index) +
-                           constants.host_depth_address.source_to_dest) &
-                  (xenos::kEdramTileCount - 1u);
-              uint32_t host_tile_index_y = 0u;
-              uint32_t host_tile_index_x = 0u;
-              if (host_pitch_tiles) {
-                host_tile_index_y = host_tile_index / host_pitch_tiles;
-                host_tile_index_x =
-                    host_tile_index - host_tile_index_y * host_pitch_tiles;
-              }
-              instance.host_base_x = host_tile_index_x * host_tile_width_pixels;
-              instance.host_base_y =
-                  host_tile_index_y * host_tile_height_pixels;
-            }
-          }
-        }
-        TransferTileBatch batch = info.batch;
-        batch.buffer = buffer;
-        batch.buffer_offset = buffer_base_offset + info.batch.buffer_offset;
-        out_batches.push_back(batch);
-      }
-
-      if (out_batches.empty()) {
-        return false;
-      }
+      transfer_instance_buffer_offset_ = aligned_offset + size;
       return true;
     };
 
@@ -5217,10 +4842,10 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
           if (host_depth_rt) {
             host_depth_key = host_depth_rt->key();
           }
-          TransferShaderKey shader_key = GetTransferShaderKey(
+          EdramTransferShaderKey shader_key = GetTransferShaderKey(
               source_key, dest_key, host_depth_rt ? &host_depth_key : nullptr,
               host_depth_rt == dest_metal_rt, pass != 0,
-              transfer_use_sample_id_default);
+              active_color_attachment_index);
 
           transfer_invocations_.emplace_back(transfer, shader_key);
           if (pass) {
@@ -5279,13 +4904,10 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
         bool last_transfer_scissor_valid = false;
         MTL::RenderPipelineState* last_transfer_pipeline = nullptr;
         MTL::DepthStencilState* last_transfer_depth_state = nullptr;
-        MTL::Buffer* last_transfer_fragment_buffer_1 = nullptr;
-        std::array<MTL::Texture*, 3> last_transfer_fragment_textures = {
-            nullptr, nullptr, nullptr};
         bool last_transfer_stencil_reference_valid = false;
         uint32_t last_transfer_stencil_reference = 0;
-        bool transfer_constants_valid = false;
-        TransferShaderConstants last_transfer_constants = {};
+        bool transfer_vertex_constants_valid = false;
+        TransferVertexConstants last_transfer_vertex_constants = {};
         enum class TransferVertexSlot1Binding { kNone, kBuffer, kBytes };
         TransferVertexSlot1Binding last_transfer_vertex_slot_1_binding =
             TransferVertexSlot1Binding::kNone;
@@ -5307,25 +4929,157 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
             last_transfer_depth_state = state;
           }
         };
-        auto bind_transfer_fragment_texture = [&](uint32_t index,
-                                                  MTL::Texture* texture) {
-          if (index >= last_transfer_fragment_textures.size()) {
-            return;
-          }
-          if (last_transfer_fragment_textures[index] != texture) {
-            encoder->setFragmentTexture(texture, index);
-            mark_encoder_mutation(
-                kDrawPassTransferEncoderMutationFragmentTextures);
-            last_transfer_fragment_textures[index] = texture;
-          }
+        // A draw reads its heap, push constants and argument buffer when it
+        // runs, so each gets its own slice rather than being rewritten between
+        // draws already encoded into this pass.
+        MTL::Texture* set_textures[2][2] = {};
+        MTL::Buffer* host_depth_buffer = nullptr;
+        auto bind_transfer_source_texture = [&](uint32_t set, uint32_t binding,
+                                                MTL::Texture* texture) {
+          set_textures[set][binding] = texture;
         };
-        auto bind_transfer_fragment_buffer_1 = [&](MTL::Buffer* buffer) {
-          if (last_transfer_fragment_buffer_1 != buffer) {
-            encoder->setFragmentBuffer(buffer, 0, 1);
-            mark_encoder_mutation(
-                kDrawPassTransferEncoderMutationFragmentSlot1);
-            last_transfer_fragment_buffer_1 = buffer;
+        auto bind_transfer_host_depth_buffer = [&](MTL::Buffer* buffer) {
+          host_depth_buffer = buffer;
+        };
+        auto bind_transfer_fragment_resources =
+            [&](const EdramTransferShaderKey& shader_key,
+                const EdramTransferAddressConstant& address,
+                const EdramTransferAddressConstant& host_depth_address,
+                uint32_t stencil_mask) -> bool {
+          const EdramTransferPipelineLayoutInfo& layout_info =
+              kEdramTransferPipelineLayoutInfos[size_t(
+                  kEdramTransferModes[size_t(shader_key.mode)]
+                      .pipeline_layout)];
+          const MetalShaderConverter& converter =
+              command_processor_.metal_shader_converter();
+
+          // Only the dwords the layout declares are present, in enum order.
+          uint32_t push_constants[kEdramTransferUsedPushConstantDwordCount];
+          uint32_t push_constant_count = 0;
+          if (layout_info.used_push_constant_dwords &
+              kEdramTransferUsedPushConstantDwordHostDepthAddressBit) {
+            push_constants[push_constant_count++] = host_depth_address.constant;
           }
+          if (layout_info.used_push_constant_dwords &
+              kEdramTransferUsedPushConstantDwordAddressBit) {
+            push_constants[push_constant_count++] = address.constant;
+          }
+          if (layout_info.used_push_constant_dwords &
+              kEdramTransferUsedPushConstantDwordStencilMaskBit) {
+            push_constants[push_constant_count++] = stencil_mask;
+          }
+
+          MTL::Buffer* push_constant_buffer = nullptr;
+          NS::UInteger push_constant_offset = 0;
+          MTL::Buffer* argument_buffer = nullptr;
+          NS::UInteger argument_buffer_offset = 0;
+          if (!command_processor_.AcquireSpirvArgumentBufferSlice(
+                  std::max<size_t>(sizeof(uint32_t) * push_constant_count,
+                                   sizeof(uint32_t)),
+                  kInternalComputeSliceAlignment, &push_constant_buffer,
+                  &push_constant_offset) ||
+              !command_processor_.AcquireSpirvArgumentBufferSlice(
+                  converter.internal_graphics_argument_buffer_size(),
+                  kInternalComputeSliceAlignment, &argument_buffer,
+                  &argument_buffer_offset)) {
+            return false;
+          }
+          if (push_constant_count) {
+            std::memcpy(
+                static_cast<uint8_t*>(push_constant_buffer->contents()) +
+                    push_constant_offset,
+                push_constants, sizeof(uint32_t) * push_constant_count);
+          }
+
+          auto* argument_buffer_data =
+              static_cast<uint8_t*>(argument_buffer->contents()) +
+              argument_buffer_offset;
+          std::memset(argument_buffer_data, 0,
+                      converter.internal_graphics_argument_buffer_size());
+          auto write_root_parameter =
+              [&](MetalInternalGraphicsRootParameter parameter,
+                  uint64_t address_value) {
+                std::memcpy(
+                    argument_buffer_data +
+                        converter.internal_graphics_root_parameter_offset(
+                            parameter),
+                    &address_value, sizeof(address_value));
+              };
+
+          // One heap slice per set the layout declares, in the dense order the
+          // emitter numbers them.
+          static const MetalInternalGraphicsRootParameter kTableParameters[2] =
+              {
+                  MetalInternalGraphicsRootParameter::kSourceTable0,
+                  MetalInternalGraphicsRootParameter::kSourceTable1,
+              };
+          MTL::Buffer* heap_buffer = nullptr;
+          NS::UInteger heap_offset = 0;
+          auto set_used = [&](uint32_t set) {
+            return set_textures[set][0] || set_textures[set][1];
+          };
+          uint32_t table_count = 0;
+          for (uint32_t set = 0; set < 2; ++set) {
+            if (set_used(set)) {
+              ++table_count;
+            }
+          }
+          if (table_count) {
+            if (!command_processor_.AcquireSpirvArgumentBufferSlice(
+                    sizeof(IRDescriptorTableEntry) * 2 * table_count,
+                    kInternalComputeSliceAlignment, &heap_buffer,
+                    &heap_offset)) {
+              return false;
+            }
+            auto* heap_entries = reinterpret_cast<IRDescriptorTableEntry*>(
+                static_cast<uint8_t*>(heap_buffer->contents()) + heap_offset);
+            std::memset(heap_entries, 0,
+                        sizeof(IRDescriptorTableEntry) * 2 * table_count);
+            uint32_t table_index = 0;
+            for (uint32_t set = 0; set < 2; ++set) {
+              if (!set_used(set)) {
+                continue;
+              }
+              IRDescriptorTableEntry* entries =
+                  heap_entries + size_t(table_index) * 2;
+              for (uint32_t binding = 0; binding < 2; ++binding) {
+                MTL::Texture* texture = set_textures[set][binding];
+                if (!texture) {
+                  continue;
+                }
+                IRDescriptorTableSetTexture(&entries[binding], texture, 0.0f,
+                                            0);
+                encoder->useResource(texture, MTL::ResourceUsageRead,
+                                     MTL::RenderStageFragment);
+              }
+              write_root_parameter(
+                  kTableParameters[table_index],
+                  uint64_t(heap_buffer->gpuAddress()) + heap_offset +
+                      sizeof(IRDescriptorTableEntry) * 2 * table_index);
+              ++table_index;
+            }
+            encoder->setFragmentBuffer(
+                heap_buffer, heap_offset,
+                NS::UInteger(kIRDescriptorHeapBindPoint));
+          }
+          if (host_depth_buffer) {
+            write_root_parameter(
+                MetalInternalGraphicsRootParameter::kHostDepthBufferUav,
+                uint64_t(host_depth_buffer->gpuAddress()));
+            encoder->useResource(host_depth_buffer, MTL::ResourceUsageRead,
+                                 MTL::RenderStageFragment);
+          }
+          write_root_parameter(
+              MetalInternalGraphicsRootParameter::kPushConstants,
+              uint64_t(push_constant_buffer->gpuAddress()) +
+                  push_constant_offset);
+          encoder->setFragmentBuffer(argument_buffer, argument_buffer_offset,
+                                     NS::UInteger(kIRArgumentBufferBindPoint));
+          mark_encoder_mutation(
+              kDrawPassTransferEncoderMutationFragmentTextures |
+              kDrawPassTransferEncoderMutationFragmentSlot0 |
+              kDrawPassTransferEncoderMutationFragmentSlot1);
+          return true;
         };
         auto bind_transfer_stencil_reference = [&](uint32_t reference) {
           if (!last_transfer_stencil_reference_valid ||
@@ -5337,18 +5091,16 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
             last_transfer_stencil_reference_valid = true;
           }
         };
-        auto bind_transfer_constants =
-            [&](const TransferShaderConstants& constants) {
-              if (!transfer_constants_valid ||
-                  std::memcmp(&last_transfer_constants, &constants,
+        auto bind_transfer_vertex_constants =
+            [&](const TransferVertexConstants& constants) {
+              if (!transfer_vertex_constants_valid ||
+                  std::memcmp(&last_transfer_vertex_constants, &constants,
                               sizeof(constants)) != 0) {
                 encoder->setVertexBytes(&constants, sizeof(constants), 0);
-                encoder->setFragmentBytes(&constants, sizeof(constants), 0);
                 mark_encoder_mutation(
-                    kDrawPassTransferEncoderMutationVertexSlot0 |
-                    kDrawPassTransferEncoderMutationFragmentSlot0);
-                last_transfer_constants = constants;
-                transfer_constants_valid = true;
+                    kDrawPassTransferEncoderMutationVertexSlot0);
+                last_transfer_vertex_constants = constants;
+                transfer_vertex_constants_valid = true;
               }
             };
         auto bind_transfer_scissor = [&](const MTL::ScissorRect& scissor) {
@@ -5470,17 +5222,18 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
           }
 
           const Transfer& transfer = invocation.transfer;
-          const TransferShaderKey& shader_key = invocation.shader_key;
-          const TransferModeInfo& mode_info =
-              kTransferModeInfos[size_t(shader_key.mode)];
-          bool is_stencil_bit = mode_info.output == TransferOutput::kStencilBit;
+          const EdramTransferShaderKey& shader_key = invocation.shader_key;
+          const EdramTransferModeInfo& mode_info =
+              kEdramTransferModes[size_t(shader_key.mode)];
+          bool is_stencil_bit =
+              mode_info.output == EdramTransferOutput::kStencilBit;
           bool writes_stencil_with_depth =
               use_native_stencil_output &&
-              mode_info.output == TransferOutput::kDepth;
+              mode_info.output == EdramTransferOutput::kDepth;
           bool needs_source_stencil =
-              !mode_info.source_is_color &&
-              (mode_info.output == TransferOutput::kColor || is_stencil_bit ||
-               writes_stencil_with_depth);
+              !EdramTransferSourceIsColor(shader_key.mode) &&
+              (mode_info.output == EdramTransferOutput::kColor ||
+               is_stencil_bit || writes_stencil_with_depth);
 
           auto* source_rt = static_cast<MetalRenderTarget*>(transfer.source);
           if (!source_rt) {
@@ -5490,7 +5243,7 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
           RenderTargetKey source_key = source_rt->key();
           bool source_is_uint = false;
           MTL::PixelFormat source_transfer_format = MTL::PixelFormatInvalid;
-          if (mode_info.source_is_color) {
+          if (EdramTransferSourceIsColor(shader_key.mode)) {
             source_transfer_format = GetColorOwnershipTransferPixelFormat(
                 source_key.GetColorFormat(), &source_is_uint);
           }
@@ -5511,54 +5264,46 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
             bind_transfer_depth_state(no_depth_state);
           }
 
-          // Bind source textures.
-          if (mode_info.source_is_color) {
+          // The host depth set is declared before the source one, so a mode
+          // that reads both puts the previous owner in set 1.
+          std::memset(set_textures, 0, sizeof(set_textures));
+          host_depth_buffer = nullptr;
+          uint32_t source_set =
+              EdramTransferUsesHostDepth(shader_key.mode) ? 1u : 0u;
+          if (EdramTransferSourceIsColor(shader_key.mode)) {
             MTL::Texture* source_texture = source_rt->transfer_texture();
             if (!source_texture) {
               continue;
             }
             assert_true(source_texture->pixelFormat() == source_transfer_format,
                         "Transfer source must use ownership pixel format");
-            bind_transfer_fragment_texture(0, source_texture);
+            bind_transfer_source_texture(source_set, 0, source_texture);
           } else {
             MTL::Texture* depth_texture = source_rt->texture();
             if (!depth_texture) {
               continue;
             }
-            bind_transfer_fragment_texture(0, depth_texture);
+            bind_transfer_source_texture(source_set, 0, depth_texture);
             if (needs_source_stencil) {
               MTL::Texture* stencil_texture = GetStencilTextureView(source_rt);
               if (!stencil_texture) {
                 continue;
               }
-              bind_transfer_fragment_texture(1, stencil_texture);
+              bind_transfer_source_texture(source_set, 1, stencil_texture);
             }
           }
 
-          // Bind host depth source if needed.
-          if (mode_info.uses_host_depth) {
-            uint32_t host_depth_index = mode_info.source_is_color ? 1 : 2;
-            if (shader_key.host_depth_source_is_copy) {
-              if (edram_buffer_) {
-                bind_transfer_fragment_buffer_1(edram_buffer_);
-              } else {
-                MTL::Buffer* dummy = GetTransferDummyBuffer();
-                if (dummy) {
-                  bind_transfer_fragment_buffer_1(dummy);
-                }
-              }
-              MTL::Texture* dummy_host_depth = GetTransferDummyDepthTexture(1);
-              if (!dummy_host_depth) {
+          if (EdramTransferUsesHostDepth(shader_key.mode)) {
+            if (EdramTransferHostDepthIsCopy(shader_key.mode)) {
+              // The copy modes read the previous owner back out of the EDRAM
+              // buffer rather than binding it as a texture.
+              MTL::Buffer* buffer =
+                  edram_buffer_ ? edram_buffer_ : GetTransferDummyBuffer();
+              if (!buffer) {
                 continue;
               }
-              bind_transfer_fragment_texture(host_depth_index,
-                                             dummy_host_depth);
+              bind_transfer_host_depth_buffer(buffer);
             } else {
-              MTL::Buffer* dummy = GetTransferDummyBuffer();
-              if (!dummy) {
-                continue;
-              }
-              bind_transfer_fragment_buffer_1(dummy);
               auto* host_depth_rt =
                   static_cast<MetalRenderTarget*>(transfer.host_depth_source);
               MTL::Texture* host_depth_texture =
@@ -5566,242 +5311,124 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
               if (!host_depth_texture) {
                 continue;
               }
-              bind_transfer_fragment_texture(host_depth_index,
-                                             host_depth_texture);
+              bind_transfer_source_texture(0, 0, host_depth_texture);
             }
           }
 
-          TransferShaderConstants constants = {};
-          constants.address.dest_pitch = dest_key.GetPitchTiles();
-          constants.address.source_pitch = source_key.GetPitchTiles();
-          constants.address.source_to_dest =
+          // Everything the old MSL took as a runtime value - formats, sample
+          // counts, tile dimensions - the emitter bakes into the shader, so
+          // only the addressing is left to pass.
+          EdramTransferAddressConstant address_constant;
+          address_constant.dest_pitch = dest_key.GetPitchTiles();
+          address_constant.source_pitch = source_key.GetPitchTiles();
+          address_constant.source_to_dest =
               int32_t(dest_key.base_tiles) - int32_t(source_key.base_tiles);
-          constants.host_depth_address = {};
-          if (mode_info.uses_host_depth &&
-              !shader_key.host_depth_source_is_copy) {
+          EdramTransferAddressConstant host_depth_address_constant;
+          if (EdramTransferUsesHostDepth(shader_key.mode) &&
+              !EdramTransferHostDepthIsCopy(shader_key.mode)) {
             auto* host_depth_rt =
                 static_cast<MetalRenderTarget*>(transfer.host_depth_source);
             if (host_depth_rt) {
               RenderTargetKey host_depth_key = host_depth_rt->key();
-              constants.host_depth_address.dest_pitch =
-                  dest_key.GetPitchTiles();
-              constants.host_depth_address.source_pitch =
+              host_depth_address_constant.dest_pitch = dest_key.GetPitchTiles();
+              host_depth_address_constant.source_pitch =
                   host_depth_key.GetPitchTiles();
-              constants.host_depth_address.source_to_dest =
+              host_depth_address_constant.source_to_dest =
                   int32_t(dest_key.base_tiles) -
                   int32_t(host_depth_key.base_tiles);
             }
           }
-          constants.source_format = source_key.resource_format;
-          constants.dest_format = dest_key.resource_format;
-          constants.source_is_depth = source_key.is_depth ? 1 : 0;
-          constants.dest_is_depth = dest_key.is_depth ? 1 : 0;
-          constants.source_is_uint = source_is_uint ? 1 : 0;
-          constants.dest_is_uint = dest_is_uint ? 1 : 0;
-          // Don't treat gamma-as-unorm16 as 64bpp for source coordinate math.
-          // It's 64bpp in storage, but represents a single pixel, not two
-          // packed 32bpp halves.
-          constants.source_is_64bpp = source_key.Is64bpp() ? 1 : 0;
-          constants.dest_is_64bpp = IsKey64bpp(dest_key) ? 1 : 0;
-          constants.source_msaa_samples =
-              MsaaSamplesToCount(source_key.msaa_samples);
-          constants.dest_msaa_samples =
-              MsaaSamplesToCount(dest_key.msaa_samples);
-          constants.host_depth_source_msaa_samples =
-              MsaaSamplesToCount(shader_key.host_depth_source_msaa_samples);
-          constants.host_depth_source_is_copy =
-              shader_key.host_depth_source_is_copy ? 1 : 0;
-          constants.depth_round = depth_round;
-          constants.msaa_2x_supported = msaa_2x_supported_ ? 1 : 0;
-          constants.tile_width_samples = tile_width_samples;
-          constants.tile_height_samples = tile_height_samples;
-          uint32_t dest_tile_width_pixels =
-              tile_width_samples >>
-              ((constants.dest_is_64bpp != 0u) +
-               (constants.dest_msaa_samples >= 4u ? 1u : 0u));
-          uint32_t dest_tile_height_pixels =
-              tile_height_samples >>
-              (constants.dest_msaa_samples >= 2u ? 1u : 0u);
-          constants.dest_tile_width_pixels = dest_tile_width_pixels;
-          constants.dest_tile_height_pixels = dest_tile_height_pixels;
-          constants.dest_tile_width_pixels_inv =
-              dest_tile_width_pixels ? (1.0f / float(dest_tile_width_pixels))
-                                     : 0.0f;
-          constants.dest_tile_height_pixels_inv =
-              dest_tile_height_pixels ? (1.0f / float(dest_tile_height_pixels))
-                                      : 0.0f;
-          uint32_t source_pitch_tiles = source_key.GetPitchTiles();
-          constants.source_pitch_tiles_inv =
-              source_pitch_tiles ? (1.0f / float(source_pitch_tiles)) : 0.0f;
-          constants.host_depth_source_pitch_tiles_inv = 0.0f;
-          if (mode_info.uses_host_depth &&
-              !shader_key.host_depth_source_is_copy) {
-            auto* host_depth_rt =
-                static_cast<MetalRenderTarget*>(transfer.host_depth_source);
-            if (host_depth_rt) {
-              uint32_t host_pitch_tiles = host_depth_rt->key().GetPitchTiles();
-              constants.host_depth_source_pitch_tiles_inv =
-                  host_pitch_tiles ? (1.0f / float(host_pitch_tiles)) : 0.0f;
-            }
-          }
-          constants.dest_pixel_to_ndc_x =
+          TransferVertexConstants vertex_constants;
+          vertex_constants.pixel_to_ndc_x =
               dest_width ? (2.0f / float(dest_width)) : 0.0f;
-          constants.dest_pixel_to_ndc_y =
+          vertex_constants.pixel_to_ndc_y =
               dest_height ? (2.0f / float(dest_height)) : 0.0f;
-          constants.dest_sample_id = 0;
 
           const uint32_t rectangle_count =
               uint32_t(merged_transfer_rectangles.size());
 
-          std::vector<TransferTileBatch> tile_batches;
           MTL::Buffer* rect_instance_buffer = nullptr;
           size_t rect_instance_buffer_offset = 0;
           uint32_t rect_instance_count = 0;
           std::vector<TransferRectInstance> rect_instance_fallback;
-          bool use_tile_instancing = false;
-          if (::cvars::metal_transfer_tile_instancing) {
-            use_tile_instancing = build_tile_batches(
-                merged_transfer_rectangles.data(), rectangle_count, constants,
-                mode_info.uses_host_depth,
-                shader_key.host_depth_source_is_copy != 0, tile_batches);
-            if (!use_tile_instancing &&
-                transfer_tile_instance_predictive_cutoff_hit) {
-              static uint64_t last_tile_predictive_log_frame = 0;
-              if (last_tile_predictive_log_frame != frame_id_) {
-                XELOGI(
-                    "Metal transfer tile instancing fallback: predicted "
-                    "frame usage {} KiB + {} KiB near cap {} KiB",
-                    transfer_tile_instance_predictive_used_bytes >> 10,
-                    transfer_tile_instance_predictive_candidate_bytes >> 10,
-                    transfer_tile_instance_predictive_threshold_bytes >> 10);
-                last_tile_predictive_log_frame = frame_id_;
-              }
-              transfer_tile_instance_predictive_cutoff_hit = false;
-            }
-            if (!use_tile_instancing &&
-                transfer_tile_instance_adaptive_cutoff_hit) {
-              static uint64_t last_tile_adaptive_log_frame = 0;
-              if (last_tile_adaptive_log_frame != frame_id_) {
-                XELOGI(
-                    "Metal transfer tile instancing fallback: adaptive cutoff "
-                    "{} KiB > {} KiB (rects={})",
-                    transfer_tile_instance_adaptive_candidate_bytes >> 10,
-                    transfer_tile_instance_adaptive_limit_bytes >> 10,
-                    transfer_tile_instance_adaptive_rect_count);
-                last_tile_adaptive_log_frame = frame_id_;
-              }
-              transfer_tile_instance_adaptive_cutoff_hit = false;
-            }
-            if (!use_tile_instancing && transfer_tile_instance_budget_hit) {
-              static uint64_t last_tile_budget_log_frame = 0;
-              if (last_tile_budget_log_frame != frame_id_) {
-                XELOGW(
-                    "Metal transfer tile instancing fallback: exceeded {} MiB "
-                    "instance-buffer budget this frame",
-                    kTransferTileInstanceBufferMaxBytes >> 20);
-                last_tile_budget_log_frame = frame_id_;
-              }
-              transfer_tile_instance_budget_hit = false;
-            }
+          if (rectangle_count > 1) {
+            build_rect_instance_stream(merged_transfer_rectangles.data(),
+                                       rectangle_count, rect_instance_buffer,
+                                       rect_instance_buffer_offset,
+                                       rect_instance_count);
           }
-          if (!use_tile_instancing) {
-            if (rectangle_count > 1) {
-              build_rect_instance_stream(merged_transfer_rectangles.data(),
-                                         rectangle_count, rect_instance_buffer,
-                                         rect_instance_buffer_offset,
-                                         rect_instance_count);
-            }
-            if (!rect_instance_buffer || !rect_instance_count) {
-              rect_instance_fallback.reserve(rectangle_count);
-              for (uint32_t rect_index = 0; rect_index < rectangle_count;
-                   ++rect_index) {
-                uint32_t scaled_x = 0;
-                uint32_t scaled_y = 0;
-                uint32_t scaled_width = 0;
-                uint32_t scaled_height = 0;
-                if (!get_scaled_rect(merged_transfer_rectangles[rect_index],
-                                     scaled_x, scaled_y, scaled_width,
-                                     scaled_height) ||
-                    !scaled_width || !scaled_height) {
-                  continue;
-                }
-                TransferRectInstance rect_instance = {};
-                rect_instance.origin_x = float(scaled_x);
-                rect_instance.origin_y = float(scaled_y);
-                rect_instance.size_x = float(scaled_width);
-                rect_instance.size_y = float(scaled_height);
-                rect_instance_fallback.push_back(rect_instance);
+          if (!rect_instance_buffer || !rect_instance_count) {
+            rect_instance_fallback.reserve(rectangle_count);
+            for (uint32_t rect_index = 0; rect_index < rectangle_count;
+                 ++rect_index) {
+              uint32_t scaled_x = 0;
+              uint32_t scaled_y = 0;
+              uint32_t scaled_width = 0;
+              uint32_t scaled_height = 0;
+              if (!get_scaled_rect(merged_transfer_rectangles[rect_index],
+                                   scaled_x, scaled_y, scaled_width,
+                                   scaled_height) ||
+                  !scaled_width || !scaled_height) {
+                continue;
               }
+              TransferRectInstance rect_instance = {};
+              rect_instance.origin_x = float(scaled_x);
+              rect_instance.origin_y = float(scaled_y);
+              rect_instance.size_x = float(scaled_width);
+              rect_instance.size_y = float(scaled_height);
+              rect_instance_fallback.push_back(rect_instance);
             }
           }
 
           MTL::RenderPipelineState* pipeline = GetOrCreateTransferPipelines(
-              shader_key, dest_pixel_format, dest_is_uint, use_tile_instancing,
+              shader_key, dest_pixel_format, dest_is_uint,
               writes_stencil_with_depth, active_color_attachment_index,
               active_color_formats, active_depth_format, active_stencil_format);
           if (!pipeline) {
             continue;
           }
           bind_transfer_pipeline(pipeline);
+          bind_transfer_vertex_constants(vertex_constants);
 
-          bool use_sample_id_for_invocation =
-              shader_key.dest_sample_id_from_sample != 0;
-          auto draw_transfer_samples = [&](auto&& draw_fn) {
-            if (use_sample_id_for_invocation || dest_sample_count <= 1) {
-              draw_fn(0);
-              return;
+          // The emitter always takes the sample-rate path, so one draw covers
+          // every sample of a multisampled destination.
+          auto draw_transfer = [&](uint32_t stencil_mask) -> bool {
+            if (!bind_transfer_fragment_resources(shader_key, address_constant,
+                                                  host_depth_address_constant,
+                                                  stencil_mask)) {
+              return false;
             }
-            for (uint32_t sample_id = 0; sample_id < dest_sample_count;
-                 ++sample_id) {
-              draw_fn(sample_id);
-            }
-          };
-
-          auto draw_transfer = [&](uint32_t sample_id) {
-            constants.dest_sample_id = sample_id;
-            bind_transfer_constants(constants);
-            if (use_tile_instancing) {
+            if (rect_instance_buffer && rect_instance_count) {
               set_full_transfer_viewport_scissor();
-              for (const auto& batch : tile_batches) {
-                bind_transfer_scissor(batch.scissor);
-                bind_transfer_vertex_buffer_1(batch.buffer,
-                                              batch.buffer_offset);
-                encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
-                                        NS::UInteger(0), NS::UInteger(4),
-                                        NS::UInteger(batch.instance_count));
-              }
-            } else {
-              if (rect_instance_buffer && rect_instance_count) {
-                set_full_transfer_viewport_scissor();
-                bind_transfer_vertex_buffer_1(rect_instance_buffer,
-                                              rect_instance_buffer_offset);
-                encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
-                                        NS::UInteger(0), NS::UInteger(4),
-                                        NS::UInteger(rect_instance_count));
-              } else if (!rect_instance_fallback.empty()) {
-                set_full_transfer_viewport_scissor();
-                constexpr uint32_t kTransferRectInlineBatchMax = 240;
-                const TransferRectInstance* rect_instances =
-                    rect_instance_fallback.data();
-                uint32_t rect_instances_remaining =
-                    uint32_t(rect_instance_fallback.size());
-                while (rect_instances_remaining) {
-                  uint32_t batch_count = std::min(rect_instances_remaining,
-                                                  kTransferRectInlineBatchMax);
-                  if (batch_count == 1) {
-                    bind_transfer_vertex_bytes_1(*rect_instances);
-                  } else {
-                    bind_transfer_vertex_bytes_1_span(rect_instances,
-                                                      batch_count);
-                  }
-                  encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
-                                          NS::UInteger(0), NS::UInteger(4),
-                                          NS::UInteger(batch_count));
-                  rect_instances += batch_count;
-                  rect_instances_remaining -= batch_count;
+              bind_transfer_vertex_buffer_1(rect_instance_buffer,
+                                            rect_instance_buffer_offset);
+              encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
+                                      NS::UInteger(0), NS::UInteger(4),
+                                      NS::UInteger(rect_instance_count));
+            } else if (!rect_instance_fallback.empty()) {
+              set_full_transfer_viewport_scissor();
+              constexpr uint32_t kTransferRectInlineBatchMax = 240;
+              const TransferRectInstance* rect_instances =
+                  rect_instance_fallback.data();
+              uint32_t rect_instances_remaining =
+                  uint32_t(rect_instance_fallback.size());
+              while (rect_instances_remaining) {
+                uint32_t batch_count = std::min(rect_instances_remaining,
+                                                kTransferRectInlineBatchMax);
+                if (batch_count == 1) {
+                  bind_transfer_vertex_bytes_1(*rect_instances);
+                } else {
+                  bind_transfer_vertex_bytes_1_span(rect_instances,
+                                                    batch_count);
                 }
+                encoder->drawPrimitives(MTL::PrimitiveTypeTriangleStrip,
+                                        NS::UInteger(0), NS::UInteger(4),
+                                        NS::UInteger(batch_count));
+                rect_instances += batch_count;
+                rect_instances_remaining -= batch_count;
               }
             }
+            return true;
           };
 
           if (is_stencil_bit) {
@@ -5811,16 +5438,14 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
               if (!stencil_state) {
                 continue;
               }
-              constants.stencil_mask = uint32_t(1) << bit;
-              constants.stencil_clear = 0;
               bind_transfer_depth_state(stencil_state);
               bind_transfer_stencil_reference(uint32_t(1) << bit);
-              draw_transfer_samples(draw_transfer);
+              if (!draw_transfer(uint32_t(1) << bit)) {
+                break;
+              }
             }
           } else {
-            constants.stencil_mask = 0;
-            constants.stencil_clear = 0;
-            draw_transfer_samples(draw_transfer);
+            draw_transfer(0);
           }
           any_transfers_done = true;
         }
@@ -6037,28 +5662,140 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
   return true;
 }
 
+MTL::Function* MetalRenderTargetCache::GetTransferRectVertexFunction() {
+  if (transfer_rect_vertex_function_) {
+    return transfer_rect_vertex_function_;
+  }
+  MTL::Library* library = GetOrCreateTransferLibrary();
+  if (!library) {
+    return nullptr;
+  }
+  transfer_rect_vertex_function_ = library->newFunction(
+      NS::String::string("transfer_rect_vs", NS::UTF8StringEncoding));
+  if (!transfer_rect_vertex_function_) {
+    XELOGE(
+        "MetalRenderTargetCache: the transfer library has no transfer_rect_vs");
+  }
+  return transfer_rect_vertex_function_;
+}
+
+MTL::Function* MetalRenderTargetCache::GetOrCreateTransferFragmentFunction(
+    EdramTransferShaderKey key) {
+  auto it = transfer_fragment_functions_.find(key);
+  if (it != transfer_fragment_functions_.end()) {
+    return it->second;
+  }
+
+  const EdramTransferModeInfo& mode_info =
+      kEdramTransferModes[size_t(key.mode)];
+
+  EdramTransferShaderOptions options;
+  // The host depth buffer is declared with the pre-1.3 BufferBlock and Uniform
+  // forms, like the dump shader's EDRAM buffer.
+  options.spirv_version = 0x00010000;
+  options.resolution_scale_x = draw_resolution_scale_x();
+  options.resolution_scale_y = draw_resolution_scale_y();
+  options.msaa_2x_attachments_supported = msaa_2x_supported_;
+  if (EdramTransferSourceIsColor(key.mode)) {
+    GetColorOwnershipTransferPixelFormat(
+        xenos::ColorRenderTargetFormat(key.source_resource_format),
+        &options.source_color_is_uint);
+  }
+  if (mode_info.output == EdramTransferOutput::kColor) {
+    GetColorOwnershipTransferPixelFormat(
+        xenos::ColorRenderTargetFormat(key.dest_resource_format),
+        &options.dest_color_is_uint);
+  }
+  options.stencil_reference_output_supported =
+      UseNativeStencilOutputInTransfers();
+  // Metal has per-sample shading everywhere, so the emitter never needs the
+  // specialization constant it would otherwise use for the sample index -
+  // which would not survive spirv_to_dxil.
+  options.sample_rate_shading_supported = true;
+  options.depth_float24_round = ::cvars::depth_float24_round;
+  options.depth_float24_convert_in_pixel_shader =
+      ::cvars::depth_float24_convert_in_pixel_shader;
+  options.no_discard_stencil =
+      ::cvars::no_discard_stencil_in_transfer_pipelines;
+  options.fast_pitch_divmod = ::cvars::metal_transfer_fast_divmod;
+
+  MTL::Function* function = nullptr;
+  std::vector<uint32_t> spirv = BuildEdramTransferShaderSpirv(key, options);
+  if (spirv.empty()) {
+    XELOGE(
+        "MetalRenderTargetCache: failed to emit the transfer shader 0x{:08X}",
+        key.key);
+  } else {
+    std::vector<uint8_t> dxil = SpirvToDxilCompiler::Translate(
+        spirv.data(), spirv.size(), SpirvToDxilCompiler::Stage::kPixel);
+    if (dxil.empty()) {
+      XELOGE(
+          "MetalRenderTargetCache: failed to translate the transfer shader "
+          "0x{:08X}",
+          key.key);
+    } else {
+      MetalShaderConversionResult conversion =
+          command_processor_.metal_shader_converter().ConvertInternalGraphics(
+              MetalShaderStage::kFragment, dxil);
+      if (!conversion.success) {
+        XELOGE(
+            "MetalRenderTargetCache: failed to convert the transfer shader "
+            "0x{:08X}: {}",
+            key.key, conversion.error_message);
+      } else {
+        NS::Error* error = nullptr;
+        dispatch_data_t data = dispatch_data_create(
+            conversion.metallib.data(), conversion.metallib.size(), nullptr,
+            DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        MTL::Library* library = device_->newLibrary(data, &error);
+        dispatch_release(data);
+        if (!library) {
+          XELOGE(
+              "MetalRenderTargetCache: transfer shader 0x{:08X} metallib "
+              "rejected: {}",
+              key.key,
+              error ? error->localizedDescription()->utf8String() : "unknown");
+        } else {
+          function = library->newFunction(NS::String::string(
+              conversion.entry_point_name.c_str(), NS::UTF8StringEncoding));
+          if (!function) {
+            XELOGE(
+                "MetalRenderTargetCache: transfer shader 0x{:08X} has no "
+                "function named {}",
+                key.key, conversion.entry_point_name);
+          }
+          library->release();
+        }
+      }
+    }
+  }
+  // A failed key is cached as null so it is not retried on every transfer.
+  transfer_fragment_functions_.emplace(key, function);
+  return function;
+}
+
 MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateTransferPipelines(
-    const TransferShaderKey& key, MTL::PixelFormat dest_format,
-    bool dest_is_uint, bool tile_instanced, bool native_stencil_output,
+    const EdramTransferShaderKey& key, MTL::PixelFormat dest_format,
+    bool dest_is_uint, bool native_stencil_output,
     uint32_t color_attachment_index,
     const TransferColorAttachmentFormats* color_attachment_formats,
     MTL::PixelFormat depth_attachment_format,
     MTL::PixelFormat stencil_attachment_format) {
-  const TransferModeInfo& mode_info = kTransferModeInfos[size_t(key.mode)];
-  TransferOutput output = mode_info.output;
-  bool source_is_color = mode_info.source_is_color;
-  bool has_host_depth = mode_info.uses_host_depth;
+  const EdramTransferModeInfo& mode_info =
+      kEdramTransferModes[size_t(key.mode)];
+  EdramTransferOutput output = mode_info.output;
+  bool source_is_color = EdramTransferSourceIsColor(key.mode);
+  bool has_host_depth = EdramTransferUsesHostDepth(key.mode);
   native_stencil_output =
-      native_stencil_output && output == TransferOutput::kDepth;
+      native_stencil_output && output == EdramTransferOutput::kDepth;
 
   TransferPipelineKey pipeline_key = {};
   pipeline_key.shader_key = key;
-  pipeline_key.shader_key.host_depth_source_is_copy = 0;
   pipeline_key.native_stencil_output = native_stencil_output ? 1u : 0u;
   if (color_attachment_formats) {
     pipeline_key.color_attachment_formats = *color_attachment_formats;
   }
-  if (output == TransferOutput::kColor) {
+  if (output == EdramTransferOutput::kColor) {
     if (color_attachment_index >= xenos::kMaxColorRenderTargets) {
       return nullptr;
     }
@@ -6095,1903 +5832,30 @@ MTL::RenderPipelineState* MetalRenderTargetCache::GetOrCreateTransferPipelines(
     }
   }
 
-  auto& pipeline_map =
-      tile_instanced ? transfer_tile_pipelines_ : transfer_pipelines_;
-  auto it = pipeline_map.find(pipeline_key);
-  if (it != pipeline_map.end()) {
+  auto it = transfer_pipelines_.find(pipeline_key);
+  if (it != transfer_pipelines_.end()) {
     return it->second;
   }
 
-  xenos::ColorRenderTargetFormat source_color_format =
-      xenos::ColorRenderTargetFormat(key.source_resource_format);
-  xenos::ColorRenderTargetFormat dest_color_format =
-      xenos::ColorRenderTargetFormat(key.dest_resource_format);
-  xenos::DepthRenderTargetFormat source_depth_format =
-      xenos::DepthRenderTargetFormat(key.source_resource_format);
-  xenos::DepthRenderTargetFormat dest_depth_format =
-      xenos::DepthRenderTargetFormat(key.dest_resource_format);
-
-  bool source_is_uint = false;
-  if (source_is_color) {
-    GetColorOwnershipTransferPixelFormat(source_color_format, &source_is_uint);
+  MTL::Function* fragment_function = GetOrCreateTransferFragmentFunction(key);
+  MTL::Function* vertex_function = GetTransferRectVertexFunction();
+  if (!fragment_function || !vertex_function) {
+    transfer_pipelines_.emplace(pipeline_key, nullptr);
+    return nullptr;
   }
-  bool source_is_64bpp = false;
-  if (source_is_color) {
-    source_is_64bpp =
-        xenos::IsColorRenderTargetFormat64bpp(source_color_format);
-  }
-  bool dest_is_depth = output != TransferOutput::kColor;
-  bool dest_is_64bpp = false;
-  if (!dest_is_depth) {
-    dest_is_64bpp =
-        xenos::IsColorRenderTargetFormat64bpp(dest_color_format) ||
-        (dest_color_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA &&
-         gamma_render_target_as_unorm16_);
-  }
-  // A depth destination that writes stencil from this same draw needs the
-  // source's stencil alongside its depth.
-  bool source_needs_stencil =
-      !source_is_color &&
-      (output == TransferOutput::kColor ||
-       output == TransferOutput::kStencilBit ||
-       (output == TransferOutput::kDepth && native_stencil_output));
-
-  uint32_t dest_component_count = 1;
-  if (output == TransferOutput::kColor) {
-    dest_component_count =
-        xenos::GetColorRenderTargetFormatComponentCount(dest_color_format);
-  }
-
-  bool source_is_multisample =
-      key.source_msaa_samples != xenos::MsaaSamples::k1X;
-  bool dest_is_multisample = key.dest_msaa_samples != xenos::MsaaSamples::k1X;
-  bool host_depth_is_multisample =
-      key.host_depth_source_msaa_samples != xenos::MsaaSamples::k1X;
-  uint32_t host_depth_texture_index = source_is_color ? 1 : 2;
-
-  auto append_define = [](std::string& source, const char* name,
-                          uint32_t value) {
-    source.append("#define ");
-    source.append(name);
-    source.push_back(' ');
-    source.append(std::to_string(value));
-    source.push_back('\n');
-  };
-
-  std::string source;
-  source.reserve(16384);
-  append_define(source, "XE_TRANSFER_SOURCE_IS_COLOR", source_is_color ? 1 : 0);
-  append_define(source, "XE_TRANSFER_SOURCE_IS_DEPTH", source_is_color ? 0 : 1);
-  append_define(source, "XE_TRANSFER_SOURCE_NEEDS_STENCIL",
-                source_needs_stencil ? 1 : 0);
-  append_define(source, "XE_TRANSFER_SOURCE_IS_UINT", source_is_uint ? 1 : 0);
-  append_define(source, "XE_TRANSFER_SOURCE_IS_64BPP", source_is_64bpp ? 1 : 0);
-  append_define(source, "XE_TRANSFER_SOURCE_IS_MULTISAMPLE",
-                source_is_multisample ? 1 : 0);
-  append_define(source, "XE_TRANSFER_DEST_IS_UINT", dest_is_uint ? 1 : 0);
-  append_define(source, "XE_TRANSFER_DEST_IS_DEPTH", dest_is_depth ? 1 : 0);
-  append_define(source, "XE_TRANSFER_DEST_IS_64BPP", dest_is_64bpp ? 1 : 0);
-  append_define(source, "XE_TRANSFER_DEST_COMPONENTS", dest_component_count);
-  append_define(source, "XE_TRANSFER_DEST_IS_MULTISAMPLE",
-                dest_is_multisample ? 1 : 0);
-  append_define(source, "XE_TRANSFER_DEST_SAMPLE_ID_FROM_SAMPLE",
-                key.dest_sample_id_from_sample ? 1 : 0);
-  append_define(source, "XE_TRANSFER_HAS_HOST_DEPTH", has_host_depth ? 1 : 0);
-  append_define(source, "XE_TRANSFER_HOST_DEPTH_IS_MULTISAMPLE",
-                host_depth_is_multisample ? 1 : 0);
-  append_define(source, "XE_TRANSFER_SOURCE_FORMAT",
-                key.source_resource_format);
-  append_define(source, "XE_TRANSFER_DEST_FORMAT", key.dest_resource_format);
-  append_define(source, "XE_TRANSFER_SOURCE_MSAA_SAMPLES",
-                MsaaSamplesToCount(key.source_msaa_samples));
-  append_define(source, "XE_TRANSFER_DEST_MSAA_SAMPLES",
-                MsaaSamplesToCount(key.dest_msaa_samples));
-  append_define(source, "XE_TRANSFER_HOST_DEPTH_MSAA_SAMPLES",
-                MsaaSamplesToCount(key.host_depth_source_msaa_samples));
-  append_define(source, "XE_TRANSFER_SOURCE_TEXTURE_INDEX", 0);
-  append_define(source, "XE_TRANSFER_STENCIL_TEXTURE_INDEX", 1);
-  append_define(source, "XE_TRANSFER_HOST_DEPTH_TEXTURE_INDEX",
-                host_depth_texture_index);
-  append_define(source, "XE_TRANSFER_OUTPUT_COLOR",
-                output == TransferOutput::kColor ? 1 : 0);
-  append_define(source, "XE_TRANSFER_OUTPUT_DEPTH",
-                output == TransferOutput::kDepth ? 1 : 0);
-  append_define(source, "XE_TRANSFER_OUTPUT_STENCIL_BIT",
-                output == TransferOutput::kStencilBit ? 1 : 0);
-  append_define(source, "XE_TRANSFER_NATIVE_STENCIL_OUTPUT",
-                native_stencil_output ? 1 : 0);
-  append_define(source, "XE_TRANSFER_TILE_INSTANCED", tile_instanced ? 1 : 0);
-  append_define(source, "XE_TRANSFER_FAST_DIVMOD",
-                ::cvars::metal_transfer_fast_divmod ? 1 : 0);
-  append_define(source, "XE_FMT_8_8_8_8",
-                uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8));
-  append_define(source, "XE_FMT_8_8_8_8_GAMMA",
-                uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA));
-  append_define(source, "XE_FMT_2_10_10_10",
-                uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10));
-  append_define(
-      source, "XE_FMT_2_10_10_10_AS_10_10_10_10",
-      uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10));
-  append_define(source, "XE_FMT_2_10_10_10_FLOAT",
-                uint32_t(xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT));
-  append_define(
-      source, "XE_FMT_2_10_10_10_FLOAT_AS_16_16_16_16",
-      uint32_t(
-          xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16));
-  append_define(source, "XE_FMT_16_16",
-                uint32_t(xenos::ColorRenderTargetFormat::k_16_16));
-  append_define(source, "XE_FMT_16_16_FLOAT",
-                uint32_t(xenos::ColorRenderTargetFormat::k_16_16_FLOAT));
-  append_define(source, "XE_FMT_16_16_16_16",
-                uint32_t(xenos::ColorRenderTargetFormat::k_16_16_16_16));
-  append_define(source, "XE_FMT_16_16_16_16_FLOAT",
-                uint32_t(xenos::ColorRenderTargetFormat::k_16_16_16_16_FLOAT));
-  append_define(source, "XE_FMT_32_FLOAT",
-                uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT));
-  append_define(source, "XE_FMT_32_32_FLOAT",
-                uint32_t(xenos::ColorRenderTargetFormat::k_32_32_FLOAT));
-  append_define(source, "XE_FMT_D24S8",
-                uint32_t(xenos::DepthRenderTargetFormat::kD24S8));
-  append_define(source, "XE_FMT_D24FS8",
-                uint32_t(xenos::DepthRenderTargetFormat::kD24FS8));
-  append_define(source, "XE_GAMMA_RT_AS_UNORM16",
-                gamma_render_target_as_unorm16_ ? 1 : 0);
-
-  static const char kTransferShaderSource[] = R"METAL(
-#include <metal_stdlib>
-using namespace metal;
-
-struct TransferAddressConstants {
-  uint dest_pitch;
-  uint source_pitch;
-  int source_to_dest;
-};
-
-struct TransferShaderConstants {
-  TransferAddressConstants address;
-  TransferAddressConstants host_depth_address;
-  uint source_format;
-  uint dest_format;
-  uint source_is_depth;
-  uint dest_is_depth;
-  uint source_is_uint;
-  uint dest_is_uint;
-  uint source_is_64bpp;
-  uint dest_is_64bpp;
-  uint source_msaa_samples;
-  uint dest_msaa_samples;
-  uint host_depth_source_msaa_samples;
-  uint host_depth_source_is_copy;
-  uint depth_round;
-  uint msaa_2x_supported;
-  uint tile_width_samples;
-  uint tile_height_samples;
-  uint dest_tile_width_pixels;
-  uint dest_tile_height_pixels;
-  float dest_tile_width_pixels_inv;
-  float dest_tile_height_pixels_inv;
-  float source_pitch_tiles_inv;
-  float host_depth_source_pitch_tiles_inv;
-  float dest_pixel_to_ndc_x;
-  float dest_pixel_to_ndc_y;
-  uint dest_sample_id;
-  uint stencil_mask;
-  uint stencil_clear;
-};
-
-struct TransferTileInstance {
-  float2 tile_origin;
-  uint tile_index;
-  uint padding;
-  uint2 source_base;
-  uint2 host_base;
-};
-
-struct TransferRectInstance {
-  float2 origin;
-  float2 size;
-};
-
-constant uint kEdramTileCount = 2048u;
-
-inline uint XeBitFieldMask(uint count) {
-  if (count >= 32u) {
-    return 0xFFFFFFFFu;
-  }
-  return (1u << count) - 1u;
-}
-
-inline uint XeBitFieldInsert(uint base, uint insert, uint offset, uint count) {
-  uint mask = XeBitFieldMask(count) << offset;
-  return (base & ~mask) | ((insert << offset) & mask);
-}
-
-inline uint XeBitFieldExtract(uint value, uint offset, uint count) {
-  return (value >> offset) & XeBitFieldMask(count);
-}
-
-inline uint XeRoundToNearestEven(float value) {
-  float floor_value = floor(value);
-  float frac = value - floor_value;
-  uint result = uint(floor_value);
-  if (frac > 0.5f || (frac == 0.5f && (result & 1u))) {
-    result += 1u;
-  }
-  return result;
-}
-
-inline uint XePackUnorm(float value, float scale) {
-  return uint(clamp(value, 0.0f, 1.0f) * scale + 0.5f);
-}
-
-inline float XeSaturateNoNaN(float value) {
-  float clamped = clamp(value, 0.0f, 1.0f);
-  return (clamped == clamped) ? clamped : 0.0f;
-}
-
-inline float XeTruncToFloat(float value) {
-  return trunc(value);
-}
-
-inline float XePWLGammaToLinear(float value) {
-  float clamped = XeSaturateNoNaN(value);
-  float scale;
-  float offset;
-  if (clamped >= (96.0f / 255.0f)) {
-    if (clamped >= (192.0f / 255.0f)) {
-      scale = 8.0f / 1024.0f;
-      offset = -1024.0f;
-    } else {
-      scale = 4.0f / 1024.0f;
-      offset = -256.0f;
-    }
-  } else {
-    if (clamped >= (64.0f / 255.0f)) {
-      scale = 2.0f / 1024.0f;
-      offset = -64.0f;
-    } else {
-      scale = 1.0f / 1024.0f;
-      offset = 0.0f;
-    }
-  }
-  float linear = clamped * (255.0f * 1024.0f) * scale + offset;
-  linear += XeTruncToFloat(linear * scale);
-  return linear * (1.0f / 1023.0f);
-}
-
-inline void XeFastDivMod(uint x, uint w, float inv_w, thread uint& q,
-                         thread uint& r) {
-  q = uint(float(x) * inv_w);
-  r = x - q * w;
-  if (r >= w) {
-    r -= w;
-    q += 1u;
-  } else if (r > x) {
-    r += w;
-    q -= 1u;
-  }
-}
-
-inline float XeLinearToPWLGamma(float value) {
-  float clamped = XeSaturateNoNaN(value);
-  float scale;
-  float offset;
-  if (clamped >= (128.0f / 1023.0f)) {
-    if (clamped >= (512.0f / 1023.0f)) {
-      scale = 1023.0f / 8.0f;
-      offset = 128.0f / 255.0f;
-    } else {
-      scale = 1023.0f / 4.0f;
-      offset = 64.0f / 255.0f;
-    }
-  } else {
-    if (clamped >= (64.0f / 1023.0f)) {
-      scale = 1023.0f / 2.0f;
-      offset = 32.0f / 255.0f;
-    } else {
-      scale = 1023.0f;
-      offset = 0.0f;
-    }
-  }
-  return XeTruncToFloat(clamped * scale) * (1.0f / 255.0f) + offset;
-}
-
-inline float3 XePWLGammaToLinear3(float3 v) {
-  return float3(XePWLGammaToLinear(v.r), XePWLGammaToLinear(v.g),
-                XePWLGammaToLinear(v.b));
-}
-
-inline float3 XeLinearToPWLGamma3(float3 v) {
-  return float3(XeLinearToPWLGamma(v.r), XeLinearToPWLGamma(v.g),
-                XeLinearToPWLGamma(v.b));
-}
-
-uint XePreClampedFloat32To7e3(float value) {
-  uint f32 = as_type<uint>(value);
-  uint biased_f32;
-  if (f32 < 0x3E800000u) {
-    uint f32_exp = f32 >> 23u;
-    uint shift = 125u - f32_exp;
-    shift = min(shift, 24u);
-    uint mantissa = (f32 & 0x7FFFFFu) | 0x800000u;
-    biased_f32 = mantissa >> shift;
-  } else {
-    biased_f32 = f32 + 0xC2000000u;
-  }
-  uint round_bit = (biased_f32 >> 16u) & 1u;
-  uint f10 = biased_f32 + 0x7FFFu + round_bit;
-  return (f10 >> 16u) & 0x3FFu;
-}
-
-uint XeUnclampedFloat32To7e3(float value) {
-  float clamped = min(max(value, 0.0f), 31.875f);
-  return XePreClampedFloat32To7e3(clamped);
-}
-
-float XeFloat7e3To32(uint f10) {
-  f10 &= 0x3FFu;
-  if (f10 == 0u) {
-    return 0.0f;
-  }
-  uint mantissa = f10 & 0x7Fu;
-  uint exponent = f10 >> 7u;
-  if (exponent == 0u) {
-    uint mantissa_lzcnt = clz(mantissa) - 24u;
-    exponent = uint(int(1) - int(mantissa_lzcnt));
-    mantissa = (mantissa << mantissa_lzcnt) & 0x7Fu;
-  }
-  uint f32 = ((exponent + 124u) << 23u) | (mantissa << 16u);
-  return as_type<float>(f32);
-}
-
-uint XeFloat32To20e4(float value, bool round_to_nearest_even) {
-  uint f32 = as_type<uint>(value);
-  f32 = min((f32 <= 0x7FFFFFFFu) ? f32 : 0u, 0x3FFFFFF8u);
-  uint denormalized =
-      ((f32 & 0x7FFFFFu) | 0x800000u) >> min(113u - (f32 >> 23u), 24u);
-  uint f24 = (f32 < 0x38800000u) ? denormalized : (f32 + 0xC8000000u);
-  if (round_to_nearest_even) {
-    f24 += 3u + ((f24 >> 3u) & 1u);
-  }
-  return (f24 >> 3u) & 0xFFFFFFu;
-}
-
-float XeFloat20e4To32(uint f24, bool remap_to_0_to_0_5) {
-  if (f24 == 0u) {
-    return 0.0f;
-  }
-  uint mantissa = f24 & 0xFFFFFu;
-  uint exponent = f24 >> 20u;
-  if (exponent == 0u) {
-    uint msb = 31u - clz(mantissa);
-    uint mantissa_lzcnt = 20u - msb;
-    exponent = 1u - mantissa_lzcnt;
-    mantissa = (mantissa << mantissa_lzcnt) & 0xFFFFFu;
-  }
-  uint bias = remap_to_0_to_0_5 ? 111u : 112u;
-  uint f32 = ((exponent + bias) << 23u) | (mantissa << 3u);
-  return as_type<float>(f32);
-}
-
-float XeUnorm24To32(uint n24) {
-  return float(n24 + (n24 >> 23u)) * (1.0f / 16777216.0f);
-}
-
-uint XePackColorRGBA8(float4 color) {
-  uint r = XePackUnorm(color.r, 255.0f);
-  uint g = XePackUnorm(color.g, 255.0f);
-  uint b = XePackUnorm(color.b, 255.0f);
-  uint a = XePackUnorm(color.a, 255.0f);
-  return r | (g << 8u) | (b << 16u) | (a << 24u);
-}
-
-uint XePackColorRGB10A2(float4 color) {
-  uint r = XePackUnorm(color.r, 1023.0f);
-  uint g = XePackUnorm(color.g, 1023.0f);
-  uint b = XePackUnorm(color.b, 1023.0f);
-  uint a = XePackUnorm(color.a, 3.0f);
-  return r | (g << 10u) | (b << 20u) | (a << 30u);
-}
-
-uint XePackColorRGB10A2Float(float4 color) {
-  uint r = XeUnclampedFloat32To7e3(color.r);
-  uint g = XeUnclampedFloat32To7e3(color.g);
-  uint b = XeUnclampedFloat32To7e3(color.b);
-  uint a = XePackUnorm(color.a, 3.0f);
-  return (r & 0x3FFu) | ((g & 0x3FFu) << 10u) |
-         ((b & 0x3FFu) << 20u) | ((a & 0x3u) << 30u);
-}
-
-struct VSOut {
-  float4 position [[position]];
-  float2 tile_origin [[flat]];
-  uint tile_index [[flat]];
-  uint2 source_base [[flat]];
-  uint2 host_base [[flat]];
-};
-
-vertex VSOut transfer_vs(uint vid [[vertex_id]]) {
-  float2 pt = float2((vid << 1) & 2, vid & 2);
-  VSOut out;
-  out.position = float4(pt * 2.0f - 1.0f, 0.0f, 1.0f);
-  out.tile_origin = float2(0.0f);
-  out.tile_index = 0u;
-  out.source_base = uint2(0u);
-  out.host_base = uint2(0u);
-  return out;
-}
-
-vertex VSOut transfer_rect_vs(uint vid [[vertex_id]],
-                              uint iid [[instance_id]],
-                              constant TransferShaderConstants& constants
-                                  [[buffer(0)]],
-                              constant TransferRectInstance* instances
-                                  [[buffer(1)]]) {
-  float2 quad = float2(float(vid & 1), float(vid >> 1));
-  TransferRectInstance inst = instances[iid];
-  float2 pos_pixel = inst.origin + quad * inst.size;
-  float2 ndc;
-  ndc.x = pos_pixel.x * constants.dest_pixel_to_ndc_x - 1.0f;
-  ndc.y = 1.0f - pos_pixel.y * constants.dest_pixel_to_ndc_y;
-  VSOut out;
-  out.position = float4(ndc, 0.0f, 1.0f);
-  out.tile_origin = float2(0.0f);
-  out.tile_index = 0u;
-  out.source_base = uint2(0u);
-  out.host_base = uint2(0u);
-  return out;
-}
-
-vertex VSOut transfer_tile_vs(uint vid [[vertex_id]],
-                              uint iid [[instance_id]],
-                              constant TransferShaderConstants& constants
-                                  [[buffer(0)]],
-                              device const TransferTileInstance* instances
-                                  [[buffer(1)]]) {
-  float2 quad = float2(float(vid & 1), float(vid >> 1));
-  TransferTileInstance inst = instances[iid];
-  float2 tile_size = float2(constants.dest_tile_width_pixels,
-                            constants.dest_tile_height_pixels);
-  float2 pos_pixel = inst.tile_origin + quad * tile_size;
-  float2 ndc;
-  ndc.x = pos_pixel.x * constants.dest_pixel_to_ndc_x - 1.0f;
-  ndc.y = 1.0f - pos_pixel.y * constants.dest_pixel_to_ndc_y;
-  VSOut out;
-  out.position = float4(ndc, 0.0f, 1.0f);
-  out.tile_origin = inst.tile_origin;
-  out.tile_index = inst.tile_index;
-  out.source_base = inst.source_base;
-  out.host_base = inst.host_base;
-  return out;
-}
-
-#if XE_TRANSFER_SOURCE_IS_COLOR
-  #if XE_TRANSFER_SOURCE_IS_UINT
-    #if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      #define XE_TRANSFER_SOURCE_PARAMS \
-          , texture2d_ms<uint, access::read> xe_transfer_source \
-              [[texture(XE_TRANSFER_SOURCE_TEXTURE_INDEX)]]
-    #else
-      #define XE_TRANSFER_SOURCE_PARAMS \
-          , texture2d<uint, access::read> xe_transfer_source \
-              [[texture(XE_TRANSFER_SOURCE_TEXTURE_INDEX)]]
-    #endif
-  #else
-    #if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      #define XE_TRANSFER_SOURCE_PARAMS \
-          , texture2d_ms<float, access::read> xe_transfer_source \
-              [[texture(XE_TRANSFER_SOURCE_TEXTURE_INDEX)]]
-    #else
-      #define XE_TRANSFER_SOURCE_PARAMS \
-          , texture2d<float, access::read> xe_transfer_source \
-              [[texture(XE_TRANSFER_SOURCE_TEXTURE_INDEX)]]
-    #endif
-  #endif
-#else
-  #if XE_TRANSFER_SOURCE_NEEDS_STENCIL
-    #if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      #define XE_TRANSFER_SOURCE_PARAMS \
-          , texture2d_ms<float, access::read> xe_transfer_source_depth \
-              [[texture(XE_TRANSFER_SOURCE_TEXTURE_INDEX)]], \
-            texture2d_ms<uint, access::read> xe_transfer_source_stencil \
-              [[texture(XE_TRANSFER_STENCIL_TEXTURE_INDEX)]]
-    #else
-      #define XE_TRANSFER_SOURCE_PARAMS \
-          , texture2d<float, access::read> xe_transfer_source_depth \
-              [[texture(XE_TRANSFER_SOURCE_TEXTURE_INDEX)]], \
-            texture2d<uint, access::read> xe_transfer_source_stencil \
-              [[texture(XE_TRANSFER_STENCIL_TEXTURE_INDEX)]]
-    #endif
-  #else
-    #if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      #define XE_TRANSFER_SOURCE_PARAMS \
-          , texture2d_ms<float, access::read> xe_transfer_source_depth \
-              [[texture(XE_TRANSFER_SOURCE_TEXTURE_INDEX)]]
-    #else
-      #define XE_TRANSFER_SOURCE_PARAMS \
-          , texture2d<float, access::read> xe_transfer_source_depth \
-              [[texture(XE_TRANSFER_SOURCE_TEXTURE_INDEX)]]
-    #endif
-  #endif
-#endif
-
-#if XE_TRANSFER_HAS_HOST_DEPTH
-  #define XE_TRANSFER_HOST_DEPTH_BUFFER_PARAM \
-      , device const uint* xe_transfer_host_depth_buffer [[buffer(1)]]
-#else
-  #define XE_TRANSFER_HOST_DEPTH_BUFFER_PARAM
-#endif
-
-#if XE_TRANSFER_HAS_HOST_DEPTH
-  #if XE_TRANSFER_HOST_DEPTH_IS_MULTISAMPLE
-    #define XE_TRANSFER_HOST_DEPTH_TEXTURE_PARAM \
-        , texture2d_ms<float, access::read> xe_transfer_host_depth \
-            [[texture(XE_TRANSFER_HOST_DEPTH_TEXTURE_INDEX)]]
-  #else
-    #define XE_TRANSFER_HOST_DEPTH_TEXTURE_PARAM \
-        , texture2d<float, access::read> xe_transfer_host_depth \
-            [[texture(XE_TRANSFER_HOST_DEPTH_TEXTURE_INDEX)]]
-  #endif
-#else
-  #define XE_TRANSFER_HOST_DEPTH_TEXTURE_PARAM
-#endif
-
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE && XE_TRANSFER_DEST_SAMPLE_ID_FROM_SAMPLE
-  #define XE_TRANSFER_SAMPLE_ID_PARAM , uint xe_sample_id [[sample_id]]
-#else
-  #define XE_TRANSFER_SAMPLE_ID_PARAM
-#endif
-
-#if XE_TRANSFER_OUTPUT_COLOR
-  #if XE_TRANSFER_DEST_IS_UINT
-    #if XE_TRANSFER_DEST_COMPONENTS == 1
-      typedef uint XeTransferColorOutType;
-    #elif XE_TRANSFER_DEST_COMPONENTS == 2
-      typedef uint2 XeTransferColorOutType;
-    #else
-      typedef uint4 XeTransferColorOutType;
-    #endif
-  #else
-    #if XE_TRANSFER_DEST_COMPONENTS == 1
-      typedef float XeTransferColorOutType;
-    #elif XE_TRANSFER_DEST_COMPONENTS == 2
-      typedef float2 XeTransferColorOutType;
-    #else
-      typedef float4 XeTransferColorOutType;
-    #endif
-  #endif
-
-struct TransferColorOut {
-  XeTransferColorOutType color [[color(0)]];
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE
-  uint sample_mask [[sample_mask]];
-#endif
-};
-
-fragment TransferColorOut transfer_ps(
-    VSOut in [[stage_in]],
-    constant TransferShaderConstants& constants [[buffer(0)]]
-    XE_TRANSFER_HOST_DEPTH_BUFFER_PARAM
-    XE_TRANSFER_SOURCE_PARAMS
-    XE_TRANSFER_HOST_DEPTH_TEXTURE_PARAM
-    XE_TRANSFER_SAMPLE_ID_PARAM) {
-  uint2 dest_pixel = uint2(in.position.xy);
-  uint dest_sample_id = 0u;
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE
-  #if XE_TRANSFER_DEST_SAMPLE_ID_FROM_SAMPLE
-    dest_sample_id = xe_sample_id;
-  #else
-    dest_sample_id = constants.dest_sample_id;
-  #endif
-#endif
-
-  uint tile_width_samples = constants.tile_width_samples;
-  uint tile_height_samples = constants.tile_height_samples;
-  uint dest_tile_width_pixels = constants.dest_tile_width_pixels;
-  uint dest_tile_height_pixels = constants.dest_tile_height_pixels;
-
-  uint dest_tile_pixel_x = 0u;
-  uint dest_tile_pixel_y = 0u;
-  uint dest_tile_index = 0u;
-#if XE_TRANSFER_TILE_INSTANCED
-  uint2 tile_origin = uint2(in.tile_origin);
-  dest_tile_pixel_x = dest_pixel.x - tile_origin.x;
-  dest_tile_pixel_y = dest_pixel.y - tile_origin.y;
-  dest_tile_index = in.tile_index;
-#else
-  uint dest_tile_index_x = 0u;
-  uint dest_tile_index_y = 0u;
-#if XE_TRANSFER_FAST_DIVMOD
-  XeFastDivMod(dest_pixel.x, dest_tile_width_pixels,
-               constants.dest_tile_width_pixels_inv, dest_tile_index_x,
-               dest_tile_pixel_x);
-  XeFastDivMod(dest_pixel.y, dest_tile_height_pixels,
-               constants.dest_tile_height_pixels_inv, dest_tile_index_y,
-               dest_tile_pixel_y);
-#else
-  dest_tile_index_x = dest_pixel.x / dest_tile_width_pixels;
-  dest_tile_pixel_x = dest_pixel.x % dest_tile_width_pixels;
-  dest_tile_index_y = dest_pixel.y / dest_tile_height_pixels;
-  dest_tile_pixel_y = dest_pixel.y % dest_tile_height_pixels;
-#endif
-
-  dest_tile_index =
-      dest_tile_index_x +
-      dest_tile_index_y * constants.address.dest_pitch;
-#endif
-
-  uint source_sample_id = dest_sample_id;
-  uint source_tile_pixel_x = dest_tile_pixel_x;
-  uint source_tile_pixel_y = dest_tile_pixel_y;
-  uint source_color_half = 0u;
-  bool source_color_half_valid = false;
-
-  bool source_is_64bpp = XE_TRANSFER_SOURCE_IS_64BPP != 0u;
-  bool dest_is_64bpp = XE_TRANSFER_DEST_IS_64BPP != 0u;
-  uint source_msaa = XE_TRANSFER_SOURCE_MSAA_SAMPLES;
-  uint dest_msaa = XE_TRANSFER_DEST_MSAA_SAMPLES;
-  bool msaa_2x_supported = constants.msaa_2x_supported != 0u;
-
-  if (!source_is_64bpp && dest_is_64bpp) {
-    if (source_msaa >= 4u) {
-      if (dest_msaa >= 4u) {
-        source_sample_id = dest_sample_id & 2u;
-        source_tile_pixel_x =
-            XeBitFieldInsert(dest_sample_id, dest_tile_pixel_x, 1u, 31u);
-      } else if (dest_msaa == 2u) {
-        if (msaa_2x_supported) {
-          source_sample_id = (dest_sample_id ^ 1u) << 1u;
-        } else {
-          source_sample_id = dest_sample_id & 2u;
-        }
-      } else {
-        source_sample_id =
-            XeBitFieldInsert(0u, dest_tile_pixel_y, 1u, 1u);
-        source_tile_pixel_y = dest_tile_pixel_y >> 1u;
-      }
-    } else {
-      if (dest_msaa >= 4u) {
-        source_tile_pixel_x = XeBitFieldInsert(
-            dest_tile_pixel_x << 2u, dest_sample_id, 1u, 1u);
-      } else {
-        source_tile_pixel_x = dest_tile_pixel_x << 1u;
-      }
-    }
-  } else if (source_is_64bpp && !dest_is_64bpp) {
-    if (dest_msaa >= 4u) {
-      if (source_msaa >= 4u) {
-        source_sample_id =
-            XeBitFieldInsert(dest_sample_id, dest_tile_pixel_x, 0u, 1u);
-        source_tile_pixel_x = dest_tile_pixel_x >> 1u;
-      }
-      source_color_half = dest_sample_id & 1u;
-      source_color_half_valid = true;
-    } else {
-      if (source_msaa >= 4u) {
-        source_sample_id = XeBitFieldExtract(dest_tile_pixel_x, 1u, 1u);
-        if (dest_msaa == 2u) {
-          if (msaa_2x_supported) {
-            source_sample_id = XeBitFieldInsert(
-                source_sample_id, dest_sample_id ^ 1u, 1u, 1u);
-          } else {
-            source_sample_id = XeBitFieldInsert(
-                dest_sample_id, source_sample_id, 0u, 1u);
-          }
-        } else {
-          source_sample_id = XeBitFieldInsert(
-              source_sample_id, dest_tile_pixel_y, 1u, 1u);
-          source_tile_pixel_y = dest_tile_pixel_y >> 1u;
-        }
-        source_tile_pixel_x = dest_tile_pixel_x >> 2u;
-      } else {
-        source_tile_pixel_x = dest_tile_pixel_x >> 1u;
-      }
-      source_color_half = dest_tile_pixel_x & 1u;
-      source_color_half_valid = true;
-    }
-  } else {
-    if (source_msaa != dest_msaa) {
-      if (source_msaa >= 4u) {
-        if (dest_msaa == 2u) {
-          if (msaa_2x_supported) {
-            source_sample_id = XeBitFieldInsert(
-                dest_tile_pixel_x, dest_sample_id ^ 1u, 1u, 31u);
-          } else {
-            source_sample_id = XeBitFieldInsert(
-                dest_sample_id, dest_tile_pixel_x, 0u, 1u);
-          }
-          source_tile_pixel_x = dest_tile_pixel_x >> 1u;
-        } else {
-          source_sample_id = XeBitFieldInsert(
-              dest_tile_pixel_x & 1u, dest_tile_pixel_y, 1u, 1u);
-          source_tile_pixel_x = dest_tile_pixel_x >> 1u;
-          source_tile_pixel_y = dest_tile_pixel_y >> 1u;
-        }
-      } else if (dest_msaa >= 4u) {
-        source_tile_pixel_x = XeBitFieldInsert(
-            dest_sample_id, dest_tile_pixel_x, 1u, 31u);
-      }
-    }
-  }
-
-  if (source_msaa < 4u && source_msaa != dest_msaa) {
-    if (dest_msaa >= 4u) {
-      if (source_msaa == 2u) {
-        source_sample_id = dest_sample_id >> 1u;
-        if (msaa_2x_supported) {
-          source_sample_id ^= 1u;
-        } else {
-          source_sample_id = XeBitFieldInsert(
-              source_sample_id, source_sample_id, 1u, 1u);
-        }
-      } else {
-        source_tile_pixel_y = XeBitFieldInsert(
-            dest_sample_id >> 1u, dest_tile_pixel_y, 1u, 31u);
-      }
-    } else {
-      if (source_msaa == 2u) {
-        source_sample_id = dest_tile_pixel_y & 1u;
-        if (msaa_2x_supported) {
-          source_sample_id ^= 1u;
-        } else {
-          source_sample_id = XeBitFieldInsert(
-              source_sample_id, source_sample_id, 1u, 1u);
-        }
-        source_tile_pixel_y = dest_tile_pixel_y >> 1u;
-      } else {
-        if (msaa_2x_supported) {
-          source_tile_pixel_y = XeBitFieldInsert(
-              dest_sample_id ^ 1u, dest_tile_pixel_y, 1u, 31u);
-        } else {
-          source_tile_pixel_y = XeBitFieldInsert(
-              dest_sample_id >> 1u, dest_tile_pixel_y, 1u, 31u);
-        }
-      }
-    }
-  }
-
-  uint source_pixel_width_dwords_log2 =
-      (source_msaa >= 4u ? 1u : 0u) + (source_is_64bpp ? 1u : 0u);
-
-  if ((XE_TRANSFER_SOURCE_IS_DEPTH != 0u) != (XE_TRANSFER_DEST_IS_DEPTH != 0u)) {
-    uint source_32bpp_tile_half_pixels =
-        tile_width_samples >> (1u + source_pixel_width_dwords_log2);
-    if (source_tile_pixel_x < source_32bpp_tile_half_pixels) {
-      source_tile_pixel_x += source_32bpp_tile_half_pixels;
-    } else {
-      source_tile_pixel_x -= source_32bpp_tile_half_pixels;
-    }
-  }
-
-  uint source_pixel_x = 0u;
-  uint source_pixel_y = 0u;
-#if XE_TRANSFER_TILE_INSTANCED
-  source_pixel_x = in.source_base.x + source_tile_pixel_x;
-  source_pixel_y = in.source_base.y + source_tile_pixel_y;
-#else
-  uint source_tile_index =
-      uint(int(dest_tile_index) + constants.address.source_to_dest) &
-      (kEdramTileCount - 1u);
-  uint source_pitch_tiles = constants.address.source_pitch;
-  uint source_tile_index_y = 0u;
-  uint source_tile_index_x = 0u;
-  XeFastDivMod(source_tile_index, source_pitch_tiles,
-               constants.source_pitch_tiles_inv, source_tile_index_y,
-               source_tile_index_x);
-  source_pixel_x =
-      source_tile_index_x *
-          (tile_width_samples >> source_pixel_width_dwords_log2) +
-      source_tile_pixel_x;
-  source_pixel_y =
-      source_tile_index_y *
-          (tile_height_samples >> (source_msaa >= 2u ? 1u : 0u)) +
-      source_tile_pixel_y;
-#endif
-
-  bool load_two = !source_is_64bpp && dest_is_64bpp;
-  uint source_pixel_x1 = source_pixel_x;
-  uint source_sample_id1 = source_sample_id;
-  if (load_two) {
-    if (source_msaa >= 4u) {
-      source_sample_id1 = source_sample_id | 1u;
-    } else {
-      source_pixel_x1 = source_pixel_x | 1u;
-    }
-  }
-
-#if XE_TRANSFER_SOURCE_IS_COLOR
-  #if XE_TRANSFER_SOURCE_IS_UINT
-  uint4 source_color0 =
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      xe_transfer_source.read(uint2(source_pixel_x, source_pixel_y),
-                              source_sample_id);
-#else
-      xe_transfer_source.read(uint2(source_pixel_x, source_pixel_y));
-#endif
-  uint4 source_color1 = source_color0;
-  if (load_two) {
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-    source_color1 = xe_transfer_source.read(
-        uint2(source_pixel_x1, source_pixel_y), source_sample_id1);
-#else
-    source_color1 = xe_transfer_source.read(
-        uint2(source_pixel_x1, source_pixel_y));
-#endif
-  }
-  #else
-  float4 source_color0 =
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      xe_transfer_source.read(uint2(source_pixel_x, source_pixel_y),
-                              source_sample_id);
-#else
-      xe_transfer_source.read(uint2(source_pixel_x, source_pixel_y));
-#endif
-  float4 source_color1 = source_color0;
-  if (load_two) {
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-    source_color1 = xe_transfer_source.read(
-        uint2(source_pixel_x1, source_pixel_y), source_sample_id1);
-#else
-    source_color1 = xe_transfer_source.read(
-        uint2(source_pixel_x1, source_pixel_y));
-#endif
-  }
-  #endif
-#else
-  float source_depth0 =
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      xe_transfer_source_depth.read(uint2(source_pixel_x, source_pixel_y),
-                                    source_sample_id).r;
-#else
-      xe_transfer_source_depth.read(uint2(source_pixel_x, source_pixel_y)).r;
-#endif
-  float source_depth1 = source_depth0;
-  if (load_two) {
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-    source_depth1 = xe_transfer_source_depth.read(
-        uint2(source_pixel_x1, source_pixel_y), source_sample_id1).r;
-#else
-    source_depth1 = xe_transfer_source_depth.read(
-        uint2(source_pixel_x1, source_pixel_y)).r;
-#endif
-  }
-#if XE_TRANSFER_SOURCE_NEEDS_STENCIL
-  uint source_stencil0 =
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      xe_transfer_source_stencil.read(uint2(source_pixel_x, source_pixel_y),
-                                      source_sample_id).r;
-#else
-      xe_transfer_source_stencil.read(uint2(source_pixel_x, source_pixel_y)).r;
-#endif
-  uint source_stencil1 = source_stencil0;
-  if (load_two) {
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-    source_stencil1 = xe_transfer_source_stencil.read(
-        uint2(source_pixel_x1, source_pixel_y), source_sample_id1).r;
-#else
-    source_stencil1 = xe_transfer_source_stencil.read(
-        uint2(source_pixel_x1, source_pixel_y)).r;
-#endif
-  }
-#else
-  uint source_stencil0 = 0u;
-  uint source_stencil1 = 0u;
-#endif
-#endif
-
-#if XE_TRANSFER_SOURCE_IS_COLOR
-  if (source_is_64bpp && !dest_is_64bpp && source_color_half_valid) {
-    uint source_component_count = 0u;
-    switch (XE_TRANSFER_SOURCE_FORMAT) {
-      case XE_FMT_32_FLOAT:
-        source_component_count = 1u;
-        break;
-      case XE_FMT_16_16:
-      case XE_FMT_16_16_FLOAT:
-      case XE_FMT_32_32_FLOAT:
-        source_component_count = 2u;
-        break;
-      default:
-        source_component_count = 4u;
-        break;
-    }
-    if (source_component_count == 2u) {
-  #if XE_TRANSFER_SOURCE_IS_UINT
-      source_color0[0] = source_color_half != 0u ? source_color0[1]
-                                                 : source_color0[0];
-  #else
-      source_color0[0] = source_color_half != 0u ? source_color0[1]
-                                                 : source_color0[0];
-  #endif
-    } else if (source_color_half != 0u) {
-  #if XE_TRANSFER_SOURCE_IS_UINT
-      source_color0[0] = source_color0[2];
-      source_color0[1] = source_color0[3];
-  #else
-      source_color0[0] = source_color0[2];
-      source_color0[1] = source_color0[3];
-  #endif
-    }
-  }
-#endif
-
-#if XE_TRANSFER_DEST_IS_UINT
-  uint4 out_color = uint4(0u);
-#else
-  float4 out_color = float4(0.0f);
-#endif
-
-  if (dest_is_64bpp) {
-    uint2 packed64 = uint2(0u);
-#if XE_TRANSFER_SOURCE_IS_COLOR
-  #if XE_TRANSFER_SOURCE_IS_UINT
-    switch (XE_TRANSFER_SOURCE_FORMAT) {
-      case XE_FMT_16_16:
-      case XE_FMT_16_16_FLOAT:
-        packed64.x = source_color0[0] | (source_color0[1] << 16u);
-        packed64.y = source_color1[0] | (source_color1[1] << 16u);
-        break;
-      case XE_FMT_16_16_16_16:
-      case XE_FMT_16_16_16_16_FLOAT:
-        packed64.x = source_color0[0] | (source_color0[1] << 16u);
-        packed64.y = source_color0[2] | (source_color0[3] << 16u);
-        break;
-      case XE_FMT_32_FLOAT:
-        packed64.x = source_color0[0];
-        packed64.y = source_color1[0];
-        break;
-      case XE_FMT_32_32_FLOAT:
-        packed64.x = source_color0[0];
-        packed64.y = source_color0[1];
-        break;
-      default:
-        packed64.x = source_color0[0];
-        packed64.y = source_color1[0];
-        break;
-    }
-  #else
-    switch (XE_TRANSFER_SOURCE_FORMAT) {
-      case XE_FMT_8_8_8_8_GAMMA: {
-#if XE_GAMMA_RT_AS_UNORM16
-        float4 gamma_color0 = source_color0;
-        float4 gamma_color1 = source_color1;
-        gamma_color0.rgb = XeLinearToPWLGamma3(gamma_color0.rgb);
-        gamma_color1.rgb = XeLinearToPWLGamma3(gamma_color1.rgb);
-        packed64.x = XePackColorRGBA8(gamma_color0);
-        packed64.y = XePackColorRGBA8(gamma_color1);
-#else
-        packed64.x = XePackColorRGBA8(source_color0);
-        packed64.y = XePackColorRGBA8(source_color1);
-#endif
-      } break;
-      case XE_FMT_8_8_8_8:
-        packed64.x = XePackColorRGBA8(source_color0);
-        packed64.y = XePackColorRGBA8(source_color1);
-        break;
-      case XE_FMT_2_10_10_10:
-      case XE_FMT_2_10_10_10_AS_10_10_10_10:
-        packed64.x = XePackColorRGB10A2(source_color0);
-        packed64.y = XePackColorRGB10A2(source_color1);
-        break;
-      case XE_FMT_2_10_10_10_FLOAT:
-      case XE_FMT_2_10_10_10_FLOAT_AS_16_16_16_16:
-        packed64.x = XePackColorRGB10A2Float(source_color0);
-        packed64.y = XePackColorRGB10A2Float(source_color1);
-        break;
-      case XE_FMT_32_FLOAT:
-        packed64.x = as_type<uint>(source_color0[0]);
-        packed64.y = as_type<uint>(source_color1[0]);
-        break;
-      case XE_FMT_32_32_FLOAT:
-        packed64.x = as_type<uint>(source_color0[0]);
-        packed64.y = as_type<uint>(source_color0[1]);
-        break;
-      default:
-        packed64.x = as_type<uint>(source_color0[0]);
-        packed64.y = as_type<uint>(source_color1[0]);
-        break;
-    }
-  #endif
-#else
-    uint depth24_0 = 0u;
-    uint depth24_1 = 0u;
-    if (XE_TRANSFER_SOURCE_FORMAT == XE_FMT_D24FS8) {
-      bool round_depth = constants.depth_round != 0u;
-      depth24_0 = XeFloat32To20e4(source_depth0 * 2.0f, round_depth);
-      depth24_1 = XeFloat32To20e4(source_depth1 * 2.0f, round_depth);
-    } else {
-      depth24_0 = XeRoundToNearestEven(
-          clamp(source_depth0, 0.0f, 1.0f) * 16777215.0f);
-      depth24_1 = XeRoundToNearestEven(
-          clamp(source_depth1, 0.0f, 1.0f) * 16777215.0f);
-    }
-    packed64.x = (depth24_0 << 8u) | (source_stencil0 & 0xFFu);
-    packed64.y = (depth24_1 << 8u) | (source_stencil1 & 0xFFu);
-#endif
-
-    if (XE_TRANSFER_DEST_FORMAT == XE_FMT_32_32_FLOAT) {
-#if XE_TRANSFER_DEST_IS_UINT
-      out_color = uint4(packed64.x, packed64.y, 0u, 0u);
-#else
-      out_color = float4(as_type<float>(packed64.x),
-                         as_type<float>(packed64.y), 0.0f, 0.0f);
-#endif
-    } else {
-      uint4 components = uint4(packed64.x & 0xFFFFu, packed64.x >> 16u,
-                               packed64.y & 0xFFFFu, packed64.y >> 16u);
-#if XE_TRANSFER_DEST_IS_UINT
-      out_color = components;
-#else
-      out_color = float4(components);
-#endif
-    }
-  } else {
-    bool wrote_direct = false;
-    uint packed32 = 0u;
-#if XE_TRANSFER_SOURCE_IS_COLOR
-  #if XE_TRANSFER_SOURCE_IS_UINT
-    switch (XE_TRANSFER_SOURCE_FORMAT) {
-      case XE_FMT_16_16:
-      case XE_FMT_16_16_FLOAT:
-        if (XE_TRANSFER_DEST_FORMAT == XE_FMT_16_16 ||
-            XE_TRANSFER_DEST_FORMAT == XE_FMT_16_16_FLOAT) {
-#if XE_TRANSFER_DEST_IS_UINT
-          out_color = uint4(source_color0[0], source_color0[1], 0u, 0u);
-#else
-          out_color = float4(float(source_color0[0]),
-                             float(source_color0[1]), 0.0f, 0.0f);
-#endif
-          wrote_direct = true;
-        } else {
-          packed32 = source_color0[0] | (source_color0[1] << 16u);
-        }
-        break;
-      case XE_FMT_16_16_16_16:
-      case XE_FMT_16_16_16_16_FLOAT:
-        if (XE_TRANSFER_DEST_FORMAT == XE_FMT_16_16 ||
-            XE_TRANSFER_DEST_FORMAT == XE_FMT_16_16_FLOAT) {
-#if XE_TRANSFER_DEST_IS_UINT
-          out_color = uint4(source_color0[0], source_color0[1], 0u, 0u);
-#else
-          out_color = float4(float(source_color0[0]),
-                             float(source_color0[1]), 0.0f, 0.0f);
-#endif
-          wrote_direct = true;
-        } else {
-          packed32 = source_color0[0] | (source_color0[1] << 16u);
-        }
-        break;
-      case XE_FMT_32_FLOAT:
-      case XE_FMT_32_32_FLOAT:
-        packed32 = source_color0[0];
-        break;
-      default:
-        packed32 = source_color0[0];
-        break;
-    }
-  #else
-    switch (XE_TRANSFER_SOURCE_FORMAT) {
-      case XE_FMT_8_8_8_8:
-      case XE_FMT_8_8_8_8_GAMMA: {
-        float4 color = source_color0;
-#if XE_GAMMA_RT_AS_UNORM16
-        if (XE_TRANSFER_SOURCE_FORMAT == XE_FMT_8_8_8_8_GAMMA &&
-            (XE_TRANSFER_DEST_FORMAT == XE_FMT_8_8_8_8 ||
-             XE_TRANSFER_DEST_FORMAT == XE_FMT_8_8_8_8_GAMMA) &&
-            XE_TRANSFER_DEST_FORMAT != XE_TRANSFER_SOURCE_FORMAT) {
-          if (XE_TRANSFER_DEST_FORMAT == XE_FMT_8_8_8_8) {
-            color.rgb = XeLinearToPWLGamma3(color.rgb);
-          } else {
-            color.rgb = XePWLGammaToLinear3(color.rgb);
-          }
-        }
-#endif
-#if !XE_TRANSFER_DEST_IS_UINT
-        if (XE_TRANSFER_DEST_FORMAT == XE_FMT_8_8_8_8 ||
-            XE_TRANSFER_DEST_FORMAT == XE_FMT_8_8_8_8_GAMMA) {
-          out_color = color;
-          wrote_direct = true;
-        } else
-#endif
-        {
-#if XE_GAMMA_RT_AS_UNORM16
-          if (XE_TRANSFER_SOURCE_FORMAT == XE_FMT_8_8_8_8_GAMMA) {
-            color.rgb = XeLinearToPWLGamma3(color.rgb);
-          }
-#endif
-          uint packed_component_offset = 0u;
-          if (XE_TRANSFER_DEST_IS_DEPTH != 0u) {
-            packed_component_offset = 1u;
-          }
-          packed32 =
-              XePackUnorm(color[packed_component_offset], 255.0f);
-          if (XE_TRANSFER_DEST_IS_DEPTH == 0u) {
-            packed32 |= XePackUnorm(color[packed_component_offset + 1],
-                                    255.0f) << 8u;
-            packed32 |= XePackUnorm(color[packed_component_offset + 2],
-                                    255.0f) << 16u;
-            packed32 |= XePackUnorm(color[packed_component_offset + 3],
-                                    255.0f) << 24u;
-          }
-        }
-      } break;
-      case XE_FMT_2_10_10_10:
-      case XE_FMT_2_10_10_10_AS_10_10_10_10:
-#if !XE_TRANSFER_DEST_IS_UINT
-        if (XE_TRANSFER_DEST_FORMAT == XE_FMT_2_10_10_10 ||
-            XE_TRANSFER_DEST_FORMAT == XE_FMT_2_10_10_10_AS_10_10_10_10) {
-          out_color = source_color0;
-          wrote_direct = true;
-        } else
-#endif
-        {
-          packed32 = XePackUnorm(source_color0[0], 1023.0f);
-          if (XE_TRANSFER_DEST_IS_DEPTH == 0u) {
-            packed32 |= XePackUnorm(source_color0[1], 1023.0f) << 10u;
-            packed32 |= XePackUnorm(source_color0[2], 1023.0f) << 20u;
-            packed32 |= XePackUnorm(source_color0[3], 3.0f) << 30u;
-          }
-        }
-        break;
-      case XE_FMT_2_10_10_10_FLOAT:
-      case XE_FMT_2_10_10_10_FLOAT_AS_16_16_16_16:
-#if !XE_TRANSFER_DEST_IS_UINT
-        if (XE_TRANSFER_DEST_FORMAT == XE_FMT_2_10_10_10_FLOAT ||
-            XE_TRANSFER_DEST_FORMAT == XE_FMT_2_10_10_10_FLOAT_AS_16_16_16_16) {
-          out_color = source_color0;
-          wrote_direct = true;
-        } else
-#endif
-        {
-          packed32 = XeUnclampedFloat32To7e3(source_color0[0]);
-          if (XE_TRANSFER_DEST_IS_DEPTH == 0u) {
-            packed32 |= XeUnclampedFloat32To7e3(source_color0[1]) << 10u;
-            packed32 |= XeUnclampedFloat32To7e3(source_color0[2]) << 20u;
-            packed32 |= XePackUnorm(source_color0[3], 3.0f) << 30u;
-          }
-        }
-        break;
-      case XE_FMT_32_FLOAT:
-      case XE_FMT_32_32_FLOAT:
-        packed32 = as_type<uint>(source_color0[0]);
-        break;
-      default:
-        packed32 = as_type<uint>(source_color0[0]);
-        break;
-    }
-  #endif
-#else
-    if (XE_TRANSFER_DEST_IS_DEPTH != 0u &&
-        XE_TRANSFER_DEST_FORMAT == XE_TRANSFER_SOURCE_FORMAT) {
-      TransferColorOut out;
-      out.color = XeTransferColorOutType(source_depth0);
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE
-      out.sample_mask = 1u << dest_sample_id;
-#endif
-      return out;
-    }
-    if (XE_TRANSFER_SOURCE_FORMAT == XE_FMT_D24FS8) {
-      bool round_depth = constants.depth_round != 0u;
-      packed32 = XeFloat32To20e4(source_depth0 * 2.0f, round_depth);
-    } else {
-      packed32 = XeRoundToNearestEven(
-          clamp(source_depth0, 0.0f, 1.0f) * 16777215.0f);
-    }
-    if (XE_TRANSFER_DEST_IS_DEPTH == 0u) {
-      packed32 = (packed32 << 8u) | (source_stencil0 & 0xFFu);
-    }
-#endif
-
-    if (!wrote_direct) {
-      switch (XE_TRANSFER_DEST_FORMAT) {
-        case XE_FMT_8_8_8_8: {
-#if XE_TRANSFER_DEST_IS_UINT
-          out_color = uint4(packed32, 0u, 0u, 0u);
-#else
-          out_color = float4(
-              float((packed32 >> 0u) & 0xFFu) * (1.0f / 255.0f),
-              float((packed32 >> 8u) & 0xFFu) * (1.0f / 255.0f),
-              float((packed32 >> 16u) & 0xFFu) * (1.0f / 255.0f),
-              float((packed32 >> 24u) & 0xFFu) * (1.0f / 255.0f));
-#endif
-        } break;
-        case XE_FMT_8_8_8_8_GAMMA: {
-#if XE_TRANSFER_DEST_IS_UINT
-          out_color = uint4(packed32, 0u, 0u, 0u);
-#else
-          float4 color = float4(
-              float((packed32 >> 0u) & 0xFFu) * (1.0f / 255.0f),
-              float((packed32 >> 8u) & 0xFFu) * (1.0f / 255.0f),
-              float((packed32 >> 16u) & 0xFFu) * (1.0f / 255.0f),
-              float((packed32 >> 24u) & 0xFFu) * (1.0f / 255.0f));
-#if XE_GAMMA_RT_AS_UNORM16
-          color.rgb = XePWLGammaToLinear3(color.rgb);
-#endif
-          out_color = color;
-#endif
-        } break;
-        case XE_FMT_2_10_10_10:
-        case XE_FMT_2_10_10_10_AS_10_10_10_10: {
-#if XE_TRANSFER_DEST_IS_UINT
-          out_color = uint4(packed32, 0u, 0u, 0u);
-#else
-          out_color = float4(
-              float((packed32 >> 0u) & 0x3FFu) * (1.0f / 1023.0f),
-              float((packed32 >> 10u) & 0x3FFu) * (1.0f / 1023.0f),
-              float((packed32 >> 20u) & 0x3FFu) * (1.0f / 1023.0f),
-              float((packed32 >> 30u) & 0x3u) * (1.0f / 3.0f));
-#endif
-        } break;
-        case XE_FMT_2_10_10_10_FLOAT:
-        case XE_FMT_2_10_10_10_FLOAT_AS_16_16_16_16: {
-#if XE_TRANSFER_DEST_IS_UINT
-          out_color = uint4(packed32, 0u, 0u, 0u);
-#else
-          out_color = float4(
-              XeFloat7e3To32((packed32 >> 0u) & 0x3FFu),
-              XeFloat7e3To32((packed32 >> 10u) & 0x3FFu),
-              XeFloat7e3To32((packed32 >> 20u) & 0x3FFu),
-              float((packed32 >> 30u) & 0x3u) * (1.0f / 3.0f));
-#endif
-        } break;
-        case XE_FMT_16_16:
-        case XE_FMT_16_16_FLOAT: {
-#if XE_TRANSFER_DEST_IS_UINT
-          out_color = uint4(packed32 & 0xFFFFu, packed32 >> 16u, 0u, 0u);
-#else
-          out_color = float4(float(packed32 & 0xFFFFu),
-                             float(packed32 >> 16u), 0.0f, 0.0f);
-#endif
-        } break;
-        case XE_FMT_32_FLOAT: {
-#if XE_TRANSFER_DEST_IS_UINT
-          out_color = uint4(packed32, 0u, 0u, 0u);
-#else
-          out_color = float4(as_type<float>(packed32), 0.0f, 0.0f, 0.0f);
-#endif
-        } break;
-        default:
-          break;
-      }
-    }
-  }
-
-  TransferColorOut out;
-#if XE_TRANSFER_DEST_COMPONENTS == 1
-  out.color = out_color.x;
-#elif XE_TRANSFER_DEST_COMPONENTS == 2
-  out.color = out_color.xy;
-#else
-  out.color = out_color;
-#endif
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE
-  out.sample_mask = 1u << dest_sample_id;
-#endif
-  return out;
-}
-#elif XE_TRANSFER_OUTPUT_DEPTH || XE_TRANSFER_OUTPUT_STENCIL_BIT
-struct TransferDepthOut {
-  float depth [[depth(any)]];
-#if XE_TRANSFER_NATIVE_STENCIL_OUTPUT
-  uint stencil [[stencil]];
-#endif
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE
-  uint sample_mask [[sample_mask]];
-#endif
-};
-
-fragment TransferDepthOut transfer_ps(
-    VSOut in [[stage_in]],
-    constant TransferShaderConstants& constants [[buffer(0)]]
-    XE_TRANSFER_HOST_DEPTH_BUFFER_PARAM
-    XE_TRANSFER_SOURCE_PARAMS
-    XE_TRANSFER_HOST_DEPTH_TEXTURE_PARAM
-    XE_TRANSFER_SAMPLE_ID_PARAM) {
-  uint2 dest_pixel = uint2(in.position.xy);
-  uint dest_sample_id = 0u;
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE
-  #if XE_TRANSFER_DEST_SAMPLE_ID_FROM_SAMPLE
-    dest_sample_id = xe_sample_id;
-  #else
-    dest_sample_id = constants.dest_sample_id;
-  #endif
-#endif
-
-  uint tile_width_samples = constants.tile_width_samples;
-  uint tile_height_samples = constants.tile_height_samples;
-  uint dest_tile_width_pixels = constants.dest_tile_width_pixels;
-  uint dest_tile_height_pixels = constants.dest_tile_height_pixels;
-
-  uint dest_tile_pixel_x = 0u;
-  uint dest_tile_pixel_y = 0u;
-  uint dest_tile_index = 0u;
-#if XE_TRANSFER_TILE_INSTANCED
-  uint2 tile_origin = uint2(in.tile_origin);
-  dest_tile_pixel_x = dest_pixel.x - tile_origin.x;
-  dest_tile_pixel_y = dest_pixel.y - tile_origin.y;
-  dest_tile_index = in.tile_index;
-#else
-  uint dest_tile_index_x = 0u;
-  uint dest_tile_index_y = 0u;
-#if XE_TRANSFER_FAST_DIVMOD
-  XeFastDivMod(dest_pixel.x, dest_tile_width_pixels,
-               constants.dest_tile_width_pixels_inv, dest_tile_index_x,
-               dest_tile_pixel_x);
-  XeFastDivMod(dest_pixel.y, dest_tile_height_pixels,
-               constants.dest_tile_height_pixels_inv, dest_tile_index_y,
-               dest_tile_pixel_y);
-#else
-  dest_tile_index_x = dest_pixel.x / dest_tile_width_pixels;
-  dest_tile_pixel_x = dest_pixel.x % dest_tile_width_pixels;
-  dest_tile_index_y = dest_pixel.y / dest_tile_height_pixels;
-  dest_tile_pixel_y = dest_pixel.y % dest_tile_height_pixels;
-#endif
-
-  dest_tile_index =
-      dest_tile_index_x +
-      dest_tile_index_y * constants.address.dest_pitch;
-#endif
-
-  uint source_sample_id = dest_sample_id;
-  uint source_tile_pixel_x = dest_tile_pixel_x;
-  uint source_tile_pixel_y = dest_tile_pixel_y;
-
-  bool source_is_64bpp = XE_TRANSFER_SOURCE_IS_64BPP != 0u;
-  bool dest_is_64bpp = XE_TRANSFER_DEST_IS_64BPP != 0u;
-  uint source_msaa = XE_TRANSFER_SOURCE_MSAA_SAMPLES;
-  uint dest_msaa = XE_TRANSFER_DEST_MSAA_SAMPLES;
-  bool msaa_2x_supported = constants.msaa_2x_supported != 0u;
-
-  if (!source_is_64bpp && dest_is_64bpp) {
-    if (source_msaa >= 4u) {
-      if (dest_msaa >= 4u) {
-        source_sample_id = dest_sample_id & 2u;
-        source_tile_pixel_x =
-            XeBitFieldInsert(dest_sample_id, dest_tile_pixel_x, 1u, 31u);
-      } else if (dest_msaa == 2u) {
-        if (msaa_2x_supported) {
-          source_sample_id = (dest_sample_id ^ 1u) << 1u;
-        } else {
-          source_sample_id = dest_sample_id & 2u;
-        }
-      } else {
-        source_sample_id =
-            XeBitFieldInsert(0u, dest_tile_pixel_y, 1u, 1u);
-        source_tile_pixel_y = dest_tile_pixel_y >> 1u;
-      }
-    } else {
-      if (dest_msaa >= 4u) {
-        source_tile_pixel_x = XeBitFieldInsert(
-            dest_tile_pixel_x << 2u, dest_sample_id, 1u, 1u);
-      } else {
-        source_tile_pixel_x = dest_tile_pixel_x << 1u;
-      }
-    }
-  } else if (source_is_64bpp && !dest_is_64bpp) {
-    if (dest_msaa >= 4u) {
-      if (source_msaa >= 4u) {
-        source_sample_id =
-            XeBitFieldInsert(dest_sample_id, dest_tile_pixel_x, 0u, 1u);
-        source_tile_pixel_x = dest_tile_pixel_x >> 1u;
-      }
-    } else {
-      if (source_msaa >= 4u) {
-        source_sample_id = XeBitFieldExtract(dest_tile_pixel_x, 1u, 1u);
-        if (dest_msaa == 2u) {
-          if (msaa_2x_supported) {
-            source_sample_id = XeBitFieldInsert(
-                source_sample_id, dest_sample_id ^ 1u, 1u, 1u);
-          } else {
-            source_sample_id = XeBitFieldInsert(
-                dest_sample_id, source_sample_id, 0u, 1u);
-          }
-        } else {
-          source_sample_id = XeBitFieldInsert(
-              source_sample_id, dest_tile_pixel_y, 1u, 1u);
-          source_tile_pixel_y = dest_tile_pixel_y >> 1u;
-        }
-        source_tile_pixel_x = dest_tile_pixel_x >> 2u;
-      } else {
-        source_tile_pixel_x = dest_tile_pixel_x >> 1u;
-      }
-    }
-  } else {
-    if (source_msaa != dest_msaa) {
-      if (source_msaa >= 4u) {
-        if (dest_msaa == 2u) {
-          if (msaa_2x_supported) {
-            source_sample_id = XeBitFieldInsert(
-                dest_tile_pixel_x, dest_sample_id ^ 1u, 1u, 31u);
-          } else {
-            source_sample_id = XeBitFieldInsert(
-                dest_sample_id, dest_tile_pixel_x, 0u, 1u);
-          }
-          source_tile_pixel_x = dest_tile_pixel_x >> 1u;
-        } else {
-          source_sample_id = XeBitFieldInsert(
-              dest_tile_pixel_x & 1u, dest_tile_pixel_y, 1u, 1u);
-          source_tile_pixel_x = dest_tile_pixel_x >> 1u;
-          source_tile_pixel_y = dest_tile_pixel_y >> 1u;
-        }
-      } else if (dest_msaa >= 4u) {
-        source_tile_pixel_x = XeBitFieldInsert(
-            dest_sample_id, dest_tile_pixel_x, 1u, 31u);
-      }
-    }
-  }
-
-  if (source_msaa < 4u && source_msaa != dest_msaa) {
-    if (dest_msaa >= 4u) {
-      if (source_msaa == 2u) {
-        source_sample_id = dest_sample_id >> 1u;
-        if (msaa_2x_supported) {
-          source_sample_id ^= 1u;
-        } else {
-          source_sample_id = XeBitFieldInsert(
-              source_sample_id, source_sample_id, 1u, 1u);
-        }
-      } else {
-        source_tile_pixel_y = XeBitFieldInsert(
-            dest_sample_id >> 1u, dest_tile_pixel_y, 1u, 31u);
-      }
-    } else {
-      if (source_msaa == 2u) {
-        source_sample_id = dest_tile_pixel_y & 1u;
-        if (msaa_2x_supported) {
-          source_sample_id ^= 1u;
-        } else {
-          source_sample_id = XeBitFieldInsert(
-              source_sample_id, source_sample_id, 1u, 1u);
-        }
-        source_tile_pixel_y = dest_tile_pixel_y >> 1u;
-      } else {
-        if (msaa_2x_supported) {
-          source_tile_pixel_y = XeBitFieldInsert(
-              dest_sample_id ^ 1u, dest_tile_pixel_y, 1u, 31u);
-        } else {
-          source_tile_pixel_y = XeBitFieldInsert(
-              dest_sample_id >> 1u, dest_tile_pixel_y, 1u, 31u);
-        }
-      }
-    }
-  }
-
-  uint source_pixel_width_dwords_log2 =
-      (source_msaa >= 4u ? 1u : 0u) + (source_is_64bpp ? 1u : 0u);
-
-  if ((XE_TRANSFER_SOURCE_IS_DEPTH != 0u) != (XE_TRANSFER_DEST_IS_DEPTH != 0u)) {
-    uint source_32bpp_tile_half_pixels =
-        tile_width_samples >> (1u + source_pixel_width_dwords_log2);
-    if (source_tile_pixel_x < source_32bpp_tile_half_pixels) {
-      source_tile_pixel_x += source_32bpp_tile_half_pixels;
-    } else {
-      source_tile_pixel_x -= source_32bpp_tile_half_pixels;
-    }
-  }
-
-  uint source_pixel_x = 0u;
-  uint source_pixel_y = 0u;
-#if XE_TRANSFER_TILE_INSTANCED
-  source_pixel_x = in.source_base.x + source_tile_pixel_x;
-  source_pixel_y = in.source_base.y + source_tile_pixel_y;
-#else
-  uint source_tile_index =
-      uint(int(dest_tile_index) + constants.address.source_to_dest) &
-      (kEdramTileCount - 1u);
-  uint source_pitch_tiles = constants.address.source_pitch;
-  uint source_tile_index_y = 0u;
-  uint source_tile_index_x = 0u;
-  XeFastDivMod(source_tile_index, source_pitch_tiles,
-               constants.source_pitch_tiles_inv, source_tile_index_y,
-               source_tile_index_x);
-  source_pixel_x =
-      source_tile_index_x *
-          (tile_width_samples >> source_pixel_width_dwords_log2) +
-      source_tile_pixel_x;
-  source_pixel_y =
-      source_tile_index_y *
-          (tile_height_samples >> (source_msaa >= 2u ? 1u : 0u)) +
-      source_tile_pixel_y;
-#endif
-
-  bool load_two = !source_is_64bpp && dest_is_64bpp;
-  uint source_pixel_x1 = source_pixel_x;
-  uint source_sample_id1 = source_sample_id;
-  if (load_two) {
-    if (source_msaa >= 4u) {
-      source_sample_id1 = source_sample_id | 1u;
-    } else {
-      source_pixel_x1 = source_pixel_x | 1u;
-    }
-  }
-
-#if XE_TRANSFER_SOURCE_IS_COLOR
-  #if XE_TRANSFER_SOURCE_IS_UINT
-  uint4 source_color0 =
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      xe_transfer_source.read(uint2(source_pixel_x, source_pixel_y),
-                              source_sample_id);
-#else
-      xe_transfer_source.read(uint2(source_pixel_x, source_pixel_y));
-#endif
-  uint4 source_color1 = source_color0;
-  if (load_two) {
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-    source_color1 = xe_transfer_source.read(
-        uint2(source_pixel_x1, source_pixel_y), source_sample_id1);
-#else
-    source_color1 = xe_transfer_source.read(
-        uint2(source_pixel_x1, source_pixel_y));
-#endif
-  }
-  #else
-  float4 source_color0 =
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      xe_transfer_source.read(uint2(source_pixel_x, source_pixel_y),
-                              source_sample_id);
-#else
-      xe_transfer_source.read(uint2(source_pixel_x, source_pixel_y));
-#endif
-  float4 source_color1 = source_color0;
-  if (load_two) {
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-    source_color1 = xe_transfer_source.read(
-        uint2(source_pixel_x1, source_pixel_y), source_sample_id1);
-#else
-    source_color1 = xe_transfer_source.read(
-        uint2(source_pixel_x1, source_pixel_y));
-#endif
-  }
-  #endif
-#else
-  float source_depth0 =
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      xe_transfer_source_depth.read(uint2(source_pixel_x, source_pixel_y),
-                                    source_sample_id).r;
-#else
-      xe_transfer_source_depth.read(uint2(source_pixel_x, source_pixel_y)).r;
-#endif
-  float source_depth1 = source_depth0;
-  if (load_two) {
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-    source_depth1 = xe_transfer_source_depth.read(
-        uint2(source_pixel_x1, source_pixel_y), source_sample_id1).r;
-#else
-    source_depth1 = xe_transfer_source_depth.read(
-        uint2(source_pixel_x1, source_pixel_y)).r;
-#endif
-  }
-#if XE_TRANSFER_SOURCE_NEEDS_STENCIL
-  uint source_stencil0 =
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-      xe_transfer_source_stencil.read(uint2(source_pixel_x, source_pixel_y),
-                                      source_sample_id).r;
-#else
-      xe_transfer_source_stencil.read(uint2(source_pixel_x, source_pixel_y)).r;
-#endif
-  uint source_stencil1 = source_stencil0;
-  if (load_two) {
-#if XE_TRANSFER_SOURCE_IS_MULTISAMPLE
-    source_stencil1 = xe_transfer_source_stencil.read(
-        uint2(source_pixel_x1, source_pixel_y), source_sample_id1).r;
-#else
-    source_stencil1 = xe_transfer_source_stencil.read(
-        uint2(source_pixel_x1, source_pixel_y)).r;
-#endif
-  }
-#else
-  uint source_stencil0 = 0u;
-  uint source_stencil1 = 0u;
-#endif
-#endif
-
-  uint packed = 0u;
-#if !XE_TRANSFER_OUTPUT_STENCIL_BIT
-  bool packed_only_depth = false;
-#endif
-#if XE_TRANSFER_SOURCE_IS_COLOR
-  #if XE_TRANSFER_SOURCE_IS_UINT
-  switch (XE_TRANSFER_SOURCE_FORMAT) {
-    case XE_FMT_16_16:
-    case XE_FMT_16_16_FLOAT:
-    case XE_FMT_16_16_16_16:
-    case XE_FMT_16_16_16_16_FLOAT:
-      packed = source_color0[0] | (source_color0[1] << 16u);
-      break;
-    case XE_FMT_32_FLOAT:
-    case XE_FMT_32_32_FLOAT:
-      packed = source_color0[0];
-      break;
-    default:
-      packed = source_color0[0];
-      break;
-  }
-  #else
-  switch (XE_TRANSFER_SOURCE_FORMAT) {
-    case XE_FMT_8_8_8_8:
-    case XE_FMT_8_8_8_8_GAMMA: {
-      float4 color = source_color0;
-      if (XE_TRANSFER_SOURCE_FORMAT == XE_FMT_8_8_8_8_GAMMA) {
-#if XE_GAMMA_RT_AS_UNORM16 || XE_TRANSFER_OUTPUT_STENCIL_BIT
-        color.rgb = XeLinearToPWLGamma3(color.rgb);
-#endif
-      }
-      // Match D3D12: color -> depth transfers derive guest depth from bits
-      // 8:31 of the packed 32bpp color word rather than treating depth as a
-      // standalone component.
-      packed = XePackColorRGBA8(color);
-    } break;
-    case XE_FMT_2_10_10_10:
-    case XE_FMT_2_10_10_10_AS_10_10_10_10: {
-      packed = XePackColorRGB10A2(source_color0);
-    } break;
-    case XE_FMT_2_10_10_10_FLOAT:
-    case XE_FMT_2_10_10_10_FLOAT_AS_16_16_16_16: {
-      packed = XePackColorRGB10A2Float(source_color0);
-    } break;
-    case XE_FMT_32_FLOAT:
-    case XE_FMT_32_32_FLOAT:
-      packed = as_type<uint>(source_color0[0]);
-      break;
-    default:
-      packed = as_type<uint>(source_color0[0]);
-      break;
-  }
-  #endif
-#else
-  if (XE_TRANSFER_SOURCE_FORMAT == XE_FMT_D24FS8) {
-    bool round_depth = constants.depth_round != 0u;
-    packed = XeFloat32To20e4(source_depth0 * 2.0f, round_depth);
-  } else {
-    packed = XeRoundToNearestEven(
-        clamp(source_depth0, 0.0f, 1.0f) * 16777215.0f);
-  }
-  if (XE_TRANSFER_DEST_IS_DEPTH != 0u) {
-#if !XE_TRANSFER_OUTPUT_STENCIL_BIT
-    packed_only_depth = true;
-#endif
-  } else {
-    packed = (packed << 8u) | (source_stencil0 & 0xFFu);
-  }
-#endif
-#if XE_TRANSFER_OUTPUT_STENCIL_BIT && !XE_TRANSFER_SOURCE_IS_COLOR
-  packed = source_stencil0;
-#endif
-
-#if XE_TRANSFER_OUTPUT_STENCIL_BIT
-  if (constants.stencil_clear == 0u) {
-    if ((packed & constants.stencil_mask) == 0u) {
-      discard_fragment();
-    }
-  }
-  TransferDepthOut out;
-  out.depth = 0.0f;
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE
-  out.sample_mask = 1u << dest_sample_id;
-#endif
-  return out;
-#else
-  uint guest_depth24 = packed;
-  if (!packed_only_depth) {
-    guest_depth24 = packed >> 8u;
-  }
-
-  float host_depth32 = 0.0f;
-  bool has_host_depth = false;
-
-#if XE_TRANSFER_HAS_HOST_DEPTH
-  if (constants.host_depth_source_is_copy == 0u) {
-    uint host_tile_pixel_x = dest_tile_pixel_x;
-    uint host_tile_pixel_y = dest_tile_pixel_y;
-    uint host_sample_id = dest_sample_id;
-    uint host_msaa = XE_TRANSFER_HOST_DEPTH_MSAA_SAMPLES;
-
-    if (host_msaa != dest_msaa) {
-      if (host_msaa >= 4u) {
-        if (dest_msaa == 2u) {
-          if (msaa_2x_supported) {
-            host_sample_id = XeBitFieldInsert(
-                dest_tile_pixel_x, dest_sample_id ^ 1u, 1u, 31u);
-          } else {
-            host_sample_id = XeBitFieldInsert(
-                dest_sample_id, dest_tile_pixel_x, 0u, 1u);
-          }
-          host_tile_pixel_x = dest_tile_pixel_x >> 1u;
-        } else {
-          host_sample_id = XeBitFieldInsert(
-              dest_tile_pixel_x & 1u, dest_tile_pixel_y, 1u, 1u);
-          host_tile_pixel_x = dest_tile_pixel_x >> 1u;
-          host_tile_pixel_y = dest_tile_pixel_y >> 1u;
-        }
-      } else if (dest_msaa >= 4u) {
-        host_tile_pixel_x = XeBitFieldInsert(
-            dest_sample_id, dest_tile_pixel_x, 1u, 31u);
-      }
-
-      if (host_msaa < 4u) {
-        if (dest_msaa >= 4u) {
-          if (host_msaa == 2u) {
-            host_sample_id = dest_sample_id >> 1u;
-            if (msaa_2x_supported) {
-              host_sample_id ^= 1u;
-            } else {
-              host_sample_id = XeBitFieldInsert(
-                  host_sample_id, host_sample_id, 1u, 1u);
-            }
-          } else {
-            host_tile_pixel_y = XeBitFieldInsert(
-                dest_sample_id >> 1u, dest_tile_pixel_y, 1u, 31u);
-          }
-        } else {
-          if (host_msaa == 2u) {
-            host_sample_id = dest_tile_pixel_y & 1u;
-            if (msaa_2x_supported) {
-              host_sample_id ^= 1u;
-            } else {
-              host_sample_id = XeBitFieldInsert(
-                  host_sample_id, host_sample_id, 1u, 1u);
-            }
-            host_tile_pixel_y = dest_tile_pixel_y >> 1u;
-          } else {
-            if (msaa_2x_supported) {
-              host_tile_pixel_y = XeBitFieldInsert(
-                  dest_sample_id ^ 1u, dest_tile_pixel_y, 1u, 31u);
-            } else {
-              host_tile_pixel_y = XeBitFieldInsert(
-                  dest_sample_id >> 1u, dest_tile_pixel_y, 1u, 31u);
-            }
-          }
-        }
-      }
-    }
-
-    uint host_pixel_x = 0u;
-    uint host_pixel_y = 0u;
-#if XE_TRANSFER_TILE_INSTANCED
-    host_pixel_x = in.host_base.x + host_tile_pixel_x;
-    host_pixel_y = in.host_base.y + host_tile_pixel_y;
-#else
-    uint host_tile_index =
-        uint(int(dest_tile_index) +
-             constants.host_depth_address.source_to_dest) &
-        (kEdramTileCount - 1u);
-    uint host_pitch_tiles = constants.host_depth_address.source_pitch;
-    uint host_tile_index_y = 0u;
-    uint host_tile_index_x = 0u;
-    XeFastDivMod(host_tile_index, host_pitch_tiles,
-                 constants.host_depth_source_pitch_tiles_inv,
-                 host_tile_index_y, host_tile_index_x);
-    host_pixel_x =
-        host_tile_index_x *
-            (tile_width_samples >> (host_msaa >= 4u ? 1u : 0u)) +
-        host_tile_pixel_x;
-    host_pixel_y =
-        host_tile_index_y *
-            (tile_height_samples >> (host_msaa >= 2u ? 1u : 0u)) +
-        host_tile_pixel_y;
-#endif
-
-#if XE_TRANSFER_HOST_DEPTH_IS_MULTISAMPLE
-    host_depth32 = xe_transfer_host_depth.read(
-        uint2(host_pixel_x, host_pixel_y), host_sample_id).r;
-#else
-    host_depth32 =
-        xe_transfer_host_depth.read(uint2(host_pixel_x, host_pixel_y)).r;
-#endif
-  } else {
-    uint dest_tile_sample_x = dest_tile_pixel_x;
-    uint dest_tile_sample_y = dest_tile_pixel_y;
-    if (dest_msaa >= 2u) {
-      if (dest_msaa >= 4u) {
-        dest_tile_sample_x = XeBitFieldInsert(
-            dest_sample_id, dest_tile_pixel_x, 1u, 31u);
-      }
-      uint vert_sample = 0u;
-      if (dest_msaa == 2u && msaa_2x_supported) {
-        vert_sample = dest_sample_id ^ 1u;
-      } else {
-        vert_sample = dest_sample_id >> 1u;
-      }
-      dest_tile_sample_y = XeBitFieldInsert(
-          vert_sample, dest_tile_pixel_y, 1u, 31u);
-    }
-    uint host_depth_offset =
-        (tile_width_samples * tile_height_samples) * dest_tile_index +
-        tile_width_samples * dest_tile_sample_y + dest_tile_sample_x;
-    host_depth32 =
-        as_type<float>(xe_transfer_host_depth_buffer[host_depth_offset]);
-  }
-  has_host_depth = true;
-#endif
-
-  float fragment_depth = 0.0f;
-  if (XE_TRANSFER_DEST_FORMAT == XE_FMT_D24FS8) {
-    float guest_depth32 = XeFloat20e4To32(guest_depth24, true);
-    fragment_depth = guest_depth32;
-  } else {
-    fragment_depth = XeUnorm24To32(guest_depth24);
-  }
-
-  if (has_host_depth) {
-    uint host_depth24 = 0u;
-    if (XE_TRANSFER_DEST_FORMAT == XE_FMT_D24FS8) {
-      bool round_depth = constants.depth_round != 0u;
-      host_depth24 = XeFloat32To20e4(host_depth32, round_depth);
-    } else {
-      host_depth24 = XeRoundToNearestEven(
-          clamp(host_depth32, 0.0f, 1.0f) * 16777215.0f);
-    }
-    if (host_depth24 == guest_depth24) {
-      fragment_depth = host_depth32;
-    }
-  }
-
-  TransferDepthOut out;
-  out.depth = fragment_depth;
-#if XE_TRANSFER_NATIVE_STENCIL_OUTPUT
-#if XE_TRANSFER_SOURCE_IS_COLOR
-  // A color source carries the stencil in the low byte of the packed value.
-  out.stencil = packed & 0xFFu;
-#else
-  // A depth source keeps its stencil in the separate stencil texture, which is
-  // only declared for depth sources.
-  out.stencil = (packed_only_depth ? source_stencil0 : packed) & 0xFFu;
-#endif
-#endif
-#if XE_TRANSFER_DEST_IS_MULTISAMPLE
-  out.sample_mask = 1u << dest_sample_id;
-#endif
-  return out;
-#endif
-}
-#endif
-)METAL";
-
-  source.append(kTransferShaderSource);
 
   NS::Error* error = nullptr;
-  auto src_str = NS::String::string(source.c_str(), NS::UTF8StringEncoding);
-  MTL::Library* lib = device_->newLibrary(src_str, nullptr, &error);
-  if (!lib) {
-    XELOGE(
-        "GetOrCreateTransferPipelines: failed to compile transfer MSL "
-        "(mode={}): "
-        "{}",
-        int(key.mode),
-        error && error->localizedDescription()
-            ? error->localizedDescription()->utf8String()
-            : "unknown error");
-    return nullptr;
-  }
-
-  const char* vs_entry =
-      tile_instanced ? "transfer_tile_vs" : "transfer_rect_vs";
-  auto vs_name = NS::String::string(vs_entry, NS::UTF8StringEncoding);
-  auto ps_name = NS::String::string("transfer_ps", NS::UTF8StringEncoding);
-  MTL::Function* vs = lib->newFunction(vs_name);
-  MTL::Function* ps = lib->newFunction(ps_name);
-  if (!vs || !ps) {
-    XELOGE("GetOrCreateTransferPipelines: failed to get transfer shader entry");
-    if (vs) {
-      vs->release();
-    }
-    if (ps) {
-      ps->release();
-    }
-    lib->release();
-    return nullptr;
-  }
 
   MTL::RenderPipelineDescriptor* desc =
       MTL::RenderPipelineDescriptor::alloc()->init();
-  desc->setVertexFunction(vs);
-  desc->setFragmentFunction(ps);
+  desc->setVertexFunction(vertex_function);
+  desc->setFragmentFunction(fragment_function);
 
   for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
     auto* color_attachment = desc->colorAttachments()->object(i);
     color_attachment->setPixelFormat(pipeline_key.color_attachment_formats[i]);
     color_attachment->setWriteMask(
-        output == TransferOutput::kColor &&
+        output == EdramTransferOutput::kColor &&
                 i == pipeline_key.color_attachment_index
             ? MTL::ColorWriteMaskAll
             : MTL::ColorWriteMaskNone);
@@ -8011,9 +5875,6 @@ fragment TransferDepthOut transfer_ps(
       device_->newRenderPipelineState(desc, &error);
 
   desc->release();
-  vs->release();
-  ps->release();
-  lib->release();
 
   if (!pipeline) {
     XELOGE(
@@ -8022,10 +5883,11 @@ fragment TransferDepthOut transfer_ps(
         error && error->localizedDescription()
             ? error->localizedDescription()->utf8String()
             : "unknown error");
+    transfer_pipelines_.emplace(pipeline_key, nullptr);
     return nullptr;
   }
 
-  pipeline_map.emplace(pipeline_key, pipeline);
+  transfer_pipelines_.emplace(pipeline_key, pipeline);
 
   return pipeline;
 }
@@ -8053,6 +5915,32 @@ struct TransferClearColorUintConstants {
 struct TransferClearDepthConstants {
   float4 depth;
 };
+
+struct TransferRectInstance {
+  float2 origin;
+  float2 size;
+};
+
+struct TransferVertexConstants {
+  float2 pixel_to_ndc;
+};
+
+// The shared fragment shader derives everything from the fragment coordinate,
+// so this only has to place the rectangle.
+vertex VSOut transfer_rect_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
+                              constant TransferVertexConstants& constants
+                                  [[buffer(0)]],
+                              constant TransferRectInstance* instances
+                                  [[buffer(1)]]) {
+  float2 quad = float2(float(vid & 1), float(vid >> 1));
+  TransferRectInstance inst = instances[iid];
+  float2 pos_pixel = inst.origin + quad * inst.size;
+  VSOut out;
+  out.position = float4(pos_pixel.x * constants.pixel_to_ndc.x - 1.0f,
+                        1.0f - pos_pixel.y * constants.pixel_to_ndc.y, 0.0f,
+                        1.0f);
+  return out;
+}
 
 vertex VSOut transfer_clear_vs(uint vid [[vertex_id]]) {
   float2 pt = float2((vid << 1) & 2, vid & 2);
