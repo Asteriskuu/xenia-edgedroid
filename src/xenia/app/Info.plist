@@ -28,5 +28,7 @@
 	<true/>
 	<key>LSSupportsGameMode</key>
 	<true/>
+	<key>MetalCaptureEnabled</key>
+	<true/>
 </dict>
 </plist>
