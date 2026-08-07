@@ -223,71 +223,6 @@ bool SupportsPixelFormat(MTL::Device* device, MTL::PixelFormat format) {
   return texture != nullptr;
 }
 
-uint32_t GetEstimatedBytesPerPixel(MTL::PixelFormat format) {
-  switch (format) {
-    case MTL::PixelFormatRGBA8Unorm:
-    case MTL::PixelFormatRGBA8Unorm_sRGB:
-    case MTL::PixelFormatBGRA8Unorm:
-    case MTL::PixelFormatBGRA8Unorm_sRGB:
-    case MTL::PixelFormatR32Float:
-    case MTL::PixelFormatR32Uint:
-    case MTL::PixelFormatR32Sint:
-    case MTL::PixelFormatDepth32Float:
-    case MTL::PixelFormatDepth24Unorm_Stencil8:
-    case MTL::PixelFormatX32_Stencil8:
-      return 4;
-    case MTL::PixelFormatRG16Float:
-    case MTL::PixelFormatRG16Uint:
-    case MTL::PixelFormatRG16Sint:
-      return 4;
-    case MTL::PixelFormatRGBA16Float:
-    case MTL::PixelFormatRGBA16Uint:
-    case MTL::PixelFormatRGBA16Sint:
-    case MTL::PixelFormatRG32Float:
-    case MTL::PixelFormatRG32Uint:
-    case MTL::PixelFormatRG32Sint:
-    case MTL::PixelFormatDepth32Float_Stencil8:
-      return 8;
-    case MTL::PixelFormatR16Float:
-    case MTL::PixelFormatR16Uint:
-    case MTL::PixelFormatR16Sint:
-    case MTL::PixelFormatDepth16Unorm:
-      return 2;
-    default:
-      return 4;
-  }
-}
-
-uint64_t EstimateTextureBytes(MTL::Texture* texture) {
-  if (!texture) {
-    return 0;
-  }
-
-  const uint32_t bytes_per_pixel =
-      GetEstimatedBytesPerPixel(texture->pixelFormat());
-  const uint32_t sample_count =
-      std::max<uint32_t>(1, static_cast<uint32_t>(texture->sampleCount()));
-  const uint32_t mip_count =
-      std::max<uint32_t>(1, static_cast<uint32_t>(texture->mipmapLevelCount()));
-  const uint32_t array_length =
-      std::max<uint32_t>(1, static_cast<uint32_t>(texture->arrayLength()));
-
-  uint64_t total = 0;
-  for (uint32_t level = 0; level < mip_count; ++level) {
-    uint32_t width =
-        std::max<uint32_t>(1, static_cast<uint32_t>(texture->width() >> level));
-    uint32_t height = std::max<uint32_t>(
-        1, static_cast<uint32_t>(texture->height() >> level));
-    uint32_t depth =
-        std::max<uint32_t>(1, static_cast<uint32_t>(texture->depth() >> level));
-    uint64_t level_bytes = uint64_t(width) * uint64_t(height) *
-                           uint64_t(depth) * bytes_per_pixel * sample_count;
-    total += level_bytes;
-  }
-
-  return total * array_length;
-}
-
 bool AreDimensionsCompatible(xenos::FetchOpDimension shader_dimension,
                              xenos::DataDimension texture_dimension) {
   switch (shader_dimension) {
@@ -3356,7 +3291,7 @@ MetalTextureCache::MetalTexture::MetalTexture(MetalTextureCache& texture_cache,
       texture_cache_(texture_cache),
       metal_texture_(metal_texture) {
   if (metal_texture_) {
-    SetHostMemoryUsage(EstimateTextureBytes(metal_texture_));
+    SetHostMemoryUsage(metal_texture_->allocatedSize());
   }
 }
 
