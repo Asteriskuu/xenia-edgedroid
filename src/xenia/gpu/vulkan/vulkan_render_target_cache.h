@@ -20,6 +20,7 @@
 #include "xenia/base/hash.h"
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/edram_dump_shader.h"
+#include "xenia/gpu/edram_transfer_shader.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/vulkan/vulkan_shared_memory.h"
 #include "xenia/gpu/vulkan/vulkan_texture_cache.h"
@@ -494,162 +495,12 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
     void Reset() { std::memset(this, 0, sizeof(*this)); }
   };
 
-  enum TransferUsedDescriptorSet : uint32_t {
-    // Ordered from the least to the most frequently changed.
-    kTransferUsedDescriptorSetHostDepthBuffer,
-    kTransferUsedDescriptorSetHostDepthStencilTextures,
-    kTransferUsedDescriptorSetDepthStencilTextures,
-    // Mutually exclusive with kTransferUsedDescriptorSetDepthStencilTextures.
-    kTransferUsedDescriptorSetColorTexture,
-
-    kTransferUsedDescriptorSetCount,
-
-    kTransferUsedDescriptorSetHostDepthBufferBit =
-        uint32_t(1) << kTransferUsedDescriptorSetHostDepthBuffer,
-    kTransferUsedDescriptorSetHostDepthStencilTexturesBit =
-        uint32_t(1) << kTransferUsedDescriptorSetHostDepthStencilTextures,
-    kTransferUsedDescriptorSetDepthStencilTexturesBit =
-        uint32_t(1) << kTransferUsedDescriptorSetDepthStencilTextures,
-    kTransferUsedDescriptorSetColorTextureBit =
-        uint32_t(1) << kTransferUsedDescriptorSetColorTexture,
-  };
-
-  // 32-bit push constants (for simplicity of size calculation and to avoid
-  // std140 packing issues).
-  enum TransferUsedPushConstantDword : uint32_t {
-    kTransferUsedPushConstantDwordHostDepthAddress,
-    kTransferUsedPushConstantDwordAddress,
-    // Changed 8 times per transfer.
-    kTransferUsedPushConstantDwordStencilMask,
-
-    kTransferUsedPushConstantDwordCount,
-
-    kTransferUsedPushConstantDwordHostDepthAddressBit =
-        uint32_t(1) << kTransferUsedPushConstantDwordHostDepthAddress,
-    kTransferUsedPushConstantDwordAddressBit =
-        uint32_t(1) << kTransferUsedPushConstantDwordAddress,
-    kTransferUsedPushConstantDwordStencilMaskBit =
-        uint32_t(1) << kTransferUsedPushConstantDwordStencilMask,
-  };
-
-  enum class TransferPipelineLayoutIndex {
-    kColor,
-    kDepth,
-    kColorToStencilBit,
-    kDepthToStencilBit,
-    kColorAndHostDepthTexture,
-    kColorAndHostDepthBuffer,
-    kDepthAndHostDepthTexture,
-    kDepthAndHostDepthBuffer,
-
-    kCount,
-  };
-
-  struct TransferPipelineLayoutInfo {
-    uint32_t used_descriptor_sets;
-    uint32_t used_push_constant_dwords;
-  };
-
-  static const TransferPipelineLayoutInfo
-      kTransferPipelineLayoutInfos[size_t(TransferPipelineLayoutIndex::kCount)];
-
-  enum class TransferMode : uint32_t {
-    kColorToDepth,
-    kColorToColor,
-
-    kDepthToDepth,
-    kDepthToColor,
-
-    kColorToStencilBit,
-    kDepthToStencilBit,
-
-    // Two-source modes, using the host depth if it, when converted to the guest
-    // format, matches what's in the owner source (not modified, keep host
-    // precision), or the guest data otherwise (significantly modified, possibly
-    // cleared). Stencil for FragStencilRef is always taken from the guest
-    // source.
-
-    kColorAndHostDepthToDepth,
-    // When using different source and destination depth formats.
-    kDepthAndHostDepthToDepth,
-
-    // If host depth is fetched, but it's the same image as the destination,
-    // it's copied to the EDRAM buffer (but since it's just a scratch buffer,
-    // with tiles laid out linearly with the same pitch as in the original
-    // render target; also no swapping of 40-sample columns as opposed to the
-    // host render target - this is done only for the color source) and fetched
-    // from there instead of the host depth texture.
-    kColorAndHostDepthCopyToDepth,
-    kDepthAndHostDepthCopyToDepth,
-
-    kCount,
-  };
-
-  enum class TransferOutput {
-    kColor,
-    kDepth,
-    kStencilBit,
-  };
-
-  struct TransferModeInfo {
-    TransferOutput output;
-    TransferPipelineLayoutIndex pipeline_layout;
-  };
-
-  static const TransferModeInfo kTransferModes[size_t(TransferMode::kCount)];
-
-  union TransferShaderKey {
-    uint32_t key;
-    struct {
-      xenos::MsaaSamples dest_msaa_samples : xenos::kMsaaSamplesBits;
-      uint32_t dest_color_rt_index : xenos::kColorRenderTargetIndexBits;
-      uint32_t dest_resource_format : xenos::kRenderTargetFormatBits;
-      xenos::MsaaSamples source_msaa_samples : xenos::kMsaaSamplesBits;
-      // Always 1x when the host depth is a copy from a buffer rather than an
-      // image, not to create the same pipeline for different MSAA sample counts
-      // as it doesn't matter in this case.
-      xenos::MsaaSamples host_depth_source_msaa_samples
-          : xenos::kMsaaSamplesBits;
-      uint32_t source_resource_format : xenos::kRenderTargetFormatBits;
-      // Decode (not bit-reinterpret) a 7e3 <-> 8_8_8_8 reuse. See
-      // IsTransferValueConverted7e3And8888.
-      uint32_t value_convert : 1;
-      // Scale classes of the two sides. The shader bakes each side's tile
-      // size and conversion between the scale spaces.
-      uint32_t dest_scale_native : 1;
-      uint32_t source_scale_native : 1;
-
-      // Last bits because this affects the pipeline layout - after sorting,
-      // only change it as fewer times as possible. Depth buffers have an
-      // additional stencil texture.
-      static_assert(size_t(TransferMode::kCount) <= (size_t(1) << 4));
-      TransferMode mode : 4;
-    };
-
-    TransferShaderKey() : key(0) { static_assert_size(*this, sizeof(key)); }
-
-    struct Hasher {
-      size_t operator()(const TransferShaderKey& key) const {
-        return std::hash<uint32_t>{}(key.key);
-      }
-    };
-    bool operator==(const TransferShaderKey& other_key) const {
-      return key == other_key.key;
-    }
-    bool operator!=(const TransferShaderKey& other_key) const {
-      return !(*this == other_key);
-    }
-    bool operator<(const TransferShaderKey& other_key) const {
-      return key < other_key.key;
-    }
-  };
-
   struct TransferPipelineKey {
     RenderPassKey render_pass_key;
-    TransferShaderKey shader_key;
+    EdramTransferShaderKey shader_key;
 
     TransferPipelineKey(RenderPassKey render_pass_key,
-                        TransferShaderKey shader_key)
+                        EdramTransferShaderKey shader_key)
         : render_pass_key(render_pass_key), shader_key(shader_key) {}
 
     struct Hasher {
@@ -705,9 +556,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
 
   struct TransferInvocation {
     Transfer transfer;
-    TransferShaderKey shader_key;
+    EdramTransferShaderKey shader_key;
     TransferInvocation(const Transfer& transfer,
-                       const TransferShaderKey& shader_key)
+                       const EdramTransferShaderKey& shader_key)
         : transfer(transfer), shader_key(shader_key) {}
     bool operator<(const TransferInvocation& other_invocation) const {
       // TODO(Triang3l): See if it may be better to sort by the source in the
@@ -788,7 +639,7 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       RenderPassKey render_pass_key, uint32_t pitch_tiles_at_32bpp,
       const RenderTarget* const* depth_and_color_render_targets);
 
-  VkShaderModule GetTransferShader(TransferShaderKey key);
+  VkShaderModule GetTransferShader(EdramTransferShaderKey key);
   // With sample-rate shading, returns a pointer to one pipeline. Without
   // sample-rate shading, returns a pointer to as many pipelines as there are
   // samples. If there was a failure to create a pipeline, returns nullptr.
@@ -853,10 +704,10 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
       transfer_vertex_buffer_pool_;
   VkShaderModule transfer_passthrough_vertex_shader_ = VK_NULL_HANDLE;
   VkPipelineLayout transfer_pipeline_layouts_[size_t(
-      TransferPipelineLayoutIndex::kCount)] = {};
+      EdramTransferPipelineLayoutIndex::kCount)] = {};
   // VK_NULL_HANDLE if failed to create.
-  std::unordered_map<TransferShaderKey, VkShaderModule,
-                     TransferShaderKey::Hasher>
+  std::unordered_map<EdramTransferShaderKey, VkShaderModule,
+                     EdramTransferShaderKey::Hasher>
       transfer_shaders_;
   // With sample-rate shading, one pipeline per entry. Without sample-rate
   // shading, one pipeline per sample per entry. VK_NULL_HANDLE if failed to
