@@ -16,6 +16,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/profiling.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
 #include "xenia/gpu/metal/metal_shader_converter.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
@@ -115,6 +116,7 @@ bool MetalDxilBinder::Bind(MTL::RenderCommandEncoder* encoder,
                            const SpirvShader* pixel_shader,
                            const Constants& constants, bool memexport_used,
                            bool tessellated) {
+  SCOPE_profile_cpu_i("gpu", "MetalDxilBinder::Bind");
   if (!encoder || !converter_.is_available()) {
     return false;
   }

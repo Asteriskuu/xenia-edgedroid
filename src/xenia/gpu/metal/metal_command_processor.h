@@ -687,6 +687,12 @@ class MetalCommandProcessor : public CommandProcessor {
 
   std::atomic<uint64_t> completed_command_buffers_{0};
   std::atomic<uint32_t> pending_completion_handlers_{0};
+  // Summed GPU busy time of the completed command buffers, from Metal's own
+  // timestamps rather than the wall clock, so it isn't confounded by whatever
+  // the CPU is doing. Published as a rolling per-frame mean by IssueSwap.
+  std::atomic<uint64_t> completed_gpu_time_ns_{0};
+  uint64_t gpu_time_window_start_ns_ = 0;
+  uint32_t gpu_time_window_frames_ = 0;
   uint64_t submission_current_ = 0;
   uint64_t submission_completed_processed_ = 0;
   // Signaled by the submission completion handler so waits for a specific

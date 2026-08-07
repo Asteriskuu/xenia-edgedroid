@@ -1846,7 +1846,21 @@ void MetalCommandProcessor::InitializeShaderStorage(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  SCOPE_profile_cpu_f("gpu");
   ProcessCompletedSubmissions();
+
+  // Completion handlers land a frame or two behind, which a window this wide
+  // absorbs.
+  static constexpr uint32_t kGpuTimeWindowFrames = 60;
+  if (++gpu_time_window_frames_ >= kGpuTimeWindowFrames) {
+    uint64_t now_ns = completed_gpu_time_ns_.load(std::memory_order_relaxed);
+    COUNT_profile_set("gpu/metal/gpu_busy_us_per_frame",
+                      int64_t((now_ns - gpu_time_window_start_ns_) /
+                              (uint64_t(1000) * gpu_time_window_frames_)));
+    gpu_time_window_start_ns_ = now_ns;
+    gpu_time_window_frames_ = 0;
+  }
+
   saw_swap_ = true;
   last_swap_ptr_ = frontbuffer_ptr;
   last_swap_width_ = frontbuffer_width;
@@ -2315,6 +2329,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  SCOPE_profile_cpu_f("gpu");
   const RegisterFile& regs = *register_file_;
   uint32_t normalized_color_mask = 0;
 
@@ -2461,6 +2476,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
 bool MetalCommandProcessor::RequestDrawSharedMemoryRanges(
     const Shader& vertex_shader, const RegisterFile& regs) {
+  SCOPE_profile_cpu_f("gpu");
   if (!shared_memory_) {
     return true;
   }
@@ -2603,6 +2619,7 @@ void MetalCommandProcessor::ApplyViewportAndScissor(
 
 bool MetalCommandProcessor::PrepareDrawTextures(uint32_t used_texture_mask,
                                                 const RegisterFile& regs) {
+  SCOPE_profile_cpu_f("gpu");
   if (copy_resolve_writes_pending_ && used_texture_mask) {
     auto overlaps_resolved_texture_ranges = [&](uint32_t texture_fetch_mask) {
       uint32_t remaining_fetch_bits = texture_fetch_mask;
@@ -2662,6 +2679,7 @@ bool MetalCommandProcessor::PrepareDrawTextures(uint32_t used_texture_mask,
 void MetalCommandProcessor::UpdateGuestConstantCaches(
     const Shader* vertex_shader, const Shader* pixel_shader,
     const RegisterFile& regs) {
+  SCOPE_profile_cpu_f("gpu");
   // SpirvShaderTranslator uses packed float constants like Vulkan, so a change
   // in which constants a shader uses changes the packing.
   const Shader::ConstantRegisterMap& float_constant_map_vertex =
@@ -2893,6 +2911,7 @@ bool MetalCommandProcessor::IssueDrawMsl(
     const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
     bool primitive_polygonal, bool is_rasterization_done, bool memexport_used,
     uint32_t normalized_color_mask, const RegisterFile& regs) {
+  SCOPE_profile_cpu_f("gpu");
   assert_not_null(vertex_shader);
   // Cast to MslShader for the SPIRV-Cross path.
   auto* msl_vertex_shader = static_cast<MslShader*>(vertex_shader);
@@ -4230,6 +4249,7 @@ bool MetalCommandProcessor::IssueDrawDxil(
     const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
     bool primitive_polygonal, bool memexport_used,
     uint32_t normalized_color_mask, const RegisterFile& regs) {
+  SCOPE_profile_cpu_f("gpu");
   assert_not_null(vertex_shader);
   if (!metal_shader_converter_.is_available()) {
     static bool converter_unavailable_logged = false;
@@ -4437,6 +4457,7 @@ bool MetalCommandProcessor::IssueDrawDxil(
 }
 
 bool MetalCommandProcessor::IssueCopy() {
+  SCOPE_profile_cpu_f("gpu");
   // Finish any in-flight rendering so render target contents are visible to
   // resolve logic.
   EndRenderEncoder();
@@ -4577,6 +4598,7 @@ void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 }
 
 MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
+  SCOPE_profile_cpu_f("gpu");
   ProcessCompletedSubmissions();
   if (current_command_buffer_) {
     return current_command_buffer_;
@@ -4617,16 +4639,23 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
 
   ++submission_current_;
   pending_completion_handlers_.fetch_add(1, std::memory_order_relaxed);
-  current_command_buffer_->addCompletedHandler([this](MTL::CommandBuffer*) {
-    std::lock_guard<std::mutex> lock(completion_mutex_);
-    completed_command_buffers_.fetch_add(1, std::memory_order_release);
-    pending_completion_handlers_.fetch_sub(1, std::memory_order_release);
-    // Notify under the lock: a waiter that evaluated the predicate before
-    // the increment would otherwise miss the wakeup, and
-    // WaitForPendingCompletionHandlers can see the counter reach zero and
-    // let the object be destroyed out from under notify_all().
-    completion_cond_.notify_all();
-  });
+  current_command_buffer_->addCompletedHandler(
+      [this](MTL::CommandBuffer* command_buffer) {
+        double gpu_seconds =
+            command_buffer->GPUEndTime() - command_buffer->GPUStartTime();
+        if (gpu_seconds > 0.0) {
+          completed_gpu_time_ns_.fetch_add(uint64_t(gpu_seconds * 1e9),
+                                           std::memory_order_relaxed);
+        }
+        std::lock_guard<std::mutex> lock(completion_mutex_);
+        completed_command_buffers_.fetch_add(1, std::memory_order_release);
+        pending_completion_handlers_.fetch_sub(1, std::memory_order_release);
+        // Notify under the lock: a waiter that evaluated the predicate before
+        // the increment would otherwise miss the wakeup, and
+        // WaitForPendingCompletionHandlers can see the counter reach zero and
+        // let the object be destroyed out from under notify_all().
+        completion_cond_.notify_all();
+      });
 
   if (primitive_processor_) {
     primitive_processor_->BeginSubmission();
@@ -4779,6 +4808,7 @@ void MetalCommandProcessor::ResetMslCrossEncoderReuseCaches() {
 }
 
 void MetalCommandProcessor::EndRenderEncoder() {
+  SCOPE_profile_cpu_f("gpu");
   if (!current_render_encoder_) {
     render_encoder_has_zpd_visibility_ = false;
     return;
@@ -4858,6 +4888,7 @@ void MetalCommandProcessor::UseRenderEncoderAttachmentHeaps(
 }
 
 void MetalCommandProcessor::BeginCommandBuffer() {
+  SCOPE_profile_cpu_f("gpu");
   if (!EnsureCommandBuffer()) {
     return;
   }
@@ -6472,6 +6503,7 @@ void MetalCommandProcessor::UpdateSpirvSystemConstantValues(
     xenos::Endian index_endian, const draw_util::ViewportInfo& viewport_info,
     uint32_t used_texture_mask, reg::RB_DEPTHCONTROL normalized_depth_control,
     uint32_t normalized_color_mask) {
+  SCOPE_profile_cpu_f("gpu");
   const SpirvShaderTranslator::SystemConstants previous_system_constants =
       spirv_system_constants_;
 
