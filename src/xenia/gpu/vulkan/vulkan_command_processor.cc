@@ -170,7 +170,13 @@ void VulkanCommandProcessor::InitializeShaderStorage(
                                            std::move(completion_callback));
 }
 
-void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {}
+void VulkanCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
+  // Starting a new frame because descriptors may be needed.
+  if (!BeginSubmission(true)) {
+    return;
+  }
+  render_target_cache_->RestoreEdramSnapshot(snapshot);
+}
 
 void VulkanCommandProcessor::PollCompletedSubmission() {
   // Strict ZPD can skip unnecessary work here that can wait for the next full
@@ -4906,13 +4912,17 @@ void VulkanCommandProcessor::InitializeTrace() {
   if (!BeginSubmission(true)) {
     return;
   }
-  // TODO(Triang3l): Write the EDRAM.
+  bool render_target_cache_submitted =
+      render_target_cache_->InitializeTraceSubmitDownloads();
   bool shared_memory_submitted =
       shared_memory_->InitializeTraceSubmitDownloads();
-  if (!shared_memory_submitted) {
+  if (!render_target_cache_submitted && !shared_memory_submitted) {
     return;
   }
   AwaitAllQueueOperationsCompletion();
+  if (render_target_cache_submitted) {
+    render_target_cache_->InitializeTraceCompleteDownloads();
+  }
   if (shared_memory_submitted) {
     shared_memory_->InitializeTraceCompleteDownloads();
   }

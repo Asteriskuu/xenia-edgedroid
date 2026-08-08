@@ -1599,11 +1599,12 @@ bool D3D12RenderTargetCache::Resolve(const Memory& memory,
   return copied && cleared;
 }
 
-bool D3D12RenderTargetCache::InitializeTraceSubmitDownloads() {
-  if (IsDrawResolutionScaled()) {
-    // No 1:1 mapping.
-    return false;
-  }
+void D3D12RenderTargetCache::DumpAllRenderTargetsToEdram() {
+  DumpRenderTargets(0, xenos::kEdramTileCount, 1, xenos::kEdramTileCount,
+                    false);
+}
+
+bool D3D12RenderTargetCache::BeginEdramSnapshotReadback() {
   if (!edram_snapshot_download_buffer_) {
     D3D12_RESOURCE_DESC edram_snapshot_download_buffer_desc;
     ui::d3d12::util::FillBufferResourceDesc(edram_snapshot_download_buffer_desc,
@@ -1624,11 +1625,6 @@ bool D3D12RenderTargetCache::InitializeTraceSubmitDownloads() {
       return false;
     }
   }
-  if (GetPath() == Path::kHostRenderTargets) {
-    // Dump all host render targets to edram_buffer_.
-    DumpRenderTargets(0, xenos::kEdramTileCount, 1, xenos::kEdramTileCount,
-                      false);
-  }
   TransitionEdramBuffer(D3D12_RESOURCE_STATE_COPY_SOURCE);
   command_processor_.SubmitBarriers();
   command_processor_.GetDeferredCommandList().D3DCopyBufferRegion(
@@ -1637,20 +1633,27 @@ bool D3D12RenderTargetCache::InitializeTraceSubmitDownloads() {
   return true;
 }
 
-void D3D12RenderTargetCache::InitializeTraceCompleteDownloads() {
+const void* D3D12RenderTargetCache::MapEdramSnapshotReadback() {
+  if (!edram_snapshot_download_buffer_) {
+    return nullptr;
+  }
+  void* download_mapping;
+  if (FAILED(edram_snapshot_download_buffer_->Map(0, nullptr,
+                                                  &download_mapping))) {
+    return nullptr;
+  }
+  edram_snapshot_download_mapped_ = true;
+  return download_mapping;
+}
+
+void D3D12RenderTargetCache::EndEdramSnapshotReadback() {
   if (!edram_snapshot_download_buffer_) {
     return;
   }
-  void* download_mapping;
-  if (SUCCEEDED(edram_snapshot_download_buffer_->Map(0, nullptr,
-                                                     &download_mapping))) {
-    trace_writer_.WriteEdramSnapshot(download_mapping);
+  if (edram_snapshot_download_mapped_) {
     D3D12_RANGE download_write_range = {};
     edram_snapshot_download_buffer_->Unmap(0, &download_write_range);
-  } else {
-    XELOGE(
-        "D3D12RenderTargetCache: Failed to map the EDRAM snapshot download "
-        "buffer");
+    edram_snapshot_download_mapped_ = false;
   }
   edram_snapshot_download_buffer_->Release();
   edram_snapshot_download_buffer_ = nullptr;

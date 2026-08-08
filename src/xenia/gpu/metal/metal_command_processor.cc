@@ -1034,6 +1034,17 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
   }
 }
 
+void MetalCommandProcessor::InitializeTrace() {
+  CommandProcessor::InitializeTrace();
+
+  // The EDRAM readback commits and awaits its own command buffer, so unlike
+  // D3D12 and Vulkan there's no submission to bracket this with.
+  if (render_target_cache_ &&
+      render_target_cache_->InitializeTraceSubmitDownloads()) {
+    render_target_cache_->InitializeTraceCompleteDownloads();
+  }
+}
+
 void MetalCommandProcessor::RestoreEdramSnapshot(const void* snapshot) {
   // Restore the guest EDRAM snapshot captured in the trace into the Metal
   // render-target cache so that subsequent host render targets created from

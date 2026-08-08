@@ -223,11 +223,19 @@ class RenderTargetCache {
   uint32_t GetLastUpdateBoundRenderTargets(
       uint32_t* depth_and_color_formats_out = nullptr) const;
 
+  // Writes the EDRAM contents into the trace, so a replay starts from the same
+  // state the capture did. Split because the readback goes through the
+  // implementation's submission - Submit records it, Complete maps the result
+  // afterwards. Submit returns whether there is anything for Complete to read.
+  bool InitializeTraceSubmitDownloads();
+  void InitializeTraceCompleteDownloads();
+
  protected:
   RenderTargetCache(const RegisterFile& register_file, const Memory& memory,
                     TraceWriter* trace_writer, uint32_t draw_resolution_scale_x,
                     uint32_t draw_resolution_scale_y)
       : register_file_(register_file),
+        trace_writer_(trace_writer),
         draw_resolution_scale_x_(draw_resolution_scale_x),
         draw_resolution_scale_y_(draw_resolution_scale_y),
         draw_extent_estimator_(register_file, memory, trace_writer) {
@@ -663,6 +671,21 @@ class RenderTargetCache {
   RenderTarget* PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
       xenos::ColorRenderTargetFormat color_format);
 
+  // EDRAM snapshot readback, backing InitializeTrace*Downloads. The defaults
+  // leave a backend without snapshot support.
+
+  // Transfers every host render target into the implementation's EDRAM buffer,
+  // only called on the host render target path.
+  virtual void DumpAllRenderTargetsToEdram() {}
+  // Allocates the host-visible destination if needed and records a copy of the
+  // whole EDRAM buffer into it. Returns whether the copy was recorded.
+  virtual bool BeginEdramSnapshotReadback() { return false; }
+  // kEdramSizeBytes of readback data, or nullptr if it can't be mapped. Only
+  // valid once the submission holding the copy has completed.
+  virtual const void* MapEdramSnapshotReadback() { return nullptr; }
+  // Unmaps and releases what BeginEdramSnapshotReadback allocated.
+  virtual void EndEdramSnapshotReadback() {}
+
   // For pixel shader interlock.
 
   virtual void RequestPixelShaderInterlockBarrier() {}
@@ -682,6 +705,7 @@ class RenderTargetCache {
 
  private:
   const RegisterFile& register_file_;
+  TraceWriter* trace_writer_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
 

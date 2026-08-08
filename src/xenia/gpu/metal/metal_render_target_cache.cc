@@ -2942,6 +2942,56 @@ bool MetalRenderTargetCache::DirectResolveRenderTargets(
   return true;
 }
 
+void MetalRenderTargetCache::DumpAllRenderTargetsToEdram() {
+  DumpRenderTargets(0, xenos::kEdramTileCount, 1, xenos::kEdramTileCount);
+}
+
+bool MetalRenderTargetCache::BeginEdramSnapshotReadback() {
+  if (!edram_buffer_ || !device_) {
+    return false;
+  }
+  if (!edram_snapshot_download_buffer_) {
+    edram_snapshot_download_buffer_ = device_->newBuffer(
+        xenos::kEdramSizeBytes, MTL::ResourceStorageModeShared);
+    if (!edram_snapshot_download_buffer_) {
+      XELOGE(
+          "MetalRenderTargetCache: Failed to create the EDRAM snapshot "
+          "download buffer");
+      return false;
+    }
+    edram_snapshot_download_buffer_->setLabel(
+        NS::String::string("EDRAM Snapshot Download", NS::UTF8StringEncoding));
+  }
+
+  // Nothing brackets this submission, so the copy is awaited here.
+  ScopedAutoreleasePool autorelease_pool;
+  MTL::CommandQueue* queue = command_processor_.GetMetalCommandQueue();
+  MTL::CommandBuffer* cmd = queue ? queue->commandBuffer() : nullptr;
+  MTL::BlitCommandEncoder* blit = cmd ? cmd->blitCommandEncoder() : nullptr;
+  if (!blit) {
+    return false;
+  }
+  blit->copyFromBuffer(edram_buffer_, 0, edram_snapshot_download_buffer_, 0,
+                       xenos::kEdramSizeBytes);
+  blit->endEncoding();
+  cmd->commit();
+  cmd->waitUntilCompleted();
+  return true;
+}
+
+const void* MetalRenderTargetCache::MapEdramSnapshotReadback() {
+  return edram_snapshot_download_buffer_
+             ? edram_snapshot_download_buffer_->contents()
+             : nullptr;
+}
+
+void MetalRenderTargetCache::EndEdramSnapshotReadback() {
+  if (edram_snapshot_download_buffer_) {
+    edram_snapshot_download_buffer_->release();
+    edram_snapshot_download_buffer_ = nullptr;
+  }
+}
+
 void MetalRenderTargetCache::DumpRenderTargets(
     uint32_t dump_base, uint32_t dump_row_length_used, uint32_t dump_rows,
     uint32_t dump_pitch, MTL::CommandBuffer* command_buffer) {

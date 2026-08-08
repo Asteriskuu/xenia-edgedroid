@@ -19,6 +19,7 @@
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/registers.h"
+#include "xenia/gpu/trace_writer.h"
 #include "xenia/gpu/xenos.h"
 
 DEFINE_bool(
@@ -1497,6 +1498,28 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
         color_clear_length_tiles, &color_transfers_out, &clear_rectangle);
   }
   return true;
+}
+
+bool RenderTargetCache::InitializeTraceSubmitDownloads() {
+  if (IsDrawResolutionScaled()) {
+    // Scaled EDRAM has no 1:1 mapping to a guest snapshot.
+    return false;
+  }
+  if (GetPath() == Path::kHostRenderTargets) {
+    DumpAllRenderTargetsToEdram();
+  }
+  return BeginEdramSnapshotReadback();
+}
+
+void RenderTargetCache::InitializeTraceCompleteDownloads() {
+  const void* snapshot = MapEdramSnapshotReadback();
+  if (snapshot) {
+    assert_not_null(trace_writer_);
+    trace_writer_->WriteEdramSnapshot(snapshot);
+  } else {
+    XELOGE("Failed to map the EDRAM snapshot readback for frame tracing");
+  }
+  EndEdramSnapshotReadback();
 }
 
 RenderTargetCache::RenderTarget*

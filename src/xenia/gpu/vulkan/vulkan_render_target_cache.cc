@@ -960,6 +960,11 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
                                          edram_buffer_);
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
                                          edram_buffer_memory_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                         edram_snapshot_restore_buffer_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkFreeMemory, device,
+                                         edram_snapshot_restore_buffer_memory_);
+  EndEdramSnapshotReadback();
 
   descriptor_set_pool_sampled_image_x2_.reset();
   descriptor_set_pool_sampled_image_.reset();
@@ -4032,6 +4037,206 @@ bool VulkanRenderTargetCache::DirectResolveRenderTargets(
 
   command_processor_.PopDebugMarker();
   return true;
+}
+
+void VulkanRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
+  if (IsDrawResolutionScaled()) {
+    // Scaled EDRAM has no 1:1 mapping to a guest snapshot.
+    return;
+  }
+
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+
+  if (edram_snapshot_restore_buffer_ == VK_NULL_HANDLE) {
+    if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            vulkan_device, xenos::kEdramSizeBytes,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            ui::vulkan::util::MemoryPurpose::kUpload,
+            edram_snapshot_restore_buffer_,
+            edram_snapshot_restore_buffer_memory_)) {
+      XELOGE(
+          "VulkanRenderTargetCache: Failed to create the EDRAM snapshot "
+          "restore buffer");
+      return;
+    }
+  }
+
+  void* upload_mapping;
+  if (dfn.vkMapMemory(device, edram_snapshot_restore_buffer_memory_, 0,
+                      VK_WHOLE_SIZE, 0, &upload_mapping) != VK_SUCCESS) {
+    XELOGE(
+        "VulkanRenderTargetCache: Failed to map the EDRAM snapshot restore "
+        "buffer");
+    return;
+  }
+
+  switch (GetPath()) {
+    case Path::kHostRenderTargets: {
+      // k_32_FLOAT because it's unambiguous, matching D3D12.
+      VulkanRenderTarget* full_edram_render_target =
+          static_cast<VulkanRenderTarget*>(
+              PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
+                  xenos::ColorRenderTargetFormat::k_32_FLOAT));
+      if (!full_edram_render_target) {
+        dfn.vkUnmapMemory(device, edram_snapshot_restore_buffer_memory_);
+        return;
+      }
+      assert_false(full_edram_render_target->key().Is64bpp());
+      uint32_t pitch_tiles =
+          full_edram_render_target->key().pitch_tiles_at_32bpp;
+      uint32_t tile_rows = xenos::kEdramTileCount / pitch_tiles;
+      assert_true(pitch_tiles * tile_rows == xenos::kEdramTileCount);
+      // Tightly packed, so the row pitch is the full image width.
+      uint32_t row_pitch =
+          sizeof(uint32_t) * xenos::kEdramTileWidthSamples * pitch_tiles;
+      const uint8_t* snapshot_sample_row =
+          reinterpret_cast<const uint8_t*>(snapshot);
+      for (uint32_t y_tile = 0; y_tile < tile_rows; ++y_tile) {
+        uint8_t* tile_row_origin =
+            reinterpret_cast<uint8_t*>(upload_mapping) +
+            xenos::kEdramTileHeightSamples * y_tile * row_pitch;
+        for (uint32_t x_tile = 0; x_tile < pitch_tiles; ++x_tile) {
+          uint8_t* upload_sample_row =
+              tile_row_origin +
+              sizeof(uint32_t) * xenos::kEdramTileWidthSamples * x_tile;
+          for (uint32_t sample_row = 0;
+               sample_row < xenos::kEdramTileHeightSamples; ++sample_row) {
+            std::memcpy(upload_sample_row, snapshot_sample_row,
+                        sizeof(uint32_t) * xenos::kEdramTileWidthSamples);
+            snapshot_sample_row +=
+                sizeof(uint32_t) * xenos::kEdramTileWidthSamples;
+            upload_sample_row += row_pitch;
+          }
+        }
+      }
+      dfn.vkUnmapMemory(device, edram_snapshot_restore_buffer_memory_);
+
+      command_processor_.PushImageMemoryBarrier(
+          full_edram_render_target->image(),
+          ui::vulkan::util::InitializeSubresourceRange(),
+          full_edram_render_target->current_stage_mask(),
+          VK_PIPELINE_STAGE_TRANSFER_BIT,
+          full_edram_render_target->current_access_mask(),
+          VK_ACCESS_TRANSFER_WRITE_BIT,
+          full_edram_render_target->current_layout(),
+          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+      full_edram_render_target->SetUsage(VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         VK_ACCESS_TRANSFER_WRITE_BIT,
+                                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+      command_processor_.SubmitBarriers(true);
+
+      VkBufferImageCopy copy_region;
+      copy_region.bufferOffset = 0;
+      copy_region.bufferRowLength = xenos::kEdramTileWidthSamples * pitch_tiles;
+      copy_region.bufferImageHeight =
+          xenos::kEdramTileHeightSamples * tile_rows;
+      copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      copy_region.imageSubresource.mipLevel = 0;
+      copy_region.imageSubresource.baseArrayLayer = 0;
+      copy_region.imageSubresource.layerCount = 1;
+      copy_region.imageOffset.x = 0;
+      copy_region.imageOffset.y = 0;
+      copy_region.imageOffset.z = 0;
+      copy_region.imageExtent.width = copy_region.bufferRowLength;
+      copy_region.imageExtent.height = copy_region.bufferImageHeight;
+      copy_region.imageExtent.depth = 1;
+      command_processor_.deferred_command_buffer().CmdVkCopyBufferToImage(
+          edram_snapshot_restore_buffer_, full_edram_render_target->image(),
+          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
+    } break;
+
+    case Path::kPixelShaderInterlock: {
+      std::memcpy(upload_mapping, snapshot, xenos::kEdramSizeBytes);
+      dfn.vkUnmapMemory(device, edram_snapshot_restore_buffer_memory_);
+      UseEdramBuffer(EdramBufferUsage::kTransferWrite);
+      command_processor_.SubmitBarriers(true);
+      VkBufferCopy copy_region;
+      copy_region.srcOffset = 0;
+      copy_region.dstOffset = 0;
+      copy_region.size = xenos::kEdramSizeBytes;
+      command_processor_.deferred_command_buffer().CmdVkCopyBuffer(
+          edram_snapshot_restore_buffer_, edram_buffer_, 1, &copy_region);
+    } break;
+
+    default:
+      dfn.vkUnmapMemory(device, edram_snapshot_restore_buffer_memory_);
+      assert_unhandled_case(GetPath());
+  }
+}
+
+void VulkanRenderTargetCache::DumpAllRenderTargetsToEdram() {
+  DumpRenderTargets(0, xenos::kEdramTileCount, 1, xenos::kEdramTileCount,
+                    false);
+}
+
+bool VulkanRenderTargetCache::BeginEdramSnapshotReadback() {
+  if (edram_snapshot_download_buffer_ == VK_NULL_HANDLE) {
+    if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            command_processor_.GetVulkanDevice(), xenos::kEdramSizeBytes,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            ui::vulkan::util::MemoryPurpose::kReadback,
+            edram_snapshot_download_buffer_,
+            edram_snapshot_download_buffer_memory_)) {
+      XELOGE(
+          "VulkanRenderTargetCache: Failed to create the EDRAM snapshot "
+          "download buffer");
+      return false;
+    }
+  }
+
+  UseEdramBuffer(EdramBufferUsage::kTransferRead);
+  command_processor_.SubmitBarriers(true);
+
+  VkBufferCopy copy_region;
+  copy_region.srcOffset = 0;
+  copy_region.dstOffset = 0;
+  copy_region.size = xenos::kEdramSizeBytes;
+  command_processor_.deferred_command_buffer().CmdVkCopyBuffer(
+      edram_buffer_, edram_snapshot_download_buffer_, 1, &copy_region);
+
+  command_processor_.PushBufferMemoryBarrier(
+      edram_snapshot_download_buffer_, 0, VK_WHOLE_SIZE,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+  return true;
+}
+
+const void* VulkanRenderTargetCache::MapEdramSnapshotReadback() {
+  if (edram_snapshot_download_buffer_memory_ == VK_NULL_HANDLE) {
+    return nullptr;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  void* download_mapping;
+  if (dfn.vkMapMemory(vulkan_device->device(),
+                      edram_snapshot_download_buffer_memory_, 0, VK_WHOLE_SIZE,
+                      0, &download_mapping) != VK_SUCCESS) {
+    return nullptr;
+  }
+  edram_snapshot_download_mapped_ = true;
+  return download_mapping;
+}
+
+void VulkanRenderTargetCache::EndEdramSnapshotReadback() {
+  if (edram_snapshot_download_buffer_memory_ == VK_NULL_HANDLE) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device =
+      command_processor_.GetVulkanDevice();
+  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+  const VkDevice device = vulkan_device->device();
+  if (edram_snapshot_download_mapped_) {
+    dfn.vkUnmapMemory(device, edram_snapshot_download_buffer_memory_);
+    edram_snapshot_download_mapped_ = false;
+  }
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyBuffer, device,
+                                         edram_snapshot_download_buffer_);
+  ui::vulkan::util::DestroyAndNullHandle(
+      dfn.vkFreeMemory, device, edram_snapshot_download_buffer_memory_);
 }
 
 void VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base,

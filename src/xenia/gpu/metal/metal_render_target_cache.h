@@ -253,6 +253,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
 
   // EDRAM buffer (10MB embedded DRAM)
   MTL::Buffer* edram_buffer_ = nullptr;
+  MTL::Buffer* edram_snapshot_download_buffer_ = nullptr;
 
   // EDRAM compute shaders for tile operations
   MTL::ComputePipelineState* edram_load_pipeline_ = nullptr;   // Tiled → Linear
@@ -630,6 +631,11 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   void DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used,
                          uint32_t dump_rows, uint32_t dump_pitch,
                          MTL::CommandBuffer* command_buffer = nullptr);
+
+  void DumpAllRenderTargetsToEdram() override;
+  bool BeginEdramSnapshotReadback() override;
+  const void* MapEdramSnapshotReadback() override;
+  void EndEdramSnapshotReadback() override;
 };
 
 }  // namespace metal
