@@ -555,6 +555,7 @@ void VulkanSharedMemory::InitializeTraceCompleteDownloads() {
           download_range.first, download_range.second,
           reinterpret_cast<const uint8_t*>(download_mapping) +
               download_buffer_offset);
+      download_buffer_offset += download_range.second;
     }
     dfn.vkUnmapMemory(device, trace_download_buffer_memory_);
   } else {

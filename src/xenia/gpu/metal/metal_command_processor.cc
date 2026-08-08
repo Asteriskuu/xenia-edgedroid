@@ -1037,11 +1037,19 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
 void MetalCommandProcessor::InitializeTrace() {
   CommandProcessor::InitializeTrace();
 
-  // The EDRAM readback commits and awaits its own command buffer, so unlike
-  // D3D12 and Vulkan there's no submission to bracket this with.
+  // Neither download is bracketed by a submission of its own, so everything in
+  // flight has to have landed before they read what the GPU wrote.
+  EndCommandBuffer();
+  if (submission_current_) {
+    AwaitSubmissionCompletion(submission_current_);
+  }
+
   if (render_target_cache_ &&
       render_target_cache_->InitializeTraceSubmitDownloads()) {
     render_target_cache_->InitializeTraceCompleteDownloads();
+  }
+  if (shared_memory_ && shared_memory_->InitializeTraceSubmitDownloads()) {
+    shared_memory_->InitializeTraceCompleteDownloads();
   }
 }
 
@@ -1316,7 +1324,8 @@ bool MetalCommandProcessor::SetupContext() {
   msl_bound_uniforms_offsets_valid_ = false;
 
   // Initialize shared memory
-  shared_memory_ = std::make_unique<MetalSharedMemory>(*this, *memory_);
+  shared_memory_ =
+      std::make_unique<MetalSharedMemory>(*this, *memory_, trace_writer_);
   if (!shared_memory_->Initialize()) {
     XELOGE("Failed to initialize shared memory");
     return false;
