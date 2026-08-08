@@ -544,6 +544,9 @@ class CommandProcessor {
   }
 
   virtual void InitializeTrace();
+  // Saves the guest output of the frame that was just traced next to the trace
+  // itself, as ground truth for what a replay of it should produce.
+  void WriteTraceFrameScreenshot();
 
   Memory* memory_ = nullptr;
   kernel::KernelState* kernel_state_ = nullptr;
@@ -602,6 +605,9 @@ class CommandProcessor {
   TraceState trace_state_ = TraceState::kDisabled;
   std::filesystem::path trace_stream_path_;
   std::filesystem::path trace_frame_path_;
+  // Full path of the frame trace currently being written, so the reference
+  // screenshot can be saved beside it when the frame closes.
+  std::filesystem::path trace_frame_file_path_;
 
   std::atomic<bool> worker_running_;
   kernel::object_ref<kernel::XHostThread> worker_thread_;

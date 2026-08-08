@@ -9,7 +9,10 @@
 
 #include "xenia/gpu/command_processor.h"
 
+#include <fstream>
+
 #include "third_party/fmt/include/fmt/format.h"
+#include "third_party/stb/stb_image_write.h"
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
@@ -25,6 +28,7 @@
 #include "xenia/gpu/xenos_zpd_report.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
+#include "xenia/ui/presenter.h"
 
 #if !defined(NDEBUG)
 
@@ -1050,6 +1054,40 @@ void CommandProcessor::PrepareForWait() {
 }
 
 void CommandProcessor::ReturnFromWait() {}
+
+void CommandProcessor::WriteTraceFrameScreenshot() {
+  if (trace_frame_file_path_.empty()) {
+    return;
+  }
+  std::filesystem::path png_path = trace_frame_file_path_;
+  png_path.replace_extension(".png");
+  trace_frame_file_path_.clear();
+
+  ui::Presenter* presenter =
+      graphics_system_ ? graphics_system_->presenter() : nullptr;
+  ui::RawImage image;
+  if (!presenter || !presenter->CaptureGuestOutput(image)) {
+    XELOGE("Failed to capture the guest output of the traced frame");
+    return;
+  }
+
+  auto file = std::ofstream(png_path, std::ios::binary);
+  if (!file.is_open()) {
+    XELOGE("Failed to open {} for the traced frame screenshot", png_path);
+    return;
+  }
+  if (!stbi_write_png_to_func(
+          [](void* context, void* data, int size) {
+            reinterpret_cast<std::ofstream*>(context)->write(
+                reinterpret_cast<const char*>(data), size);
+          },
+          &file, int(image.width), int(image.height), 4, image.data.data(),
+          int(image.stride))) {
+    XELOGE("Failed to write the traced frame screenshot to {}", png_path);
+    return;
+  }
+  XELOGI("Traced frame screenshot written to {}", png_path);
+}
 
 void CommandProcessor::InitializeTrace() {
   // Write the initial register values, to be loaded directly into the
