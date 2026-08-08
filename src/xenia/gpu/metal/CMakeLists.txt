@@ -58,3 +58,27 @@ xe_shader_rules_metal(xenia-gpu-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders)
 xe_shader_rules_slang(xenia-gpu-metal ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
                       TARGET msl)
 xe_target_defaults(xenia-gpu-metal)
+
+if(XENIA_BUILD_MISC)
+  # Metal trace dump
+  add_executable(xenia-gpu-metal-trace-dump
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_trace_dump_main.cc
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc
+  )
+  target_include_directories(xenia-gpu-metal-trace-dump PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/glslang
+  )
+  target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE
+    xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
+    xenia-gpu xenia-gpu-metal xenia-hid xenia-hid-nop xenia-hid-portal
+    xenia-kernel xenia-patcher xenia-ui xenia-ui-metal xenia-vfs
+    aes_128 capstone fmt glslang-spirv imgui libavcodec libavutil mspack snappy xxhash
+  )
+  if(XE_TARGET_X86_64)
+    target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE xenia-cpu-backend-a64)
+  endif()
+  xe_target_defaults(xenia-gpu-metal-trace-dump)
+endif()
