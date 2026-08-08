@@ -166,6 +166,8 @@ class CommandProcessor {
   virtual void InvalidateGpuMemory();
   virtual void ClearReadbackBuffers();
 
+  TraceWriter& trace_writer() { return trace_writer_; }
+
   // Get cached readback resolve mode (avoids string parsing every frame)
   ReadbackResolveMode GetReadbackResolveMode() const {
     return cached_readback_resolve_mode_;
