@@ -1948,6 +1948,32 @@ MTL::Texture* MetalRenderTargetCache::CreateColorTexture(
   return texture;
 }
 
+MTL::Texture* MetalRenderTargetCache::CreateDummyColorTexture(
+    uint32_t width, uint32_t height, uint32_t samples) {
+  MTL::TextureDescriptor* desc = MTL::TextureDescriptor::alloc()->init();
+  desc->setWidth(width);
+  desc->setHeight(height ? height : 720);
+  // Nothing reads this and the write mask is empty, so the narrowest renderable
+  // format will do - it still costs tile memory on every depth-only pass.
+  desc->setPixelFormat(MTL::PixelFormatR8Unorm);
+  desc->setTextureType(samples > 1 ? MTL::TextureType2DMultisample
+                                   : MTL::TextureType2D);
+  desc->setSampleCount(samples);
+  desc->setUsage(MTL::TextureUsageRenderTarget);
+
+  MTL::Texture* texture = nullptr;
+#if XE_PLATFORM_IOS
+  desc->setStorageMode(MTL::StorageModeMemoryless);
+  texture = device_->newTexture(desc);
+#endif
+  if (!texture) {
+    desc->setStorageMode(MTL::StorageModePrivate);
+    texture = device_->newTexture(desc);
+  }
+  desc->release();
+  return texture;
+}
+
 MTL::Texture* MetalRenderTargetCache::CreateDepthTexture(
     uint32_t width, uint32_t height, xenos::DepthRenderTargetFormat format,
     uint32_t samples) {
@@ -2258,8 +2284,6 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
   // where an RTV is always bound when drawing, and also keeps pipeline state
   // validation happy for depth-only passes.
   if (!has_any_color_target) {
-    xenos::ColorRenderTargetFormat fmt =
-        xenos::ColorRenderTargetFormat::k_8_8_8_8;
     uint32_t samples = std::max(1u, expected_sample_count);
 
     uint32_t width = 1280;
@@ -2293,12 +2317,11 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
 
     uint32_t dummy_sample_count =
         samples >= 4u ? 4u : (samples == 2u ? 2u : 1u);
-    // Cache dummy color targets by shape/format only so depth-only passes with
+    // Cache dummy color targets by shape only so depth-only passes with
     // changing EDRAM bases can reuse the same transient attachment.
     uint64_t dummy_key = uint64_t(width & 0xFFFFu) |
                          (uint64_t(height & 0xFFFFu) << 16) |
-                         (uint64_t(dummy_sample_count & 0xFFu) << 32) |
-                         (uint64_t(uint32_t(fmt) & 0xFFFFu) << 40);
+                         (uint64_t(dummy_sample_count & 0xFFu) << 32);
     auto evict_oldest_dummy_target = [&](uint64_t keep_key) -> bool {
       uint64_t oldest_key = 0;
       uint64_t oldest_frame = frame_id_;
@@ -2324,38 +2347,19 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
       RenderTargetKey dummy_rt_key;
       dummy_rt_key.key = 0;
       dummy_rt_key.is_depth = 0;
-      dummy_rt_key.resource_format = uint32_t(fmt);
       dummy_rt_key.msaa_samples =
           dummy_sample_count >= 4u   ? xenos::MsaaSamples::k4X
           : dummy_sample_count == 2u ? xenos::MsaaSamples::k2X
                                      : xenos::MsaaSamples::k1X;
       entry.target = std::make_unique<MetalRenderTarget>(dummy_rt_key);
       entry.last_cleared_frame = frame_id_ - 1;
-      // CreateColorTexture prefers memoryless transient attachments on iOS.
       MTL::Texture* tex =
-          CreateColorTexture(width, height, fmt, dummy_sample_count,
-                             /*transient_render_target_only=*/true);
+          CreateDummyColorTexture(width, height, dummy_sample_count);
       while (!tex && dummy_color_targets_.size() > 1 &&
              evict_oldest_dummy_target(dummy_key)) {
-        tex = CreateColorTexture(width, height, fmt, dummy_sample_count,
-                                 /*transient_render_target_only=*/true);
+        tex = CreateDummyColorTexture(width, height, dummy_sample_count);
       }
       entry.target->SetTexture(tex);
-      if (tex) {
-        MTL::PixelFormat resource_format = GetColorResourcePixelFormat(fmt);
-        MTL::PixelFormat draw_format = GetColorDrawPixelFormat(fmt);
-        MTL::PixelFormat transfer_format =
-            GetColorOwnershipTransferPixelFormat(fmt, nullptr);
-        if (draw_format != resource_format) {
-          entry.target->SetDrawTexture(tex->newTextureView(draw_format));
-          RecordRenderTargetViewCreated();
-        }
-        if (transfer_format != resource_format) {
-          entry.target->SetTransferTexture(
-              tex->newTextureView(transfer_format));
-          RecordRenderTargetViewCreated();
-        }
-      }
     }
 
     entry.last_used_frame = frame_id_;

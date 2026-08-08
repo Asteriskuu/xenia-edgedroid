@@ -490,6 +490,8 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
                                    xenos::ColorRenderTargetFormat format,
                                    uint32_t samples,
                                    bool transient_render_target_only = false);
+  MTL::Texture* CreateDummyColorTexture(uint32_t width, uint32_t height,
+                                        uint32_t samples);
   MTL::Texture* CreateDepthTexture(uint32_t width, uint32_t height,
                                    xenos::DepthRenderTargetFormat format,
                                    uint32_t samples);
