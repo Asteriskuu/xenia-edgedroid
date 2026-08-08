@@ -788,7 +788,7 @@ def download_slang():
 def run_cmake_configure(cc=None, generator=None, build_tests=False,
                         disable_lto=False, enable_profiler=False,
                         enable_itrace=False, enable_dtrace=False,
-                        enable_ftrace=False,
+                        enable_ftrace=False, build_misc=False,
                         target_arch=None, config=None):
     """Runs `cmake` to (re)configure build/ from the source root.
 
@@ -799,7 +799,9 @@ def run_cmake_configure(cc=None, generator=None, build_tests=False,
     (faster Release link, at the cost of LTO's whole-program opts);
     enable_profiler toggles -DXENIA_ENABLE_PROFILER=ON (microprofile
     instrumentation; UI overlay only in Debug, profile.html dump on
-    shutdown otherwise). target_arch enables cross-compilation on
+    shutdown otherwise); build_misc toggles -DXENIA_BUILD_MISC=ON (trace
+    viewers and dumps, shader compiler, vfs-dump, demos).
+    target_arch enables cross-compilation on
     Windows (arm64↔x64 via the MSVC cross-compiler) and macOS
     (arm64↔x86_64 via clang's -arch and CMAKE_OSX_ARCHITECTURES) into a
     separate build-<arch>/ tree; Linux rejects non-native target_arch.
@@ -893,6 +895,7 @@ def run_cmake_configure(cc=None, generator=None, build_tests=False,
     args += [f"-DXENIA_ENABLE_ITRACE={'ON' if enable_itrace else 'OFF'}"]
     args += [f"-DXENIA_ENABLE_DTRACE={'ON' if enable_dtrace else 'OFF'}"]
     args += [f"-DXENIA_ENABLE_FTRACE={'ON' if enable_ftrace else 'OFF'}"]
+    args += [f"-DXENIA_BUILD_MISC={'ON' if build_misc else 'OFF'}"]
     if config:
         args += [f"-DCMAKE_BUILD_TYPE={config.title()}"]
     ret = subprocess.call(args)
@@ -1170,6 +1173,12 @@ class BaseBuildCommand(Command):
             help="Enables JIT per-function-call tracing to the log (sets "
                  "-DXENIA_ENABLE_FTRACE=ON). For debugging only.")
         self.parser.add_argument(
+            "--build-misc", dest="build_misc", action="store_true",
+            default=False,
+            help="Enables building the misc subprojects (sets "
+                 "-DXENIA_BUILD_MISC=ON): trace viewers and trace dumps, "
+                 "the shader compiler, vfs-dump and the demos.")
+        self.parser.add_argument(
             "--target-arch", type=normalize_target_arch, default=None,
             help="Target architecture (arm64/aarch64/a64, x64/amd64/x86_64/x86). "
                  "On Windows and macOS, non-native values enable cross-compilation "
@@ -1187,6 +1196,7 @@ class BaseBuildCommand(Command):
                 enable_itrace=args["enable_itrace"],
                 enable_dtrace=args["enable_dtrace"],
                 enable_ftrace=args["enable_ftrace"],
+                build_misc=args["build_misc"],
                 target_arch=target_arch,
                 config=args["config"],
             )

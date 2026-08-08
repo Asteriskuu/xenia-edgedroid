@@ -18,8 +18,8 @@ xe_target_defaults(xenia-gpu-vulkan)
 if(XENIA_BUILD_MISC)
   add_executable(xenia-gpu-vulkan-trace-viewer
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_trace_viewer_main.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_qt.cc
   )
+  xe_windowed_app_main(xenia-gpu-vulkan-trace-viewer)
   target_include_directories(xenia-gpu-vulkan-trace-viewer PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
     ${PROJECT_SOURCE_DIR}/third_party/glslang
@@ -32,6 +32,9 @@ if(XENIA_BUILD_MISC)
   )
   if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-vulkan-trace-viewer PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-vulkan-trace-viewer PRIVATE xenia-cpu-backend-a64)
   endif()
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(xenia-gpu-vulkan-trace-viewer PRIVATE X11 xcb X11-xcb xenia-apu-sdl)
@@ -61,6 +64,9 @@ if(XENIA_BUILD_MISC)
   )
   if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-vulkan-trace-dump PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-vulkan-trace-dump PRIVATE xenia-cpu-backend-a64)
   endif()
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(xenia-gpu-vulkan-trace-dump PRIVATE xenia-apu-sdl)

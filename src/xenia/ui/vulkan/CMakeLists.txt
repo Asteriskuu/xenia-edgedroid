@@ -18,8 +18,8 @@ if(XENIA_BUILD_MISC)
   add_executable(xenia-ui-window-vulkan-demo
     ${CMAKE_CURRENT_SOURCE_DIR}/../window_demo.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_window_demo.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_qt.cc
   )
+  xe_windowed_app_main(xenia-ui-window-vulkan-demo)
   if(WIN32)
     set_target_properties(xenia-ui-window-vulkan-demo PROPERTIES WIN32_EXECUTABLE TRUE)
   endif()
@@ -27,13 +27,17 @@ if(XENIA_BUILD_MISC)
     ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
   )
   target_link_libraries(xenia-ui-window-vulkan-demo PRIVATE
-    xenia-apu xenia-base xenia-core xenia-cpu
-    xenia-gpu xenia-hid xenia-hid-portal
+    xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
+    xenia-gpu xenia-hid xenia-hid-nop xenia-hid-portal
     xenia-kernel xenia-patcher xenia-ui xenia-ui-vulkan xenia-vfs
-    aes_128 capstone dxbc fmt glslang-spirv imgui mspack snappy xxhash
+    aes_128 capstone dxbc fmt glslang-spirv imgui libavcodec libavutil mspack
+    snappy xxhash
   )
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+  if(XE_TARGET_X86_64)
     target_link_libraries(xenia-ui-window-vulkan-demo PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-ui-window-vulkan-demo PRIVATE xenia-cpu-backend-a64)
   endif()
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(xenia-ui-window-vulkan-demo PRIVATE X11 xcb X11-xcb xenia-apu-sdl)

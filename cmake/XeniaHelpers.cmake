@@ -111,6 +111,23 @@ function(xe_target_defaults target)
   endif()
 endfunction()
 
+# xe_windowed_app_main(target)
+#
+# Adds the per-platform wx entry point a WindowedApp executable needs.
+# src/xenia/ui/CMakeLists.txt keeps these out of the xenia-ui library, so every
+# windowed executable has to name one itself.
+function(xe_windowed_app_main target)
+  if(WIN32)
+    set(_main windowed_app_main_win.cc)
+  elseif(APPLE)
+    set(_main windowed_app_main_mac.cc)
+  else()
+    set(_main windowed_app_main_linux.cc)
+  endif()
+  target_sources(${target} PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/ui/${_main})
+endfunction()
+
 # xe_embed_binary_assets(target source_dir output_namespace)
 #
 # Embeds every file in source_dir as a static byte array in a generated

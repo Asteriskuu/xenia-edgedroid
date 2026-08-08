@@ -30,8 +30,20 @@ if(XENIA_BUILD_MISC)
     ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
     ${PROJECT_SOURCE_DIR}/third_party/glslang
   )
+  # The shader translators only need xenia-gpu, but linking it drags in
+  # command_processor and graphics_system, so the kernel side comes with it.
   target_link_libraries(xenia-gpu-shader-compiler PRIVATE
-    dxbc fmt glslang-spirv snappy xenia-base xenia-gpu xenia-ui xenia-ui-vulkan
+    xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
+    xenia-gpu xenia-hid xenia-hid-nop xenia-hid-portal
+    xenia-kernel xenia-patcher xenia-ui xenia-ui-vulkan xenia-vfs
+    aes_128 capstone dxbc fmt glslang-spirv imgui libavcodec libavutil mspack
+    snappy xxhash
   )
+  if(XE_TARGET_X86_64)
+    target_link_libraries(xenia-gpu-shader-compiler PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-shader-compiler PRIVATE xenia-cpu-backend-a64)
+  endif()
   xe_target_defaults(xenia-gpu-shader-compiler)
 endif()

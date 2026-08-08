@@ -29,8 +29,8 @@ endforeach()
 if(XENIA_BUILD_MISC)
   add_executable(xenia-gpu-d3d12-trace-viewer WIN32
     ${CMAKE_CURRENT_SOURCE_DIR}/d3d12_trace_viewer_main.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_qt.cc
   )
+  xe_windowed_app_main(xenia-gpu-d3d12-trace-viewer)
   target_link_libraries(xenia-gpu-d3d12-trace-viewer PRIVATE
     xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
     xenia-gpu xenia-gpu-d3d12 xenia-hid xenia-hid-nop xenia-hid-portal
@@ -39,6 +39,9 @@ if(XENIA_BUILD_MISC)
   )
   if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-d3d12-trace-viewer PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-d3d12-trace-viewer PRIVATE xenia-cpu-backend-a64)
   endif()
   xe_target_defaults(xenia-gpu-d3d12-trace-viewer)
 
@@ -55,6 +58,9 @@ if(XENIA_BUILD_MISC)
   )
   if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-d3d12-trace-dump PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-d3d12-trace-dump PRIVATE xenia-cpu-backend-a64)
   endif()
   xe_target_defaults(xenia-gpu-d3d12-trace-dump)
 endif()
