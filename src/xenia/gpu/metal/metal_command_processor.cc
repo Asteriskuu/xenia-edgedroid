@@ -4861,9 +4861,9 @@ void MetalCommandProcessor::BeginCommandBuffer() {
     }
   }
 
-  // Attach the ZPD visibility buffer so occlusion queries write their results
-  // straight into shared memory with no explicit resolve step.
-  if (GetZPDMode() != ZPDMode::kFake && IsZPDQueryPoolReady()) {
+  // Only passes that host a query need the buffer. A segment pending later
+  // restarts the encoder above to pick it up.
+  if (zpd_segment_pending && IsZPDQueryPoolReady()) {
     pass_descriptor->setVisibilityResultBuffer(
         zpd_visibility_pool_->visibility_buffer());
   } else {
