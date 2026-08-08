@@ -209,8 +209,6 @@ class MetalCommandProcessor : public CommandProcessor {
   void WaitForPendingCompletionHandlers();
   void ProcessCompletedSubmissions();
   bool EnsureDrawRingCapacity();
-  void UseRenderEncoderAttachmentHeaps(MTL::RenderPassDescriptor* descriptor);
-  void UseRenderEncoderHeap(MTL::Heap* heap);
   // SPIRV-Cross path: uniforms buffer is command-buffer scoped to avoid
   // CPU writes racing ahead of in-flight GPU reads.
   bool EnsureSpirvUniformBuffer();
@@ -402,7 +400,6 @@ class MetalCommandProcessor : public CommandProcessor {
   // Tracks resources marked via useResource for the current render encoder
   // to avoid redundant driver calls across draws within the same encoder.
   std::unordered_map<MTL::Resource*, uint32_t> render_encoder_resource_usage_;
-  std::unordered_set<MTL::Heap*> render_encoder_heap_usage_;
 
   // Shared memory for Xbox 360 memory access
   std::unique_ptr<MetalSharedMemory> shared_memory_;

@@ -4778,7 +4778,6 @@ void MetalCommandProcessor::EndRenderEncoder() {
 
 void MetalCommandProcessor::ResetRenderEncoderResourceUsage() {
   render_encoder_resource_usage_.clear();
-  render_encoder_heap_usage_.clear();
 }
 
 void MetalCommandProcessor::UseRenderEncoderResource(MTL::Resource* resource,
@@ -4786,7 +4785,8 @@ void MetalCommandProcessor::UseRenderEncoderResource(MTL::Resource* resource,
   if (!current_render_encoder_ || !resource) {
     return;
   }
-  UseRenderEncoderHeap(resource->heap());
+  // No useHeap: tracking on a tracked heap is heap-granular, so declaring the
+  // heap would make this encoder depend on every write to anything in it.
   uint32_t usage_bits = static_cast<uint32_t>(usage);
   auto it = render_encoder_resource_usage_.find(resource);
   if (it != render_encoder_resource_usage_.end()) {
@@ -4798,42 +4798,6 @@ void MetalCommandProcessor::UseRenderEncoderResource(MTL::Resource* resource,
     render_encoder_resource_usage_.emplace(resource, usage_bits);
   }
   current_render_encoder_->useResource(resource, usage);
-}
-
-void MetalCommandProcessor::UseRenderEncoderHeap(MTL::Heap* heap) {
-  if (!current_render_encoder_ || !heap) {
-    return;
-  }
-  if (!render_encoder_heap_usage_.insert(heap).second) {
-    return;
-  }
-  current_render_encoder_->useHeap(heap);
-}
-
-void MetalCommandProcessor::UseRenderEncoderAttachmentHeaps(
-    MTL::RenderPassDescriptor* descriptor) {
-  if (!current_render_encoder_ || !descriptor) {
-    return;
-  }
-  auto* color_attachments = descriptor->colorAttachments();
-  for (uint32_t i = 0; i < 8; ++i) {
-    auto* attachment = color_attachments->object(i);
-    if (!attachment) {
-      continue;
-    }
-    MTL::Texture* texture = attachment->texture();
-    if (texture) {
-      UseRenderEncoderHeap(texture->heap());
-    }
-  }
-  auto* depth_attachment = descriptor->depthAttachment();
-  if (depth_attachment && depth_attachment->texture()) {
-    UseRenderEncoderHeap(depth_attachment->texture()->heap());
-  }
-  auto* stencil_attachment = descriptor->stencilAttachment();
-  if (stencil_attachment && stencil_attachment->texture()) {
-    UseRenderEncoderHeap(stencil_attachment->texture()->heap());
-  }
 }
 
 void MetalCommandProcessor::BeginCommandBuffer() {
@@ -4851,8 +4815,7 @@ void MetalCommandProcessor::BeginCommandBuffer() {
     EnsureZPDQueryResources();
   }
 
-  if (!current_render_encoder_ && (!render_encoder_resource_usage_.empty() ||
-                                   !render_encoder_heap_usage_.empty())) {
+  if (!current_render_encoder_ && !render_encoder_resource_usage_.empty()) {
     ResetRenderEncoderResourceUsage();
   }
 
@@ -4952,7 +4915,6 @@ void MetalCommandProcessor::BeginCommandBuffer() {
                                   zpd_visibility_pool_->visibility_buffer());
     ff_blend_factor_valid_ = false;
     current_render_pass_descriptor_ = pass_descriptor;
-    UseRenderEncoderAttachmentHeaps(pass_descriptor);
 
     // Start the encoder off covering the whole bound render target rather than
     // a hard-coded 1280x720. Prefer color RT 0 from the MetalRenderTargetCache,

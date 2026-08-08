@@ -32,7 +32,6 @@ namespace gpu {
 namespace metal {
 
 class MetalCommandProcessor;
-class MetalHeapPool;
 
 class MetalRenderTargetCache final : public gpu::RenderTargetCache {
  public:
@@ -251,8 +250,6 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   MTL::Device* device_ = nullptr;
   bool gamma_render_target_as_srgb_ = false;
   bool gamma_render_target_as_unorm16_ = false;
-
-  std::unique_ptr<MetalHeapPool> render_target_heap_pool_;
 
   // EDRAM buffer (10MB embedded DRAM)
   MTL::Buffer* edram_buffer_ = nullptr;
@@ -492,8 +489,7 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   MTL::Texture* CreateColorTexture(uint32_t width, uint32_t height,
                                    xenos::ColorRenderTargetFormat format,
                                    uint32_t samples,
-                                   bool transient_render_target_only = false,
-                                   bool allow_unpooled_fallback = true);
+                                   bool transient_render_target_only = false);
   MTL::Texture* CreateDepthTexture(uint32_t width, uint32_t height,
                                    xenos::DepthRenderTargetFormat format,
                                    uint32_t samples);

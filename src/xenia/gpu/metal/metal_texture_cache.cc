@@ -103,8 +103,12 @@ DEFINE_bool(metal_texture_upload_via_blit, true,
             "of CPU replaceRegion.",
             "Metal");
 
-DECLARE_bool(metal_use_heaps);
-DECLARE_int32(metal_heap_min_bytes);
+DEFINE_bool(metal_use_heaps, true,
+            "Use MTLHeap-backed allocations for guest textures in Metal to "
+            "reduce allocation overhead and fragmentation.",
+            "Metal");
+DEFINE_int32(metal_heap_min_bytes, 33554432,
+             "Minimum heap size (bytes) for Metal heap allocations.", "Metal");
 
 namespace xe {
 namespace gpu {

@@ -28,7 +28,6 @@
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
-#include "xenia/gpu/metal/metal_heap_pool.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
 #include "xenia/gpu/shaders/bytecode/metal/host_depth_store_1xmsaa_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/host_depth_store_2xmsaa_cs.h"
@@ -76,12 +75,6 @@ DEFINE_int32(metal_memory_log_rate, 0,
              "Log Metal render target/pipeline/instance buffer sizes every N "
              "frames (0 to disable)",
              "Metal");
-DEFINE_bool(metal_use_heaps, true,
-            "Use MTLHeap-backed texture allocations in Metal to reduce "
-            "allocation overhead and fragmentation.",
-            "Metal");
-DEFINE_int32(metal_heap_min_bytes, 33554432,
-             "Minimum heap size (bytes) for Metal heap allocations.", "Metal");
 
 namespace xe {
 namespace gpu {
@@ -617,12 +610,6 @@ bool MetalRenderTargetCache::Initialize() {
         "set --metal_allow_gamma_unorm16=true to force");
   }
 
-  if (::cvars::metal_use_heaps) {
-    size_t min_heap_bytes = std::max<int32_t>(0, ::cvars::metal_heap_min_bytes);
-    render_target_heap_pool_ = std::make_unique<MetalHeapPool>(
-        device_, MTL::StorageModePrivate, min_heap_bytes, "XeniaRT");
-  }
-
   // Create the EDRAM buffer.
   //
   // The guest has 10 MiB of EDRAM for samples, but with host resolution
@@ -809,11 +796,6 @@ void MetalRenderTargetCache::Shutdown(bool from_destructor) {
   // Destroy all render targets
   DestroyAllRenderTargets(!from_destructor);
   render_target_map_.clear();
-
-  if (render_target_heap_pool_) {
-    render_target_heap_pool_->Shutdown();
-    render_target_heap_pool_.reset();
-  }
 
   // Shutdown base class
   if (!from_destructor) {
@@ -1921,8 +1903,7 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
 
 MTL::Texture* MetalRenderTargetCache::CreateColorTexture(
     uint32_t width, uint32_t height, xenos::ColorRenderTargetFormat format,
-    uint32_t samples, bool transient_render_target_only,
-    bool allow_unpooled_fallback) {
+    uint32_t samples, bool transient_render_target_only) {
   MTL::PixelFormat resource_format = GetColorResourcePixelFormat(format);
   MTL::PixelFormat draw_format = GetColorDrawPixelFormat(format);
   MTL::PixelFormat transfer_format =
@@ -1959,12 +1940,7 @@ MTL::Texture* MetalRenderTargetCache::CreateColorTexture(
   }
   if (!texture) {
     desc->setStorageMode(MTL::StorageModePrivate);
-    if (render_target_heap_pool_ && !can_use_memoryless) {
-      texture = render_target_heap_pool_->CreateTexture(desc);
-    }
-    if (!texture && (!render_target_heap_pool_ || allow_unpooled_fallback)) {
-      texture = device_->newTexture(desc);
-    }
+    texture = device_->newTexture(desc);
   }
   desc->release();
   // Initial clear is handled on first bind via load actions; avoid
@@ -1992,13 +1968,7 @@ MTL::Texture* MetalRenderTargetCache::CreateDepthTexture(
   desc->setUsage(usage);
   desc->setStorageMode(MTL::StorageModePrivate);
 
-  MTL::Texture* texture = nullptr;
-  if (render_target_heap_pool_) {
-    texture = render_target_heap_pool_->CreateTexture(desc);
-  }
-  if (!texture) {
-    texture = device_->newTexture(desc);
-  }
+  MTL::Texture* texture = device_->newTexture(desc);
   desc->release();
   // Initial clear is handled on first bind via load actions; avoid
   // synchronous clears here to keep the host RT path fast.
@@ -2361,32 +2331,14 @@ MTL::RenderPassDescriptor* MetalRenderTargetCache::GetRenderPassDescriptor(
                                      : xenos::MsaaSamples::k1X;
       entry.target = std::make_unique<MetalRenderTarget>(dummy_rt_key);
       entry.last_cleared_frame = frame_id_ - 1;
-      // Prefer memoryless transient attachments on iOS (inside
-      // CreateColorTexture), otherwise keep dummy allocations in heap budget.
+      // CreateColorTexture prefers memoryless transient attachments on iOS.
       MTL::Texture* tex =
           CreateColorTexture(width, height, fmt, dummy_sample_count,
-                             /*transient_render_target_only=*/true,
-                             /*allow_unpooled_fallback=*/false);
-      while (!tex && render_target_heap_pool_ &&
-             dummy_color_targets_.size() > 1 &&
+                             /*transient_render_target_only=*/true);
+      while (!tex && dummy_color_targets_.size() > 1 &&
              evict_oldest_dummy_target(dummy_key)) {
         tex = CreateColorTexture(width, height, fmt, dummy_sample_count,
-                                 /*transient_render_target_only=*/true,
-                                 /*allow_unpooled_fallback=*/false);
-      }
-      if (!tex) {
-        static uint64_t last_unpooled_fallback_log_frame = 0;
-        if (render_target_heap_pool_ &&
-            last_unpooled_fallback_log_frame != frame_id_) {
-          XELOGW(
-              "Metal RT dummy target: heap allocation failed for {}x{} {}x; "
-              "falling back to unpooled texture",
-              width, height, dummy_sample_count);
-          last_unpooled_fallback_log_frame = frame_id_;
-        }
-        tex = CreateColorTexture(width, height, fmt, dummy_sample_count,
-                                 /*transient_render_target_only=*/true,
-                                 /*allow_unpooled_fallback=*/true);
+                                 /*transient_render_target_only=*/true);
       }
       entry.target->SetTexture(tex);
       if (tex) {
@@ -2585,12 +2537,7 @@ void MetalRenderTargetCache::StoreTiledData(MTL::CommandBuffer* command_buffer,
     desc->setUsage(MTL::TextureUsageRenderTarget | MTL::TextureUsageShaderRead);
     desc->setStorageMode(MTL::StorageModePrivate);
 
-    if (render_target_heap_pool_) {
-      temp_texture = render_target_heap_pool_->CreateTexture(desc);
-    }
-    if (!temp_texture) {
-      temp_texture = device_->newTexture(desc);
-    }
+    temp_texture = device_->newTexture(desc);
     desc->release();
     if (!temp_texture) {
       XELOGE(
@@ -6133,13 +6080,7 @@ MTL::Texture* MetalRenderTargetCache::GetTransferDummyTexture(
   }
   desc->setUsage(usage);
   desc->setStorageMode(MTL::StorageModePrivate);
-  MTL::Texture* tex = nullptr;
-  if (render_target_heap_pool_) {
-    tex = render_target_heap_pool_->CreateTexture(desc);
-  }
-  if (!tex) {
-    tex = device_->newTexture(desc);
-  }
+  MTL::Texture* tex = device_->newTexture(desc);
   desc->release();
   return tex;
 }
