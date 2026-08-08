@@ -102,14 +102,36 @@ DEFINE_bool(allow_game_relative_writes, false,
             "generating test data to compare with original hardware. ",
             "General");
 
-DECLARE_string(gpu);
-DECLARE_string(apu);
+// SetupSubsystems and MountStandardDrives read these, so they live with the
+// Emulator rather than in xenia_main.cc - the trace dumps, trace viewers and
+// demos all host an Emulator without linking the app.
+#if XE_PLATFORM_WIN32
+#define APU_OPTIONS "[xaudio2, sdl, nop]"
+#define GPU_OPTIONS "[d3d12, vulkan, null]"
+DEFINE_string(apu, "xaudio2", "Audio system. Use: " APU_OPTIONS, "APU");
+DEFINE_string(gpu, "d3d12", "Graphics system. Use: " GPU_OPTIONS, "GPU");
+#elif XE_PLATFORM_MAC
+#define APU_OPTIONS "[sdl, nop]"
+#define GPU_OPTIONS "[metal, vulkan, null]"
+DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
+DEFINE_string(gpu, "metal", "Graphics system. Use: " GPU_OPTIONS, "GPU");
+#else
+#define APU_OPTIONS "[sdl, nop]"
+#define GPU_OPTIONS "[vulkan, null]"
+DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
+DEFINE_string(gpu, "vulkan", "Graphics system. Use: " GPU_OPTIONS, "GPU");
+#endif
 
 DECLARE_bool(allow_plugins);
 
-DECLARE_bool(mount_scratch);
-DECLARE_bool(mount_cache);
-DECLARE_bool(mount_memory_unit);
+DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
+
+DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
+UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
+
+DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
+            "Storage");
+
 DECLARE_bool(force_mount_devkit);
 
 DEFINE_int32(priority_class, 0,
