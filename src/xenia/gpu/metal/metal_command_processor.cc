@@ -611,8 +611,10 @@ MetalCommandProcessor::~MetalCommandProcessor() {
   }
   uniforms_buffer_ = nullptr;
   command_buffer_spirv_uniform_buffers_.clear();
+  size_t uniforms_pool_size = 0;
   {
     std::lock_guard<std::mutex> lock(spirv_uniforms_mutex_);
+    uniforms_pool_size = spirv_uniforms_pool_.size();
     spirv_uniforms_available_.clear();
     for (MTL::Buffer* pool_uniforms : spirv_uniforms_pool_) {
       if (pool_uniforms) {
@@ -623,6 +625,11 @@ MetalCommandProcessor::~MetalCommandProcessor() {
     spirv_uniforms_pool_initialized_ = false;
   }
   if (spirv_uniforms_available_semaphore_) {
+    // Buffers dropped above were never signalled back, and libdispatch traps
+    // on a semaphore released below the count it was created with.
+    for (size_t i = 0; i < uniforms_pool_size; ++i) {
+      dispatch_semaphore_signal(spirv_uniforms_available_semaphore_);
+    }
 #if !OS_OBJECT_USE_OBJC
     dispatch_release(spirv_uniforms_available_semaphore_);
 #endif
@@ -1707,8 +1714,10 @@ void MetalCommandProcessor::ShutdownContext() {
 
   uniforms_buffer_ = nullptr;
   command_buffer_spirv_uniform_buffers_.clear();
+  size_t uniforms_pool_size = 0;
   {
     std::lock_guard<std::mutex> lock(spirv_uniforms_mutex_);
+    uniforms_pool_size = spirv_uniforms_pool_.size();
     spirv_uniforms_available_.clear();
     for (MTL::Buffer* pool_uniforms : spirv_uniforms_pool_) {
       if (pool_uniforms) {
@@ -1719,6 +1728,11 @@ void MetalCommandProcessor::ShutdownContext() {
     spirv_uniforms_pool_initialized_ = false;
   }
   if (spirv_uniforms_available_semaphore_) {
+    // Buffers dropped above were never signalled back, and libdispatch traps
+    // on a semaphore released below the count it was created with.
+    for (size_t i = 0; i < uniforms_pool_size; ++i) {
+      dispatch_semaphore_signal(spirv_uniforms_available_semaphore_);
+    }
 #if !OS_OBJECT_USE_OBJC
     dispatch_release(spirv_uniforms_available_semaphore_);
 #endif
