@@ -109,6 +109,12 @@ bool TraceDump::Setup() {
     XELOGE("Failed to setup emulator: {:08X}", result);
     return false;
   }
+  // Setup only stores the factories; the graphics system is created here.
+  result = emulator_->SetupSubsystems();
+  if (XFAILED(result)) {
+    XELOGE("Failed to setup emulator subsystems: {:08X}", result);
+    return false;
+  }
   graphics_system_ = emulator_->graphics_system();
   player_ = std::make_unique<TracePlayer>(graphics_system_);
   return true;

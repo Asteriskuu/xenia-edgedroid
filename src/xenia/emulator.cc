@@ -449,10 +449,12 @@ X_STATUS Emulator::SetupSubsystems() {
 
   if (graphics_system_) {
     XELOGI("{}: Starting graphics_system...", __func__);
+    // Presentation is requested even without a display window - the windowless
+    // presenter is what offscreen hosts like the trace dump capture guest
+    // output through.
     result = graphics_system_->Setup(
         processor_.get(), kernel_state_.get(),
-        display_window_ ? &display_window_->app_context() : nullptr,
-        display_window_ != nullptr);
+        display_window_ ? &display_window_->app_context() : nullptr, true);
     if (result) {
       XELOGE("{}: Failed to setup graphics_system!", __func__);
       return result;
