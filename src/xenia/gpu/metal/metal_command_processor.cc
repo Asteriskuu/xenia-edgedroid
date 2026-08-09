@@ -2753,6 +2753,9 @@ bool MetalCommandProcessor::PrepareDrawTextures(uint32_t used_texture_mask,
     if (overlaps_resolved_texture_ranges(used_texture_mask)) {
       EndCommandBuffer(CommandBufferKind::kSubmissionCopyToDrawSync);
       BeginCommandBuffer();
+      // The split put every resolve behind a queue boundary, discharging all
+      // of them - not just the range this draw hit.
+      ClearResolvedMemory();
       if (!current_command_buffer_ || !current_render_encoder_) {
         XELOGE(
             "Metal: failed to re-begin command buffer for copy->draw sync "
