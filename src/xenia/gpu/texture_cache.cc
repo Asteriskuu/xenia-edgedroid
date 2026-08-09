@@ -333,8 +333,11 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
 
   // Clear the aggregate flag, but invalidate only actually used outdated
   // bindings below to avoid resyncing all slots on unrelated texture updates.
-  texture_became_outdated_.exchange(false, std::memory_order_acquire);
-  InvalidateUsedOutdatedBindings(used_texture_mask);
+  {
+    SCOPE_profile_cpu_i("gpu", "TextureCache::InvalidateOutdatedBindings");
+    texture_became_outdated_.exchange(false, std::memory_order_acquire);
+    InvalidateUsedOutdatedBindings(used_texture_mask);
+  }
 
   // Update the texture keys and the textures.
   uint32_t bindings_changed = 0;
@@ -344,103 +347,110 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
   Texture* textures_to_load[64];  // max bits = 32, can be unsigned + signed
                                   // means max array size = 64
   uint32_t num_textures_to_load = 0;
-  while (xe::bit_scan_forward(textures_remaining, &index)) {
-    uint32_t index_bit = UINT32_C(1) << index;
-    textures_remaining = xe::clear_lowest_bit(textures_remaining);
-    TextureBinding& binding = texture_bindings_[index];
-    xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(index);
-    TextureKey old_key = binding.key;
-    uint32_t old_integer_scale_bits = binding.integer_scale_bits;
-    uint8_t old_swizzled_signs = binding.swizzled_signs;
-    const bool binding_was_outdated =
-        old_key.is_valid && IsBindingOutdatedForUse(binding);
-    BindingInfoFromFetchConstant(fetch, binding.key, &binding.swizzled_signs);
-    texture_bindings_in_sync_ |= index_bit;
-    if (!binding.key.is_valid) {
-      if (old_key.is_valid) {
+  {
+    SCOPE_profile_cpu_i("gpu", "TextureCache::UpdateBindingKeys");
+    while (xe::bit_scan_forward(textures_remaining, &index)) {
+      uint32_t index_bit = UINT32_C(1) << index;
+      textures_remaining = xe::clear_lowest_bit(textures_remaining);
+      TextureBinding& binding = texture_bindings_[index];
+      xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(index);
+      TextureKey old_key = binding.key;
+      uint32_t old_integer_scale_bits = binding.integer_scale_bits;
+      uint8_t old_swizzled_signs = binding.swizzled_signs;
+      const bool binding_was_outdated =
+          old_key.is_valid && IsBindingOutdatedForUse(binding);
+      BindingInfoFromFetchConstant(fetch, binding.key, &binding.swizzled_signs);
+      texture_bindings_in_sync_ |= index_bit;
+      if (!binding.key.is_valid) {
+        if (old_key.is_valid) {
+          bindings_changed |= index_bit;
+        }
+        binding.Reset();
+        continue;
+      }
+      uint32_t old_host_swizzle = binding.host_swizzle;
+      binding.host_swizzle =
+          GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(binding.key));
+      binding.integer_scale_bits =
+          GetIntegerScaleBits(fetch.format, fetch.num_format, fetch.swizzle,
+                              binding.swizzled_signs);
+
+      // Check if need to load the unsigned and the signed versions of the
+      // texture (if the format is emulated with different host bit
+      // representations for signed and unsigned - otherwise only the unsigned
+      // one is loaded).
+      bool key_changed = binding.key != old_key;
+      bool any_sign_was_not_signed =
+          texture_util::IsAnySignNotSigned(old_swizzled_signs);
+      bool any_sign_was_signed =
+          texture_util::IsAnySignSigned(old_swizzled_signs);
+      bool any_sign_is_not_signed =
+          texture_util::IsAnySignNotSigned(binding.swizzled_signs);
+      bool any_sign_is_signed =
+          texture_util::IsAnySignSigned(binding.swizzled_signs);
+      if (key_changed || binding.integer_scale_bits != old_integer_scale_bits ||
+          binding.host_swizzle != old_host_swizzle ||
+          any_sign_is_not_signed != any_sign_was_not_signed ||
+          any_sign_is_signed != any_sign_was_signed) {
         bindings_changed |= index_bit;
       }
-      binding.Reset();
-      continue;
-    }
-    uint32_t old_host_swizzle = binding.host_swizzle;
-    binding.host_swizzle =
-        GuestToHostSwizzle(fetch.swizzle, GetHostFormatSwizzle(binding.key));
-    binding.integer_scale_bits = GetIntegerScaleBits(
-        fetch.format, fetch.num_format, fetch.swizzle, binding.swizzled_signs);
-
-    // Check if need to load the unsigned and the signed versions of the texture
-    // (if the format is emulated with different host bit representations for
-    // signed and unsigned - otherwise only the unsigned one is loaded).
-    bool key_changed = binding.key != old_key;
-    bool any_sign_was_not_signed =
-        texture_util::IsAnySignNotSigned(old_swizzled_signs);
-    bool any_sign_was_signed =
-        texture_util::IsAnySignSigned(old_swizzled_signs);
-    bool any_sign_is_not_signed =
-        texture_util::IsAnySignNotSigned(binding.swizzled_signs);
-    bool any_sign_is_signed =
-        texture_util::IsAnySignSigned(binding.swizzled_signs);
-    if (key_changed || binding.integer_scale_bits != old_integer_scale_bits ||
-        binding.host_swizzle != old_host_swizzle ||
-        any_sign_is_not_signed != any_sign_was_not_signed ||
-        any_sign_is_signed != any_sign_was_signed) {
-      bindings_changed |= index_bit;
-    }
-    bool load_unsigned_data = false, load_signed_data = false;
-    if (IsSignedVersionSeparateForFormat(binding.key)) {
-      // Can reuse previously loaded unsigned/signed versions if the key is the
-      // same and the texture was previously bound as unsigned/signed
-      // respectively (checking the previous values of signedness rather than
-      // binding.texture != nullptr and binding.texture_signed != nullptr also
-      // prevents repeated attempts to load the texture if it has failed to
-      // load).
-      if (any_sign_is_not_signed) {
-        if (key_changed || !any_sign_was_not_signed) {
+      bool load_unsigned_data = false, load_signed_data = false;
+      if (IsSignedVersionSeparateForFormat(binding.key)) {
+        // Can reuse previously loaded unsigned/signed versions if the key is
+        // the same and the texture was previously bound as unsigned/signed
+        // respectively (checking the previous values of signedness rather than
+        // binding.texture != nullptr and binding.texture_signed != nullptr also
+        // prevents repeated attempts to load the texture if it has failed to
+        // load).
+        if (any_sign_is_not_signed) {
+          if (key_changed || !any_sign_was_not_signed) {
+            binding.texture = FindOrCreateTexture(binding.key);
+            load_unsigned_data = true;
+          } else if (binding_was_outdated && binding.texture != nullptr) {
+            // Fetch constants unchanged but watched guest memory changed -
+            // force a data upload against the same Texture*.
+            load_unsigned_data = true;
+          }
+        } else {
+          binding.texture = nullptr;
+        }
+        if (any_sign_is_signed) {
+          if (key_changed || !any_sign_was_signed) {
+            TextureKey signed_key = binding.key;
+            signed_key.signed_separate = 1;
+            binding.texture_signed = FindOrCreateTexture(signed_key);
+            load_signed_data = true;
+          } else if (binding_was_outdated &&
+                     binding.texture_signed != nullptr) {
+            load_signed_data = true;
+          }
+        } else {
+          binding.texture_signed = nullptr;
+        }
+      } else {
+        // Same resource for both unsigned and signed, but descriptor formats
+        // may be different.
+        if (key_changed) {
           binding.texture = FindOrCreateTexture(binding.key);
           load_unsigned_data = true;
         } else if (binding_was_outdated && binding.texture != nullptr) {
-          // Fetch constants unchanged but watched guest memory changed - force
-          // a data upload against the same Texture*.
           load_unsigned_data = true;
         }
-      } else {
-        binding.texture = nullptr;
-      }
-      if (any_sign_is_signed) {
-        if (key_changed || !any_sign_was_signed) {
-          TextureKey signed_key = binding.key;
-          signed_key.signed_separate = 1;
-          binding.texture_signed = FindOrCreateTexture(signed_key);
-          load_signed_data = true;
-        } else if (binding_was_outdated && binding.texture_signed != nullptr) {
-          load_signed_data = true;
-        }
-      } else {
         binding.texture_signed = nullptr;
       }
-    } else {
-      // Same resource for both unsigned and signed, but descriptor formats may
-      // be different.
-      if (key_changed) {
-        binding.texture = FindOrCreateTexture(binding.key);
-        load_unsigned_data = true;
-      } else if (binding_was_outdated && binding.texture != nullptr) {
-        load_unsigned_data = true;
+      if (load_unsigned_data && binding.texture != nullptr) {
+        textures_to_load[num_textures_to_load++] = binding.texture;
       }
-      binding.texture_signed = nullptr;
-    }
-    if (load_unsigned_data && binding.texture != nullptr) {
-      textures_to_load[num_textures_to_load++] = binding.texture;
-    }
-    if (load_signed_data && binding.texture_signed != nullptr) {
-      textures_to_load[num_textures_to_load++] = binding.texture_signed;
+      if (load_signed_data && binding.texture_signed != nullptr) {
+        textures_to_load[num_textures_to_load++] = binding.texture_signed;
+      }
     }
   }
 
   LoadTexturesData(textures_to_load, num_textures_to_load);
 
   if (bindings_changed) {
+    SCOPE_profile_cpu_i("gpu", "TextureCache::UpdateTextureBindings");
     UpdateTextureBindingsImpl(bindings_changed);
   }
 
@@ -448,6 +458,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
 }
 
 void TextureCache::RecordUsedTexturesInTrace(uint32_t used_texture_mask) {
+  SCOPE_profile_cpu_f("gpu");
   if (!trace_writer_ || !trace_writer_->is_open()) {
     return;
   }
@@ -718,6 +729,7 @@ void TextureCache::DestroyAllTextures(bool from_destructor) {
 }
 
 TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
+  SCOPE_profile_cpu_f("gpu");
   // Check if the texture is a scaled resolve texture.
   if (IsDrawResolutionScaled() && key.tiled &&
       IsScaledResolveSupportedForFormat(key)) {
@@ -838,6 +850,7 @@ uint32_t TextureCache::GetIntegerScaleBits(xenos::TextureFormat guest_format,
 }
 
 void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
+  SCOPE_profile_cpu_f("gpu");
   assert_true(n_textures <= 64);
   if (n_textures < 2) {
     if (!n_textures) {
@@ -867,6 +880,7 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
   uint64_t index_mips_outdated = 0;
   uint32_t nkept = 0;
   {
+    SCOPE_profile_cpu_i("gpu", "TextureCache::OutdatedScanUnderLock");
     auto global_lock = global_critical_region_.Acquire();
     for (uint32_t i = 0; i < n_textures; ++i) {
       Texture* current = textures[i];
@@ -912,18 +926,21 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
     // portion of its pages is invalidated, in this case we'll need the texture
     // from the shared memory to load the unscaled parts.
     // TODO(Triang3l): Load unscaled parts.
-    if (index_base_outdated & (1ULL << i)) {
-      if (!shared_memory().RequestRange(
-              texture_key.base_page << 12,
-              xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
-        continue;
+    {
+      SCOPE_profile_cpu_i("gpu", "TextureCache::RequestGuestRanges");
+      if (index_base_outdated & (1ULL << i)) {
+        if (!shared_memory().RequestRange(
+                texture_key.base_page << 12,
+                xe::align(texture.GetGuestBaseSize(), UINT32_C(16)))) {
+          continue;
+        }
       }
-    }
-    if (index_mips_outdated & (1ULL << i)) {
-      if (!shared_memory().RequestRange(
-              texture_key.mip_page << 12,
-              xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
-        continue;
+      if (index_mips_outdated & (1ULL << i)) {
+        if (!shared_memory().RequestRange(
+                texture_key.mip_page << 12,
+                xe::align(texture.GetGuestMipsSize(), UINT32_C(16)))) {
+          continue;
+        }
       }
     }
     if (texture_key.scaled_resolve) {
@@ -972,6 +989,7 @@ void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
   }
 }
 bool TextureCache::LoadTextureData(Texture& texture) {
+  SCOPE_profile_cpu_f("gpu");
   // Lockless pre-check: if texture appears up-to-date, skip the lock.
   // This is safe because worst case is a false positive (we acquire lock
   // unnecessarily), never a false negative.

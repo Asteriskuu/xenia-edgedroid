@@ -142,6 +142,7 @@ class ScopedAutoreleasePool {
   ScopedAutoreleasePool() : pool_(NS::AutoreleasePool::alloc()->init()) {}
   ~ScopedAutoreleasePool() {
     if (pool_) {
+      SCOPE_profile_cpu_i("gpu", "MetalTextureCache::AutoreleasePoolDrain");
       pool_->release();
     }
   }
@@ -483,6 +484,7 @@ void MetalTextureCache::BeginUploadCommandBufferBatch() {
 }
 
 MTL::CommandBuffer* MetalTextureCache::EnsureUploadCommandBufferBatch() {
+  SCOPE_profile_cpu_f("gpu");
   if (upload_batch_command_buffer_) {
     return upload_batch_command_buffer_;
   }
@@ -810,6 +812,7 @@ MTL::PixelFormat MetalTextureCache::GetPixelFormatForKey(TextureKey key) const {
 
 bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
                                           bool load_mips) {
+  SCOPE_profile_cpu_f("gpu");
   MetalTexture* metal_texture = static_cast<MetalTexture*>(&texture);
   if (!metal_texture || !metal_texture->metal_texture()) {
     return false;
@@ -918,6 +921,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
 
   for (uint32_t loop_level = loop_level_first; loop_level <= loop_level_last;
        ++loop_level) {
+    SCOPE_profile_cpu_i("gpu", "MetalTextureCache::BuildStoredLevels");
     bool is_base = loop_level == 0;
     uint32_t level = (level_packed == 0) ? 0 : loop_level;
     const texture_util::TextureGuestLayout::Level& level_guest_layout =
@@ -997,6 +1001,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     buffer_pool = upload_buffer_pool_;
   }
   auto acquire_buffer = [&](size_t size) -> MTL::Buffer* {
+    SCOPE_profile_cpu_i("gpu", "MetalTextureCache::AcquireUploadBuffer");
     if (buffer_pool) {
       return buffer_pool->Acquire(size);
     }
@@ -1137,7 +1142,11 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     }
   };
 
-  MTL::ComputeCommandEncoder* encoder = cmd->computeCommandEncoder();
+  MTL::ComputeCommandEncoder* encoder = nullptr;
+  {
+    SCOPE_profile_cpu_i("gpu", "MetalTextureCache::ComputeEncoderCreate");
+    encoder = cmd->computeCommandEncoder();
+  }
   if (!encoder) {
     handle_upload_failure(true);
     return false;
@@ -1160,6 +1169,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
 
   size_t dispatch_index = 0;
   for (const StoredLevelHostLayout& stored_level : stored_levels) {
+    SCOPE_profile_cpu_i("gpu", "MetalTextureCache::EncodeLoadDispatch");
     bool is_base_storage = stored_level.is_base;
     const texture_util::TextureGuestLayout::Level& level_guest_layout =
         is_base_storage ? guest_layout.base
@@ -1264,10 +1274,14 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     }
   }
 
-  encoder->endEncoding();
+  {
+    SCOPE_profile_cpu_i("gpu", "MetalTextureCache::ComputeEncoderEnd");
+    encoder->endEncoding();
+  }
 
   MTL::Texture* mtl_texture = metal_texture->metal_texture();
   if (use_blit_upload) {
+    SCOPE_profile_cpu_i("gpu", "MetalTextureCache::EncodeUploadBlits");
     MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
     if (!blit) {
       handle_upload_failure(true);
@@ -1351,6 +1365,7 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
 
         bool requires_staging = (source_offset_bytes % blit_alignment) != 0;
         if (requires_staging) {
+          SCOPE_profile_cpu_i("gpu", "MetalTextureCache::StagingRowCopy");
           size_t staging_size = blit_bytes_per_image * level_depth;
           MTL::Buffer* staging_buffer = acquire_buffer(staging_size);
           if (!staging_buffer) {

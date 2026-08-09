@@ -2128,12 +2128,20 @@ bool MetalCommandProcessor::CanEndSubmissionImmediately() {
 
 MTL::CommandBuffer* MetalCommandProcessor::CreateAccountedCommandBuffer(
     CommandBufferKind kind) {
+  SCOPE_profile_cpu_f("gpu");
   if (!command_queue_) {
     return nullptr;
   }
-  MTL::CommandBuffer* command_buffer = command_queue_->commandBuffer();
+  MTL::CommandBuffer* command_buffer = nullptr;
+  {
+    // Blocks once the queue's in-flight command buffers are all outstanding,
+    // so this reads as GPU backpressure rather than allocation cost.
+    SCOPE_profile_cpu_i("gpu", "MetalCommandProcessor::QueueCommandBuffer");
+    command_buffer = command_queue_->commandBuffer();
+  }
   if (command_buffer) {
     ++command_buffer_kind_counts_[size_t(kind)];
+    SCOPE_profile_cpu_i("gpu", "MetalCommandProcessor::AddGpuTimeHandler");
     AddGpuTimeHandler(command_buffer);
   }
   return command_buffer;
@@ -4728,7 +4736,10 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
   EnsureCommandBufferAutoreleasePool();
 
   // Note: commandBuffer() returns an autoreleased object, we must retain it.
-  current_command_buffer_ = command_queue_->commandBuffer();
+  {
+    SCOPE_profile_cpu_i("gpu", "MetalCommandProcessor::QueueCommandBuffer");
+    current_command_buffer_ = command_queue_->commandBuffer();
+  }
   if (!current_command_buffer_) {
     XELOGE("EnsureCommandBuffer: failed to create command buffer");
     DrainCommandBufferAutoreleasePool();
