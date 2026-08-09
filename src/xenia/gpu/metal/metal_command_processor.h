@@ -75,9 +75,8 @@ class MetalCommandProcessor : public CommandProcessor {
 
   std::string GetTitleStateSuffix() const override;
 
-  // Memory regions written by IssueCopy (resolve) whose ordering against a
-  // later sampling draw has not been established yet. Cleared once a command
-  // buffer split puts the writes behind a queue boundary.
+  // Guest memory a resolve or memexport draw wrote from the still-open command
+  // buffer. Cleared once a split puts the writes behind a queue boundary.
   void MarkResolvedMemory(uint32_t base_ptr, uint32_t length);
   bool IsResolvedMemory(uint32_t base_ptr, uint32_t length) const;
   void ClearResolvedMemory();
@@ -237,6 +236,8 @@ class MetalCommandProcessor : public CommandProcessor {
   // Blocks until the given submission's command buffer has completed. The
   // submission must already be committed.
   void AwaitSubmissionCompletion(uint64_t submission);
+  // Commits the open submission, then blocks until every submission completes.
+  void AwaitAllQueueOperationsCompletion();
   void AddGpuTimeHandler(MTL::CommandBuffer* command_buffer);
   void WaitForPendingCompletionHandlers();
   void ProcessCompletedSubmissions();
@@ -772,13 +773,14 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Memexport tracking for shared memory invalidation.
   std::vector<draw_util::MemExportRange> memexport_ranges_;
+  // Page tracking so a fence the guest reads can await export output. The
+  // fragment's host/device routing half is unused - Metal has one buffer.
+#include "../command_processor_memexport.inc"
+  void NoteMemexportRangesWritten();
 
   bool gamma_ramp_256_entry_table_up_to_date_ = false;
   bool gamma_ramp_pwl_up_to_date_ = false;
 
-  // Track memory regions written by IssueCopy (resolve) during trace playback.
-  // This prevents the trace player from overwriting resolved data with stale
-  // data from the trace file.
   struct ResolvedRange {
     uint32_t base;
     uint32_t length;

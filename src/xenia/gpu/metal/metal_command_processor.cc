@@ -1230,6 +1230,21 @@ void MetalCommandProcessor::ClearResolvedMemory() {
   resolved_memory_ranges_.clear();
 }
 
+void MetalCommandProcessor::NoteMemexportRangesWritten() {
+  if (!shared_memory_ || memexport_ranges_.empty()) {
+    return;
+  }
+  for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
+    uint32_t base_bytes = memexport_range.base_address_dwords << 2;
+    shared_memory_->RangeWrittenByGpu(base_bytes, memexport_range.size_bytes);
+    MarkMemexportPagesWritten(base_bytes, memexport_range.size_bytes);
+    // Written from the still-open command buffer, so a later draw sampling it
+    // as a texture needs the same split a resolve gets.
+    MarkResolvedMemory(base_bytes, memexport_range.size_bytes);
+  }
+  copy_resolve_writes_pending_ = true;
+}
+
 void MetalCommandProcessor::ForceIssueSwap() {
   // Force a swap to push any pending render target to presenter
   // This is used by trace dumps to capture output when there's no explicit swap
@@ -1721,6 +1736,8 @@ void MetalCommandProcessor::ShutdownContext() {
     primitive_processor_.reset();
   }
   frame_open_ = false;
+  ClearResolvedMemory();
+  ResetMemexportPages();
 
   ShutdownMslAsyncCompilation();
 
@@ -2150,6 +2167,13 @@ void MetalCommandProcessor::AwaitSubmissionCompletion(uint64_t submission) {
     return completed_command_buffers_.load(std::memory_order_acquire) >=
            submission;
   });
+}
+
+void MetalCommandProcessor::AwaitAllQueueOperationsCompletion() {
+  // Ending first, so a memexport draw that is still only recorded gets
+  // submitted rather than waited past.
+  EndCommandBuffer(CommandBufferKind::kSubmissionWait);
+  AwaitSubmissionCompletion(submission_current_);
 }
 
 // ============================================================================
@@ -4060,12 +4084,8 @@ bool MetalCommandProcessor::IssueDrawMsl(
     }
   }
 
-  // Handle memexport.
-  if (memexport_used && shared_memory_) {
-    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-      shared_memory_->RangeWrittenByGpu(
-          memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
-    }
+  if (memexport_used) {
+    NoteMemexportRangesWritten();
   }
 
   ++current_draw_index_;
@@ -4543,11 +4563,8 @@ bool MetalCommandProcessor::IssueDrawDxil(
                             uint64_t(draw_index_buffer.index_count));
   }
 
-  if (memexport_used && shared_memory_) {
-    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
-      shared_memory_->RangeWrittenByGpu(
-          memexport_range.base_address_dwords << 2, memexport_range.size_bytes);
-    }
+  if (memexport_used) {
+    NoteMemexportRangesWritten();
   }
 
   ++current_draw_index_;
@@ -4631,9 +4648,11 @@ bool MetalCommandProcessor::IssueCopy() {
     return true;
   }
 
-  // Track this resolved region so the trace player can avoid overwriting it
-  // with stale MemoryRead commands from the trace file.
+  // Track this region so a later draw sampling it as a texture is split off the
+  // command buffer that wrote it.
   MarkResolvedMemory(written_address, written_length);
+  // The resolve overwrote any export output here, so no fence need await it.
+  ClearMemexportPages(written_address, written_length);
 
   // Keep copy-only resolve bursts open so multiple resolves can be coalesced,
   // but commit draw-containing submissions so subsequent work observes the
