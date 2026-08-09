@@ -1372,6 +1372,10 @@ void VulkanCommandProcessor::ShutdownContext() {
 
   ShutdownZPDQueryResources();
   zpd_host_query_pool_.reset();
+  if (gpu_time_untimed_submissions_) {
+    XELOGW("GPU busy total is missing {} submission(s) with no free query slot",
+           gpu_time_untimed_submissions_);
+  }
   DestroyGpuTimeQueryPool();
 
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
@@ -1801,6 +1805,12 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   CollectCompletedGpuTimeQueries();
   static constexpr uint32_t kRenderPassWindowFrames = 60;
   if (++render_pass_window_frames_ >= kRenderPassWindowFrames) {
+    uint64_t submissions_now = GetCurrentSubmission();
+    COUNT_profile_set(
+        "gpu/command_buffers_per_frame",
+        int64_t((submissions_now - gpu_time_submissions_window_start_) /
+                render_pass_window_frames_));
+    gpu_time_submissions_window_start_ = submissions_now;
     COUNT_profile_set(
         "gpu/render_passes_per_frame",
         int64_t((render_passes_total_ - render_passes_window_start_) /
@@ -5448,11 +5458,16 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
       XELOGE("Failed to begin a Vulkan command buffer");
       return false;
     }
-    // Bracket the whole submission so the sum is comparable against the Metal
-    // backend's per-command-buffer GPU time.
+    // Bracket the whole submission. Recycle finished slots first, or a frame
+    // with more submissions than slots leaves the later ones untimed.
+    CollectCompletedGpuTimeQueries();
+    const bool gpu_time_pool_available = gpu_time_query_pool_ != VK_NULL_HANDLE;
     const uint32_t gpu_time_slot = gpu_time_query_slot_;
-    const bool gpu_time_recorded = gpu_time_query_pool_ != VK_NULL_HANDLE &&
-                                   !gpu_time_query_submissions_[gpu_time_slot];
+    const bool gpu_time_recorded =
+        gpu_time_pool_available && !gpu_time_query_submissions_[gpu_time_slot];
+    if (gpu_time_pool_available && !gpu_time_recorded) {
+      ++gpu_time_untimed_submissions_;
+    }
     if (gpu_time_recorded) {
       dfn.vkCmdResetQueryPool(command_buffer.buffer, gpu_time_query_pool_,
                               gpu_time_slot * 2, 2);

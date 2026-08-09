@@ -626,6 +626,12 @@ class VulkanCommandProcessor final : public CommandProcessor {
   uint64_t gpu_time_query_submissions_[kGpuTimeQuerySubmissions] = {};
   uint32_t gpu_time_query_slot_ = 0;
   uint64_t gpu_time_total_ns_ = 0;
+  // Submissions that found every query slot busy, so their GPU time is missing
+  // from the total.
+  uint64_t gpu_time_untimed_submissions_ = 0;
+  // Window start for the submission count published beside the busy time,
+  // which sums per-submission intervals and misleads without it.
+  uint64_t gpu_time_submissions_window_start_ = 0;
   uint64_t gpu_time_window_start_ns_ = 0;
   void CreateGpuTimeQueryPool();
   void DestroyGpuTimeQueryPool();
