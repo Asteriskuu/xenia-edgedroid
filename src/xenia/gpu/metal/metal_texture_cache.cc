@@ -478,31 +478,22 @@ bool MetalTextureCache::ShouldUploadViaBlit() const {
   return ::cvars::metal_texture_upload_via_blit;
 }
 
-bool MetalTextureCache::CanUseCurrentCommandBufferForTextureUploads() const {
-  if (!ShouldUploadViaBlit() || !command_processor_) {
-    return false;
-  }
-  if (!command_processor_->GetCurrentCommandBuffer()) {
-    return false;
-  }
-  return !command_processor_->HasActiveRenderEncoder();
-}
-
 void MetalTextureCache::BeginUploadCommandBufferBatch() {
   ++upload_batch_depth_;
-  if (upload_batch_depth_ != 1) {
-    return;
+}
+
+MTL::CommandBuffer* MetalTextureCache::EnsureUploadCommandBufferBatch() {
+  if (upload_batch_command_buffer_) {
+    return upload_batch_command_buffer_;
   }
-  if (!ShouldUploadViaBlit() || !command_processor_) {
-    return;
+  if (!upload_batch_depth_ || !ShouldUploadViaBlit() || !command_processor_) {
+    return nullptr;
   }
-  // Avoid cross-command-buffer upload batching while a draw/copy command
-  // buffer is already active in the command processor. Keeping upload work on
-  // a separate command buffer in that state can reorder with in-flight render
-  // setup and lead to startup rendering regressions.
-  if (command_processor_->GetCurrentCommandBuffer()) {
-    return;
-  }
+  // Committed ahead of the still-open draw command buffer, the same ordering a
+  // per-upload buffer gets - resolve writes the uploads read are already behind
+  // a queue boundary by the time RequestTextures runs, discharged either by the
+  // copy->draw split or by the resolve committing its own submission.
+  //
   // The pool is required: commandBuffer() is autoreleased, and without a scope
   // here it lands in the command processor's pool, which drains only when the
   // draw command buffer ends - holding a queue slot until then, and the queue
@@ -517,12 +508,13 @@ void MetalTextureCache::BeginUploadCommandBufferBatch() {
     }
   }
   if (!cmd) {
-    return;
+    return nullptr;
   }
   cmd->setLabel(
       NS::String::string("XeniaTextureUploadBatch", NS::UTF8StringEncoding));
   upload_batch_command_buffer_ = cmd;
   upload_batch_command_buffer_has_work_ = false;
+  return cmd;
 }
 
 void MetalTextureCache::EndUploadCommandBufferBatch() {
@@ -541,7 +533,8 @@ void MetalTextureCache::EndUploadCommandBufferBatch() {
     return;
   }
   if (!has_work) {
-    command_processor_->DiscardAccountedCommandBuffer(cmd);
+    command_processor_->DiscardAccountedCommandBuffer(
+        cmd, MetalCommandProcessor::CommandBufferKind::kTextureUploadBatch);
     cmd->release();
     return;
   }
@@ -560,7 +553,8 @@ void MetalTextureCache::AbortUploadCommandBufferBatch(bool commit_if_has_work) {
     return;
   }
   if (!has_work || !commit_if_has_work) {
-    command_processor_->DiscardAccountedCommandBuffer(cmd);
+    command_processor_->DiscardAccountedCommandBuffer(
+        cmd, MetalCommandProcessor::CommandBufferKind::kTextureUploadBatch);
     cmd->release();
     return;
   }
@@ -1069,8 +1063,8 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
   MTL::CommandBuffer* current_command_buffer =
       command_processor_ ? command_processor_->GetCurrentCommandBuffer()
                          : nullptr;
-  bool use_upload_batch = use_blit_upload && upload_batch_command_buffer_ &&
-                          command_processor_ && !current_command_buffer;
+  bool use_upload_batch =
+      use_blit_upload && upload_batch_depth_ && command_processor_;
   // Reuse the current command buffer whenever no render pass encoder is active.
   // This keeps copy/resolve and texture-upload ordering within one submission.
   bool use_current_command_buffer =
@@ -1100,11 +1094,16 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
 
   ScopedAutoreleasePool autorelease_pool;
   MTL::CommandBuffer* cmd = nullptr;
-  if (use_upload_batch) {
-    cmd = upload_batch_command_buffer_;
-  } else if (use_current_command_buffer) {
+  // The current command buffer first - it needs no extra buffer at all. The
+  // batch next, so a draw's uploads share one. Only then a private one.
+  if (use_current_command_buffer) {
+    use_upload_batch = false;
     cmd = current_command_buffer;
-  } else {
+  } else if (use_upload_batch) {
+    cmd = EnsureUploadCommandBufferBatch();
+    use_upload_batch = cmd != nullptr;
+  }
+  if (!cmd) {
     cmd = command_processor_->CreateAccountedCommandBuffer(
         MetalCommandProcessor::CommandBufferKind::kTextureUploadPrivate);
   }
@@ -1133,7 +1132,8 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
                command_processor_) {
       // A private command buffer abandoned without a commit - its completion
       // handler will never run.
-      command_processor_->DiscardAccountedCommandBuffer(cmd);
+      command_processor_->DiscardAccountedCommandBuffer(
+          cmd, MetalCommandProcessor::CommandBufferKind::kTextureUploadPrivate);
     }
   };
 

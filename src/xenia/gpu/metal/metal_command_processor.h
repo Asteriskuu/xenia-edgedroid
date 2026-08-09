@@ -122,7 +122,8 @@ class MetalCommandProcessor : public CommandProcessor {
   MTL::CommandBuffer* CreateAccountedCommandBuffer(CommandBufferKind kind);
   // For one released without ever being committed - its completion handler
   // will never run, so the accounting has to be released by hand.
-  void DiscardAccountedCommandBuffer(MTL::CommandBuffer* command_buffer);
+  void DiscardAccountedCommandBuffer(MTL::CommandBuffer* command_buffer,
+                                     CommandBufferKind kind);
   void EndRenderEncoder();
   void ResetRenderEncoderResourceUsage();
   void UseRenderEncoderResource(MTL::Resource* resource,

@@ -127,9 +127,6 @@ class MetalTextureCache : public TextureCache {
   std::unique_ptr<Texture> CreateTexture(TextureKey key) override;
   bool LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
                                              bool load_mips) override;
-  // Whether GPU texture uploads can be encoded into the currently open command
-  // buffer (without creating a separate upload command buffer).
-  bool CanUseCurrentCommandBufferForTextureUploads() const;
 
  private:
   // GPU-based texture loading entry point. Returns true on success.
@@ -137,6 +134,9 @@ class MetalTextureCache : public TextureCache {
   MTL::StorageMode GetCacheTextureStorageMode() const;
   bool ShouldUploadViaBlit() const;
   void BeginUploadCommandBufferBatch();
+  // Creates the batch command buffer on the first upload that wants it, so a
+  // request that uploads nothing costs none.
+  MTL::CommandBuffer* EnsureUploadCommandBufferBatch();
   void EndUploadCommandBufferBatch();
   void AbortUploadCommandBufferBatch(bool commit_if_has_work = true);
 

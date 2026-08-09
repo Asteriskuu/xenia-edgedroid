@@ -2123,8 +2123,9 @@ MTL::CommandBuffer* MetalCommandProcessor::CreateAccountedCommandBuffer(
 }
 
 void MetalCommandProcessor::DiscardAccountedCommandBuffer(
-    MTL::CommandBuffer* command_buffer) {
+    MTL::CommandBuffer* command_buffer, CommandBufferKind kind) {
   if (command_buffer) {
+    --command_buffer_kind_counts_[size_t(kind)];
     pending_completion_handlers_.fetch_sub(1, std::memory_order_release);
   }
 }
