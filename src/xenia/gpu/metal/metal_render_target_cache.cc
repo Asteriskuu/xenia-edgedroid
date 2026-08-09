@@ -3580,18 +3580,8 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
     written_address = resolve_info.copy_dest_extent_start;
     written_length = resolve_info.copy_dest_extent_length;
 
-    // Mark the shared memory range as GPU-written resolve data so texture
-    // caches and trace dumping can see it without an extra CPU copy. This
-    // mirrors D3D12/Vulkan behavior.
-    if (!draw_resolution_scaled) {
-      if (auto* shared_after = command_processor_.shared_memory()) {
-        shared_after->RangeWrittenByGpu(written_address, written_length);
-      }
-    }
-
-    // Mark the range as resolved in the texture cache so that any textures
-    // overlapping this range will be reloaded from the updated shared memory.
-    // This matches D3D12/Vulkan behavior.
+    // Marks the range GPU-written in shared memory too, which invalidates the
+    // textures overlapping it so they reload the resolved data.
     if (auto* tex_cache = command_processor_.texture_cache()) {
       tex_cache->MarkRangeAsResolved(written_address, written_length,
                                      draw_resolution_scaled);
