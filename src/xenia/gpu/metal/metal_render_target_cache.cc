@@ -641,19 +641,16 @@ bool MetalRenderTargetCache::Initialize() {
     }
   } else {
     ScopedAutoreleasePool autorelease_pool;
-    MTL::CommandQueue* queue = command_processor_.GetMetalCommandQueue();
-    if (queue) {
-      MTL::CommandBuffer* cmd = queue->commandBuffer();
-      if (cmd) {
-        MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
-        if (blit) {
-          blit->fillBuffer(
-              edram_buffer_,
-              NS::Range::Make(0, static_cast<NS::UInteger>(edram_size_bytes)),
-              0);
-          blit->endEncoding();
-          cmd->commit();
-        }
+    MTL::CommandBuffer* cmd = command_processor_.CreateAccountedCommandBuffer(
+        MetalCommandProcessor::CommandBufferKind::kRenderTargetOther);
+    if (cmd) {
+      MTL::BlitCommandEncoder* blit = cmd->blitCommandEncoder();
+      if (blit) {
+        blit->fillBuffer(
+            edram_buffer_,
+            NS::Range::Make(0, static_cast<NS::UInteger>(edram_size_bytes)), 0);
+        blit->endEncoding();
+        cmd->commit();
       }
     }
   }
@@ -1869,7 +1866,8 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
     return;
   }
 
-  MTL::CommandBuffer* cmd = queue->commandBuffer();
+  MTL::CommandBuffer* cmd = command_processor_.CreateAccountedCommandBuffer(
+      MetalCommandProcessor::CommandBufferKind::kRenderTargetOther);
   if (!cmd) {
     staging->release();
     return;
@@ -2760,7 +2758,8 @@ bool MetalRenderTargetCache::DirectResolveRenderTargets(
   bool owns_command_buffer = false;
   MTL::CommandBuffer* cmd = command_buffer;
   if (!cmd) {
-    cmd = queue->commandBuffer();
+    cmd = command_processor_.CreateAccountedCommandBuffer(
+        MetalCommandProcessor::CommandBufferKind::kRenderTargetResolve);
     if (!cmd) {
       return false;
     }
@@ -2965,8 +2964,8 @@ bool MetalRenderTargetCache::BeginEdramSnapshotReadback() {
 
   // Nothing brackets this submission, so the copy is awaited here.
   ScopedAutoreleasePool autorelease_pool;
-  MTL::CommandQueue* queue = command_processor_.GetMetalCommandQueue();
-  MTL::CommandBuffer* cmd = queue ? queue->commandBuffer() : nullptr;
+  MTL::CommandBuffer* cmd = command_processor_.CreateAccountedCommandBuffer(
+      MetalCommandProcessor::CommandBufferKind::kRenderTargetOther);
   MTL::BlitCommandEncoder* blit = cmd ? cmd->blitCommandEncoder() : nullptr;
   if (!blit) {
     return false;
@@ -3024,7 +3023,8 @@ void MetalRenderTargetCache::DumpRenderTargets(
   bool owns_command_buffer = false;
   MTL::CommandBuffer* cmd = command_buffer;
   if (!cmd) {
-    cmd = queue->commandBuffer();
+    cmd = command_processor_.CreateAccountedCommandBuffer(
+        MetalCommandProcessor::CommandBufferKind::kRenderTargetDump);
     if (!cmd) {
       XELOGE("MetalRenderTargetCache::DumpRenderTargets: no command buffer");
       return;
@@ -3780,7 +3780,8 @@ bool MetalRenderTargetCache::Resolve(Memory& memory, uint32_t& written_address,
         bool owns_command_buffer = false;
         MTL::CommandBuffer* cmd = command_buffer;
         if (!cmd) {
-          cmd = queue->commandBuffer();
+          cmd = command_processor_.CreateAccountedCommandBuffer(
+              MetalCommandProcessor::CommandBufferKind::kRenderTargetResolve);
           if (!cmd) {
             XELOGE(
                 "MetalRenderTargetCache::Resolve: failed to get command "

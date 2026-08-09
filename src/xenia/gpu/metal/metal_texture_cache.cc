@@ -503,15 +503,22 @@ void MetalTextureCache::BeginUploadCommandBufferBatch() {
   if (command_processor_->GetCurrentCommandBuffer()) {
     return;
   }
-  MTL::CommandQueue* queue = command_processor_->GetMetalCommandQueue();
-  if (!queue) {
-    return;
+  // The pool is required: commandBuffer() is autoreleased, and without a scope
+  // here it lands in the command processor's pool, which drains only when the
+  // draw command buffer ends - holding a queue slot until then, and the queue
+  // has 64.
+  MTL::CommandBuffer* cmd = nullptr;
+  {
+    ScopedAutoreleasePool autorelease_pool;
+    cmd = command_processor_->CreateAccountedCommandBuffer(
+        MetalCommandProcessor::CommandBufferKind::kTextureUploadBatch);
+    if (cmd) {
+      cmd->retain();
+    }
   }
-  MTL::CommandBuffer* cmd = queue->commandBuffer();
   if (!cmd) {
     return;
   }
-  cmd->retain();
   cmd->setLabel(
       NS::String::string("XeniaTextureUploadBatch", NS::UTF8StringEncoding));
   upload_batch_command_buffer_ = cmd;
@@ -534,6 +541,7 @@ void MetalTextureCache::EndUploadCommandBufferBatch() {
     return;
   }
   if (!has_work) {
+    command_processor_->DiscardAccountedCommandBuffer(cmd);
     cmd->release();
     return;
   }
@@ -552,6 +560,7 @@ void MetalTextureCache::AbortUploadCommandBufferBatch(bool commit_if_has_work) {
     return;
   }
   if (!has_work || !commit_if_has_work) {
+    command_processor_->DiscardAccountedCommandBuffer(cmd);
     cmd->release();
     return;
   }
@@ -1096,7 +1105,8 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
   } else if (use_current_command_buffer) {
     cmd = current_command_buffer;
   } else {
-    cmd = queue->commandBuffer();
+    cmd = command_processor_->CreateAccountedCommandBuffer(
+        MetalCommandProcessor::CommandBufferKind::kTextureUploadPrivate);
   }
   if (!cmd) {
     release_buffer_immediate(constants_buffer, constants_buffer_size);
@@ -1119,6 +1129,11 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
     release_buffer_immediate(dest_buffer, size_t(dest_buffer_size));
     if (use_upload_batch && abort_batch) {
       AbortUploadCommandBufferBatch();
+    } else if (!use_upload_batch && !use_current_command_buffer &&
+               command_processor_) {
+      // A private command buffer abandoned without a commit - its completion
+      // handler will never run.
+      command_processor_->DiscardAccountedCommandBuffer(cmd);
     }
   };
 
@@ -1161,6 +1176,9 @@ bool MetalTextureCache::TryGpuLoadTexture(Texture& texture, bool load_base,
                                          4) ||
           !GetCurrentScaledResolveBuffer(source_buffer, source_buffer_offset,
                                          source_buffer_length)) {
+        // cmd is shared with the rest of the batch (or is the draw command
+        // buffer), so it must be left without an open encoder.
+        encoder->endEncoding();
         handle_upload_failure(false);
         return false;
       }
@@ -1529,7 +1547,8 @@ void MetalTextureCache::DumpTextureToFile(MTL::Texture* texture,
   }
 
   ScopedAutoreleasePool autorelease_pool;
-  MTL::CommandBuffer* cmd = queue->commandBuffer();
+  MTL::CommandBuffer* cmd = command_processor_->CreateAccountedCommandBuffer(
+      MetalCommandProcessor::CommandBufferKind::kTextureOther);
   if (!cmd) {
     readback->release();
     XELOGE("DumpTextureToFile: failed to create command buffer");
@@ -3078,7 +3097,8 @@ bool MetalTextureCache::EnsureScaledResolveBufferRange(uint64_t start_scaled,
         new_buffer->release();
         return false;
       }
-      cmd = queue->commandBuffer();
+      cmd = command_processor_->CreateAccountedCommandBuffer(
+          MetalCommandProcessor::CommandBufferKind::kTextureOther);
       if (!cmd) {
         new_buffer->release();
         return false;

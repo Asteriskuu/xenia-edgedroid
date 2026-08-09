@@ -75,8 +75,9 @@ class MetalCommandProcessor : public CommandProcessor {
 
   std::string GetTitleStateSuffix() const override;
 
-  // Track memory regions written by IssueCopy (resolve) so trace playback
-  // can skip overwriting them with stale data from the trace file.
+  // Memory regions written by IssueCopy (resolve) whose ordering against a
+  // later sampling draw has not been established yet. Cleared once a command
+  // buffer split puts the writes behind a queue boundary.
   void MarkResolvedMemory(uint32_t base_ptr, uint32_t length);
   bool IsResolvedMemory(uint32_t base_ptr, uint32_t length) const;
   void ClearResolvedMemory();
@@ -95,7 +96,33 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t current_draw_index() const { return current_draw_index_; }
   uint64_t GetCurrentSubmission() const;
   uint64_t GetCompletedSubmission() const override;
+  // What a command buffer was created for, to attribute the per-frame count.
+  // Submission kinds name what ended the previous one, since that is what
+  // forced a new submission to be started.
+  enum class CommandBufferKind : uint32_t {
+    kSubmissionOther,
+    kSubmissionCopyToDrawSync,
+    kSubmissionZpdQuery,
+    kSubmissionUniformsRollover,
+    kSubmissionPrimaryBufferEnd,
+    kSubmissionWait,
+    kTextureUploadBatch,
+    kTextureUploadPrivate,
+    kTextureOther,
+    kRenderTargetResolve,
+    kRenderTargetDump,
+    kRenderTargetOther,
+    kCount,
+  };
+
   MTL::CommandBuffer* EnsureCommandBuffer();
+  // Creates a command buffer with GPU time accounting attached. Every command
+  // buffer the backend commits outside the submission one has to come from
+  // here, or its work is missing from gpu_busy_us_per_frame.
+  MTL::CommandBuffer* CreateAccountedCommandBuffer(CommandBufferKind kind);
+  // For one released without ever being committed - its completion handler
+  // will never run, so the accounting has to be released by hand.
+  void DiscardAccountedCommandBuffer(MTL::CommandBuffer* command_buffer);
   void EndRenderEncoder();
   void ResetRenderEncoderResourceUsage();
   void UseRenderEncoderResource(MTL::Resource* resource,
@@ -193,7 +220,9 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Command buffer management
   void BeginCommandBuffer();
-  void EndCommandBuffer();
+  // next_kind attributes the submission this forces to be started.
+  void EndCommandBuffer(
+      CommandBufferKind next_kind = CommandBufferKind::kSubmissionOther);
   // Reset per-render-encoder cached bindings/state for the SPIRV-Cross (MSL)
   // path. Safe to call when no render encoder is active.
   void ResetMslRenderEncoderStateCache();
@@ -207,6 +236,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // Blocks until the given submission's command buffer has completed. The
   // submission must already be committed.
   void AwaitSubmissionCompletion(uint64_t submission);
+  void AddGpuTimeHandler(MTL::CommandBuffer* command_buffer);
   void WaitForPendingCompletionHandlers();
   void ProcessCompletedSubmissions();
   bool EnsureDrawRingCapacity();
@@ -691,6 +721,16 @@ class MetalCommandProcessor : public CommandProcessor {
   std::atomic<uint64_t> completed_gpu_time_ns_{0};
   uint64_t gpu_time_window_start_ns_ = 0;
   uint32_t gpu_time_window_frames_ = 0;
+  // Completed command buffers, published per frame beside the busy time - a
+  // sum of per-command-buffer intervals is not readable without it.
+  std::atomic<uint64_t> gpu_time_command_buffers_{0};
+  uint64_t gpu_time_command_buffers_window_start_ = 0;
+  // Created command buffers by kind, to attribute that per-frame count.
+  static constexpr size_t kCommandBufferKindCount =
+      size_t(CommandBufferKind::kCount);
+  uint64_t command_buffer_kind_counts_[kCommandBufferKindCount] = {};
+  uint64_t command_buffer_kind_window_start_[kCommandBufferKindCount] = {};
+  CommandBufferKind next_submission_kind_ = CommandBufferKind::kSubmissionOther;
   // Each render encoder is a tile store plus an attachment reload on a TBDR
   // GPU, so the count per frame is comparable against Vulkan's render passes.
   uint64_t render_passes_total_ = 0;

@@ -217,6 +217,26 @@ constexpr int64_t kMslAsyncLogIntervalNs =
     int64_t(std::chrono::nanoseconds(std::chrono::seconds(1)).count());
 constexpr size_t kResolvedMemoryRangesMax = 8192;
 
+// Indexed by CommandBufferKind, for the shutdown summary. Submission kinds
+// name what ended the previous submission.
+const char* const kCommandBufferKindNames[] = {
+    "submission_other",
+    "submission_copy_draw_sync",
+    "submission_zpd_query",
+    "submission_uniforms_rollover",
+    "submission_primary_end",
+    "submission_wait",
+    "texture_upload_batch",
+    "texture_upload_private",
+    "texture_other",
+    "rt_resolve",
+    "rt_dump",
+    "rt_other",
+};
+static_assert(std::size(kCommandBufferKindNames) ==
+                  size_t(MetalCommandProcessor::CommandBufferKind::kCount),
+              "Command buffer kind names must match the enum");
+
 int64_t GetSteadyTimeNs() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
@@ -1575,7 +1595,7 @@ bool MetalCommandProcessor::InitializeShaderTranslation() {
 
 void MetalCommandProcessor::PrepareForWait() {
   // Runs on every ring-empty stall, so it must not block on the GPU.
-  EndCommandBuffer();
+  EndCommandBuffer(CommandBufferKind::kSubmissionWait);
 
   CommandProcessor::PrepareForWait();
 }
@@ -1655,6 +1675,20 @@ void MetalCommandProcessor::ShutdownContext() {
   }
 
   WaitForPendingCompletionHandlers();
+
+  // Deterministic for a given workload, so a single-frame trace replay can be
+  // read from it - the 60-frame counter window never closes in one.
+  std::string kind_breakdown;
+  for (size_t i = 0; i < kCommandBufferKindCount; ++i) {
+    if (!command_buffer_kind_counts_[i]) {
+      continue;
+    }
+    kind_breakdown += fmt::format(" {}={}", kCommandBufferKindNames[i],
+                                  command_buffer_kind_counts_[i]);
+  }
+  XELOGI("Metal: {} command buffer(s) executed,{}",
+         gpu_time_command_buffers_.load(std::memory_order_relaxed),
+         kind_breakdown.empty() ? " none created" : kind_breakdown);
 
   // Now safe to release encoder and command buffer
   if (current_render_encoder_) {
@@ -1825,13 +1859,56 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   static constexpr uint32_t kGpuTimeWindowFrames = 60;
   if (++gpu_time_window_frames_ >= kGpuTimeWindowFrames) {
     uint64_t now_ns = completed_gpu_time_ns_.load(std::memory_order_relaxed);
-    // Covers the submission command buffer only. Command buffers the backend
-    // commits on the side — texture uploads, and the render target cache paths
-    // that own their buffer — are not in this figure.
     COUNT_profile_set("gpu/gpu_busy_us_per_frame",
                       int64_t((now_ns - gpu_time_window_start_ns_) /
                               (uint64_t(1000) * gpu_time_window_frames_)));
     gpu_time_window_start_ns_ = now_ns;
+
+    uint64_t command_buffers_now =
+        gpu_time_command_buffers_.load(std::memory_order_relaxed);
+    COUNT_profile_set(
+        "gpu/command_buffers_per_frame",
+        int64_t((command_buffers_now - gpu_time_command_buffers_window_start_) /
+                gpu_time_window_frames_));
+    gpu_time_command_buffers_window_start_ = command_buffers_now;
+
+    // Unrolled: COUNT_profile_set caches its token in a function-local static,
+    // so a loop would file every kind under the first name it saw.
+    auto kind_per_frame = [&](CommandBufferKind kind) {
+      size_t i = size_t(kind);
+      uint64_t now = command_buffer_kind_counts_[i];
+      int64_t per_frame = int64_t((now - command_buffer_kind_window_start_[i]) /
+                                  gpu_time_window_frames_);
+      command_buffer_kind_window_start_[i] = now;
+      return per_frame;
+    };
+    COUNT_profile_set("gpu/cb_submission_other_per_frame",
+                      kind_per_frame(CommandBufferKind::kSubmissionOther));
+    COUNT_profile_set(
+        "gpu/cb_submission_copy_draw_sync_per_frame",
+        kind_per_frame(CommandBufferKind::kSubmissionCopyToDrawSync));
+    COUNT_profile_set("gpu/cb_submission_zpd_query_per_frame",
+                      kind_per_frame(CommandBufferKind::kSubmissionZpdQuery));
+    COUNT_profile_set(
+        "gpu/cb_submission_uniforms_rollover_per_frame",
+        kind_per_frame(CommandBufferKind::kSubmissionUniformsRollover));
+    COUNT_profile_set(
+        "gpu/cb_submission_primary_end_per_frame",
+        kind_per_frame(CommandBufferKind::kSubmissionPrimaryBufferEnd));
+    COUNT_profile_set("gpu/cb_submission_wait_per_frame",
+                      kind_per_frame(CommandBufferKind::kSubmissionWait));
+    COUNT_profile_set("gpu/cb_texture_upload_batch_per_frame",
+                      kind_per_frame(CommandBufferKind::kTextureUploadBatch));
+    COUNT_profile_set("gpu/cb_texture_upload_private_per_frame",
+                      kind_per_frame(CommandBufferKind::kTextureUploadPrivate));
+    COUNT_profile_set("gpu/cb_texture_other_per_frame",
+                      kind_per_frame(CommandBufferKind::kTextureOther));
+    COUNT_profile_set("gpu/cb_rt_resolve_per_frame",
+                      kind_per_frame(CommandBufferKind::kRenderTargetResolve));
+    COUNT_profile_set("gpu/cb_rt_dump_per_frame",
+                      kind_per_frame(CommandBufferKind::kRenderTargetDump));
+    COUNT_profile_set("gpu/cb_rt_other_per_frame",
+                      kind_per_frame(CommandBufferKind::kRenderTargetOther));
 
     COUNT_profile_set(
         "gpu/render_passes_per_frame",
@@ -2015,7 +2092,7 @@ void MetalCommandProcessor::OnPrimaryBufferEnd() {
   if (!copy_resolve_writes_pending_ && !CanEndSubmissionImmediately()) {
     return;
   }
-  EndCommandBuffer();
+  EndCommandBuffer(CommandBufferKind::kSubmissionPrimaryBufferEnd);
 }
 
 bool MetalCommandProcessor::CanEndSubmissionImmediately() {
@@ -2030,6 +2107,40 @@ bool MetalCommandProcessor::CanEndSubmissionImmediately() {
          msl_pipeline_compile_queue_.empty() &&
          msl_shader_compile_pending_.empty() &&
          msl_pipeline_compile_pending_.empty();
+}
+
+MTL::CommandBuffer* MetalCommandProcessor::CreateAccountedCommandBuffer(
+    CommandBufferKind kind) {
+  if (!command_queue_) {
+    return nullptr;
+  }
+  MTL::CommandBuffer* command_buffer = command_queue_->commandBuffer();
+  if (command_buffer) {
+    ++command_buffer_kind_counts_[size_t(kind)];
+    AddGpuTimeHandler(command_buffer);
+  }
+  return command_buffer;
+}
+
+void MetalCommandProcessor::DiscardAccountedCommandBuffer(
+    MTL::CommandBuffer* command_buffer) {
+  if (command_buffer) {
+    pending_completion_handlers_.fetch_sub(1, std::memory_order_release);
+  }
+}
+
+void MetalCommandProcessor::AddGpuTimeHandler(
+    MTL::CommandBuffer* command_buffer) {
+  pending_completion_handlers_.fetch_add(1, std::memory_order_relaxed);
+  command_buffer->addCompletedHandler([this](MTL::CommandBuffer* completed) {
+    double gpu_seconds = completed->GPUEndTime() - completed->GPUStartTime();
+    if (gpu_seconds > 0.0) {
+      completed_gpu_time_ns_.fetch_add(uint64_t(gpu_seconds * 1e9),
+                                       std::memory_order_relaxed);
+    }
+    gpu_time_command_buffers_.fetch_add(1, std::memory_order_relaxed);
+    pending_completion_handlers_.fetch_sub(1, std::memory_order_release);
+  });
 }
 
 void MetalCommandProcessor::AwaitSubmissionCompletion(uint64_t submission) {
@@ -2113,7 +2224,7 @@ CommandProcessor::QueryOpenResult MetalCommandProcessor::OpenZPDQuery(
         // so it can retire, and let the next draw retry the segment.
         if (can_close_submission) {
           EndRenderEncoder();
-          EndCommandBuffer();
+          EndCommandBuffer(CommandBufferKind::kSubmissionZpdQuery);
         }
         return QueryOpenResult::kDeferred;
       }
@@ -2270,7 +2381,7 @@ bool MetalCommandProcessor::AwaitQueryResolve(ReportHandle report_handle,
       return false;
     }
     EndRenderEncoder();
-    EndCommandBuffer();
+    EndCommandBuffer(CommandBufferKind::kSubmissionZpdQuery);
   }
 
   if (wait_for_submission > GetCompletedSubmission()) {
@@ -2640,7 +2751,7 @@ bool MetalCommandProcessor::PrepareDrawTextures(uint32_t used_texture_mask,
       return false;
     };
     if (overlaps_resolved_texture_ranges(used_texture_mask)) {
-      EndCommandBuffer();
+      EndCommandBuffer(CommandBufferKind::kSubmissionCopyToDrawSync);
       BeginCommandBuffer();
       if (!current_command_buffer_ || !current_render_encoder_) {
         XELOGE(
@@ -4621,15 +4732,12 @@ MTL::CommandBuffer* MetalCommandProcessor::EnsureCommandBuffer() {
   }
 
   ++submission_current_;
+  ++command_buffer_kind_counts_[size_t(next_submission_kind_)];
+  next_submission_kind_ = CommandBufferKind::kSubmissionOther;
+  AddGpuTimeHandler(current_command_buffer_);
   pending_completion_handlers_.fetch_add(1, std::memory_order_relaxed);
   current_command_buffer_->addCompletedHandler(
       [this](MTL::CommandBuffer* command_buffer) {
-        double gpu_seconds =
-            command_buffer->GPUEndTime() - command_buffer->GPUStartTime();
-        if (gpu_seconds > 0.0) {
-          completed_gpu_time_ns_.fetch_add(uint64_t(gpu_seconds * 1e9),
-                                           std::memory_order_relaxed);
-        }
         std::lock_guard<std::mutex> lock(completion_mutex_);
         completed_command_buffers_.fetch_add(1, std::memory_order_release);
         pending_completion_handlers_.fetch_sub(1, std::memory_order_release);
@@ -5311,7 +5419,7 @@ bool MetalCommandProcessor::EnsureSpirvUniformBufferCapacity() {
         "SPIRV-Cross: uniforms ring exhausted; rotating Metal command buffer");
   }
 
-  EndCommandBuffer();
+  EndCommandBuffer(CommandBufferKind::kSubmissionUniformsRollover);
   BeginCommandBuffer();
   if (!current_command_buffer_ || !current_render_encoder_ ||
       !uniforms_buffer_) {
@@ -5475,7 +5583,10 @@ void MetalCommandProcessor::ScheduleSpirvArgumentBufferRelease(
   }
 }
 
-void MetalCommandProcessor::EndCommandBuffer() {
+void MetalCommandProcessor::EndCommandBuffer(CommandBufferKind next_kind) {
+  if (current_command_buffer_) {
+    next_submission_kind_ = next_kind;
+  }
   EndRenderEncoder();
   ResetMslCrossEncoderReuseCaches();
 
