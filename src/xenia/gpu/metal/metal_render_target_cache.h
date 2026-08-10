@@ -407,9 +407,9 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   std::unordered_map<TransferPipelineKey, MTL::RenderPipelineState*,
                      TransferPipelineKey::Hasher>
       transfer_pipelines_;
-  // The fragment half comes from the shared SPIR-V emitter, one per shader key
-  // through spirv_to_dxil and the Metal Shader Converter. A key that failed is
-  // kept as null so it is not retried on every transfer.
+  // The fragment half comes from the shared SPIR-V emitter, through either
+  // spirv_to_dxil and the Metal Shader Converter or SPIRV-Cross. A key that
+  // failed is kept as null so it is not retried on every transfer.
   std::unordered_map<EdramTransferShaderKey, MTL::Function*,
                      EdramTransferShaderKey::Hasher>
       transfer_fragment_functions_;
@@ -520,6 +520,11 @@ class MetalRenderTargetCache final : public gpu::RenderTargetCache {
   // only places the rectangle, so it is one function for every key.
   MTL::Function* GetOrCreateTransferFragmentFunction(
       EdramTransferShaderKey key);
+  // Whether a key's destination samples are drawn one at a time, with the
+  // sample index in the push constants so that one pipeline serves them all,
+  // rather than covered by one sample-rate draw. Sample-rate shading only pays
+  // for itself when a multisampled source is being read per sample.
+  bool TransferDrawsSamplesSeparately(EdramTransferShaderKey key) const;
   MTL::Function* GetTransferRectVertexFunction();
   MTL::RenderPipelineState* GetOrCreateTransferPipelines(
       const EdramTransferShaderKey& key, MTL::PixelFormat dest_format,

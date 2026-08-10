@@ -56,6 +56,7 @@
 #include "xenia/gpu/edram_dump_shader.h"
 #include "xenia/gpu/edram_transfer_shader.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
+#include "xenia/gpu/metal/metal_transfer_spirv_cross.h"
 #include "xenia/gpu/spirv_to_dxil_compiler.h"
 #include "xenia/gpu/texture_info.h"
 #include "xenia/gpu/texture_util.h"
@@ -67,6 +68,16 @@ DEFINE_bool(
     "Metal");
 DEFINE_bool(metal_transfer_fast_divmod, true,
             "Use fast exact div/mod in Metal transfer shaders", "Metal");
+DEFINE_bool(metal_transfer_spirv_cross, true,
+            "Compile the render target ownership transfer shaders with "
+            "SPIRV-Cross to MSL and bind their resources directly, instead of "
+            "taking them through spirv_to_dxil and the Metal Shader Converter",
+            "Metal");
+DEFINE_bool(metal_transfer_sample_mask, true,
+            "Draw a multisampled transfer destination one sample per draw, "
+            "with the sample index in the push constants and the shader "
+            "writing the sample mask, unless the source is multisampled too",
+            "Metal");
 DEFINE_bool(metal_transfer_in_draw_pass, true,
             "Encode render target ownership transfers at the head of the "
             "guest's own render pass instead of in passes of their own",
@@ -151,6 +162,14 @@ MTL::ComputePipelineState* CreateComputePipelineFromEmbeddedLibrary(
 // which MSC requires to be aligned the same way MetalDxilBinder aligns the
 // guest path's.
 constexpr uint32_t kInternalComputeSliceAlignment = 256;
+
+// Draws covering a multisampled transfer destination one sample at a time need
+// one push constant set and one argument buffer per sample of the widest
+// destination, each holding the layout's dwords plus the sample index those
+// draws append.
+constexpr uint32_t kTransferSampleDrawMax = 4;
+constexpr uint32_t kTransferPushConstantDwordMax =
+    kEdramTransferUsedPushConstantDwordCount + 1;
 
 // Packing formats for transferring host RT contents to the EDRAM buffer.
 // Keep numeric values in sync with Metal dump shaders in
@@ -4929,9 +4948,8 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
             last_transfer_depth_state = state;
           }
         };
-        // A draw reads its heap, push constants and argument buffer when it
-        // runs, so each gets its own slice rather than being rewritten between
-        // draws already encoded into this pass.
+        const bool transfer_uses_spirv_cross =
+            cvars::metal_transfer_spirv_cross;
         MTL::Texture* set_textures[2][2] = {};
         MTL::Buffer* host_depth_buffer = nullptr;
         auto bind_transfer_source_texture = [&](uint32_t set, uint32_t binding,
@@ -4941,70 +4959,113 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
         auto bind_transfer_host_depth_buffer = [&](MTL::Buffer* buffer) {
           host_depth_buffer = buffer;
         };
+        // A draw reads its heap, push constants and argument buffer when it
+        // runs, so every sample's draw needs its own copy of whatever differs
+        // between them rather than one rewritten between draws already encoded
+        // into this pass. Only the push constants do differ, so they and the
+        // argument buffers pointing at them are laid out for all the samples in
+        // one allocation each, and the heap, the residency and the textures are
+        // bound once for the whole group.
+        uint32_t transfer_push_constants[kTransferSampleDrawMax]
+                                        [kTransferPushConstantDwordMax];
+        uint32_t transfer_push_constant_count = 0;
+        MTL::Buffer* transfer_argument_buffer = nullptr;
+        NS::UInteger transfer_argument_buffer_offset = 0;
+        uint32_t transfer_argument_buffer_stride = 0;
         auto bind_transfer_fragment_resources =
             [&](const EdramTransferShaderKey& shader_key,
                 const EdramTransferAddressConstant& address,
                 const EdramTransferAddressConstant& host_depth_address,
-                uint32_t stencil_mask) -> bool {
+                uint32_t stencil_mask, uint32_t sample_draw_count) -> bool {
+          assert_true(sample_draw_count <= kTransferSampleDrawMax);
           const EdramTransferPipelineLayoutInfo& layout_info =
               kEdramTransferPipelineLayoutInfos[size_t(
                   kEdramTransferModes[size_t(shader_key.mode)]
                       .pipeline_layout)];
-          const MetalShaderConverter& converter =
-              command_processor_.metal_shader_converter();
 
-          // Only the dwords the layout declares are present, in enum order.
-          uint32_t push_constants[kEdramTransferUsedPushConstantDwordCount];
-          uint32_t push_constant_count = 0;
+          // Only the dwords the layout declares are present, in enum order,
+          // with the sample index after them when the shader takes it there.
+          uint32_t
+              shared_push_constants[kEdramTransferUsedPushConstantDwordCount];
+          uint32_t shared_push_constant_count = 0;
           if (layout_info.used_push_constant_dwords &
               kEdramTransferUsedPushConstantDwordHostDepthAddressBit) {
-            push_constants[push_constant_count++] = host_depth_address.constant;
+            shared_push_constants[shared_push_constant_count++] =
+                host_depth_address.constant;
           }
           if (layout_info.used_push_constant_dwords &
               kEdramTransferUsedPushConstantDwordAddressBit) {
-            push_constants[push_constant_count++] = address.constant;
+            shared_push_constants[shared_push_constant_count++] =
+                address.constant;
           }
           if (layout_info.used_push_constant_dwords &
               kEdramTransferUsedPushConstantDwordStencilMaskBit) {
-            push_constants[push_constant_count++] = stencil_mask;
+            shared_push_constants[shared_push_constant_count++] = stencil_mask;
+          }
+          const bool draws_samples_separately =
+              TransferDrawsSamplesSeparately(shader_key);
+          transfer_push_constant_count =
+              shared_push_constant_count + (draws_samples_separately ? 1 : 0);
+          for (uint32_t sample_draw = 0; sample_draw < sample_draw_count;
+               ++sample_draw) {
+            std::memcpy(transfer_push_constants[sample_draw],
+                        shared_push_constants,
+                        sizeof(uint32_t) * shared_push_constant_count);
+            if (draws_samples_separately) {
+              // Emulating 2x MSAA as samples 0 and 3 of a 4-sample attachment
+              // when there is no native 2x, the way the addressing expects.
+              bool emulated_2x_upper_sample = sample_draw_count == 2 &&
+                                              !msaa_2x_supported_ &&
+                                              sample_draw == 1;
+              transfer_push_constants[sample_draw][shared_push_constant_count] =
+                  emulated_2x_upper_sample ? 3u : sample_draw;
+            }
           }
 
+          if (transfer_uses_spirv_cross) {
+            MTL::Texture* textures[kTransferMslTextureCount] = {};
+            for (uint32_t set = 0; set < kTransferDescriptorSetCount; ++set) {
+              for (uint32_t binding = 0; binding < kTransferBindingsPerSet;
+                   ++binding) {
+                textures[TransferMslTextureIndex(set, binding)] =
+                    set_textures[set][binding];
+              }
+            }
+            encoder->setFragmentTextures(
+                textures, NS::Range::Make(0, kTransferMslTextureCount));
+            if (host_depth_buffer) {
+              encoder->setFragmentBuffer(host_depth_buffer, 0,
+                                         kTransferMslHostDepthBufferIndex);
+            }
+            mark_encoder_mutation(
+                kDrawPassTransferEncoderMutationFragmentTextures |
+                kDrawPassTransferEncoderMutationFragmentSlot0 |
+                kDrawPassTransferEncoderMutationFragmentSlot1);
+            return true;
+          }
+
+          const MetalShaderConverter& converter =
+              command_processor_.metal_shader_converter();
+          const uint32_t push_constant_stride =
+              xe::align(std::max<uint32_t>(
+                            sizeof(uint32_t) * transfer_push_constant_count,
+                            sizeof(uint32_t)),
+                        kInternalComputeSliceAlignment);
+          transfer_argument_buffer_stride =
+              xe::align(converter.internal_graphics_argument_buffer_size(),
+                        kInternalComputeSliceAlignment);
           MTL::Buffer* push_constant_buffer = nullptr;
           NS::UInteger push_constant_offset = 0;
-          MTL::Buffer* argument_buffer = nullptr;
-          NS::UInteger argument_buffer_offset = 0;
           if (!command_processor_.AcquireSpirvArgumentBufferSlice(
-                  std::max<size_t>(sizeof(uint32_t) * push_constant_count,
-                                   sizeof(uint32_t)),
+                  push_constant_stride * sample_draw_count,
                   kInternalComputeSliceAlignment, &push_constant_buffer,
                   &push_constant_offset) ||
               !command_processor_.AcquireSpirvArgumentBufferSlice(
-                  converter.internal_graphics_argument_buffer_size(),
-                  kInternalComputeSliceAlignment, &argument_buffer,
-                  &argument_buffer_offset)) {
+                  transfer_argument_buffer_stride * sample_draw_count,
+                  kInternalComputeSliceAlignment, &transfer_argument_buffer,
+                  &transfer_argument_buffer_offset)) {
             return false;
           }
-          if (push_constant_count) {
-            std::memcpy(
-                static_cast<uint8_t*>(push_constant_buffer->contents()) +
-                    push_constant_offset,
-                push_constants, sizeof(uint32_t) * push_constant_count);
-          }
-
-          auto* argument_buffer_data =
-              static_cast<uint8_t*>(argument_buffer->contents()) +
-              argument_buffer_offset;
-          std::memset(argument_buffer_data, 0,
-                      converter.internal_graphics_argument_buffer_size());
-          auto write_root_parameter =
-              [&](MetalInternalGraphicsRootParameter parameter,
-                  uint64_t address_value) {
-                std::memcpy(
-                    argument_buffer_data +
-                        converter.internal_graphics_root_parameter_offset(
-                            parameter),
-                    &address_value, sizeof(address_value));
-              };
 
           // One heap slice per set the layout declares, in the dense order the
           // emitter numbers them.
@@ -5024,6 +5085,7 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
               ++table_count;
             }
           }
+          uint64_t table_addresses[2] = {};
           if (table_count) {
             if (!command_processor_.AcquireSpirvArgumentBufferSlice(
                     sizeof(IRDescriptorTableEntry) * 2 * table_count,
@@ -5052,10 +5114,9 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
                 encoder->useResource(texture, MTL::ResourceUsageRead,
                                      MTL::RenderStageFragment);
               }
-              write_root_parameter(
-                  kTableParameters[table_index],
+              table_addresses[table_index] =
                   uint64_t(heap_buffer->gpuAddress()) + heap_offset +
-                      sizeof(IRDescriptorTableEntry) * 2 * table_index);
+                  sizeof(IRDescriptorTableEntry) * 2 * table_index;
               ++table_index;
             }
             encoder->setFragmentBuffer(
@@ -5063,23 +5124,72 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
                 NS::UInteger(kIRDescriptorHeapBindPoint));
           }
           if (host_depth_buffer) {
-            write_root_parameter(
-                MetalInternalGraphicsRootParameter::kHostDepthBufferUav,
-                uint64_t(host_depth_buffer->gpuAddress()));
             encoder->useResource(host_depth_buffer, MTL::ResourceUsageRead,
                                  MTL::RenderStageFragment);
           }
-          write_root_parameter(
-              MetalInternalGraphicsRootParameter::kPushConstants,
-              uint64_t(push_constant_buffer->gpuAddress()) +
-                  push_constant_offset);
-          encoder->setFragmentBuffer(argument_buffer, argument_buffer_offset,
-                                     NS::UInteger(kIRArgumentBufferBindPoint));
+
+          for (uint32_t sample_draw = 0; sample_draw < sample_draw_count;
+               ++sample_draw) {
+            NS::UInteger sample_push_constant_offset =
+                push_constant_offset + push_constant_stride * sample_draw;
+            if (transfer_push_constant_count) {
+              std::memcpy(
+                  static_cast<uint8_t*>(push_constant_buffer->contents()) +
+                      sample_push_constant_offset,
+                  transfer_push_constants[sample_draw],
+                  sizeof(uint32_t) * transfer_push_constant_count);
+            }
+            auto* argument_buffer_data =
+                static_cast<uint8_t*>(transfer_argument_buffer->contents()) +
+                transfer_argument_buffer_offset +
+                transfer_argument_buffer_stride * sample_draw;
+            std::memset(argument_buffer_data, 0,
+                        converter.internal_graphics_argument_buffer_size());
+            auto write_root_parameter =
+                [&](MetalInternalGraphicsRootParameter parameter,
+                    uint64_t address_value) {
+                  std::memcpy(
+                      argument_buffer_data +
+                          converter.internal_graphics_root_parameter_offset(
+                              parameter),
+                      &address_value, sizeof(address_value));
+                };
+            for (uint32_t table_index = 0; table_index < table_count;
+                 ++table_index) {
+              write_root_parameter(kTableParameters[table_index],
+                                   table_addresses[table_index]);
+            }
+            if (host_depth_buffer) {
+              write_root_parameter(
+                  MetalInternalGraphicsRootParameter::kHostDepthBufferUav,
+                  uint64_t(host_depth_buffer->gpuAddress()));
+            }
+            write_root_parameter(
+                MetalInternalGraphicsRootParameter::kPushConstants,
+                uint64_t(push_constant_buffer->gpuAddress()) +
+                    sample_push_constant_offset);
+          }
           mark_encoder_mutation(
               kDrawPassTransferEncoderMutationFragmentTextures |
               kDrawPassTransferEncoderMutationFragmentSlot0 |
               kDrawPassTransferEncoderMutationFragmentSlot1);
           return true;
+        };
+        auto bind_transfer_fragment_sample = [&](uint32_t sample_draw) {
+          if (transfer_uses_spirv_cross) {
+            if (transfer_push_constant_count) {
+              encoder->setFragmentBytes(
+                  transfer_push_constants[sample_draw],
+                  sizeof(uint32_t) * transfer_push_constant_count,
+                  kTransferMslPushConstantBufferIndex);
+            }
+            return;
+          }
+          encoder->setFragmentBuffer(
+              transfer_argument_buffer,
+              transfer_argument_buffer_offset +
+                  transfer_argument_buffer_stride * sample_draw,
+              NS::UInteger(kIRArgumentBufferBindPoint));
         };
         auto bind_transfer_stencil_reference = [&](uint32_t reference) {
           if (!last_transfer_stencil_reference_valid ||
@@ -5390,14 +5500,15 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
           bind_transfer_pipeline(pipeline);
           bind_transfer_vertex_constants(vertex_constants);
 
-          // The emitter always takes the sample-rate path, so one draw covers
-          // every sample of a multisampled destination.
-          auto draw_transfer = [&](uint32_t stencil_mask) -> bool {
-            if (!bind_transfer_fragment_resources(shader_key, address_constant,
-                                                  host_depth_address_constant,
-                                                  stencil_mask)) {
-              return false;
-            }
+          // Either the shader runs per sample and one draw covers all of them,
+          // or it takes the sample index from the push constants and each
+          // sample gets its own draw through the same pipeline.
+          const uint32_t sample_draw_count =
+              TransferDrawsSamplesSeparately(shader_key)
+                  ? MsaaSamplesToCount(dest_key.msaa_samples)
+                  : 1;
+
+          auto draw_transfer_rects = [&]() {
             if (rect_instance_buffer && rect_instance_count) {
               set_full_transfer_viewport_scissor();
               bind_transfer_vertex_buffer_1(rect_instance_buffer,
@@ -5427,6 +5538,19 @@ bool MetalRenderTargetCache::PerformTransfersAndResolveClears(
                 rect_instances += batch_count;
                 rect_instances_remaining -= batch_count;
               }
+            }
+          };
+
+          auto draw_transfer = [&](uint32_t stencil_mask) -> bool {
+            if (!bind_transfer_fragment_resources(
+                    shader_key, address_constant, host_depth_address_constant,
+                    stencil_mask, sample_draw_count)) {
+              return false;
+            }
+            for (uint32_t sample_draw = 0; sample_draw < sample_draw_count;
+                 ++sample_draw) {
+              bind_transfer_fragment_sample(sample_draw);
+              draw_transfer_rects();
             }
             return true;
           };
@@ -5679,6 +5803,21 @@ MTL::Function* MetalRenderTargetCache::GetTransferRectVertexFunction() {
   return transfer_rect_vertex_function_;
 }
 
+bool MetalRenderTargetCache::TransferDrawsSamplesSeparately(
+    EdramTransferShaderKey key) const {
+  if (!cvars::metal_transfer_sample_mask) {
+    return false;
+  }
+  if (key.dest_msaa_samples == xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  if (key.source_msaa_samples != xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  return EdramTransferHostDepthIsCopy(key.mode) ||
+         key.host_depth_source_msaa_samples == xenos::MsaaSamples::k1X;
+}
+
 MTL::Function* MetalRenderTargetCache::GetOrCreateTransferFragmentFunction(
     EdramTransferShaderKey key) {
   auto it = transfer_fragment_functions_.find(key);
@@ -5708,10 +5847,13 @@ MTL::Function* MetalRenderTargetCache::GetOrCreateTransferFragmentFunction(
   }
   options.stencil_reference_output_supported =
       UseNativeStencilOutputInTransfers();
-  // Metal has per-sample shading everywhere, so the emitter never needs the
-  // specialization constant it would otherwise use for the sample index -
-  // which would not survive spirv_to_dxil.
-  options.sample_rate_shading_supported = true;
+  const bool draws_samples_separately = TransferDrawsSamplesSeparately(key);
+  options.sample_rate_shading_supported = !draws_samples_separately;
+  // Metal has no pipeline-level sample mask, so the shader has to write the
+  // one sample its draw covers, and the index rides in the push constants so
+  // that one pipeline serves every sample.
+  options.sample_mask_output = draws_samples_separately;
+  options.sample_index_push_constant = draws_samples_separately;
   options.depth_float24_round = ::cvars::depth_float24_round;
   options.depth_float24_convert_in_pixel_shader =
       ::cvars::depth_float24_convert_in_pixel_shader;
@@ -5725,6 +5867,15 @@ MTL::Function* MetalRenderTargetCache::GetOrCreateTransferFragmentFunction(
     XELOGE(
         "MetalRenderTargetCache: failed to emit the transfer shader 0x{:08X}",
         key.key);
+  } else if (cvars::metal_transfer_spirv_cross) {
+    std::string error;
+    function = CompileTransferFragmentFunctionMsl(device_, spirv, &error);
+    if (!function) {
+      XELOGE(
+          "MetalRenderTargetCache: failed to compile the MSL transfer shader "
+          "0x{:08X}: {}",
+          key.key, error);
+    }
   } else {
     std::vector<uint8_t> dxil = SpirvToDxilCompiler::Translate(
         spirv.data(), spirv.size(), SpirvToDxilCompiler::Stage::kPixel);

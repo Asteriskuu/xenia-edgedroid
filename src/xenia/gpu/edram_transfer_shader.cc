@@ -447,6 +447,16 @@ std::vector<uint32_t> BuildEdramTransferShaderSpirv(
     push_constants_member_stencil_mask = uint32_t(id_vector_temp.size());
     id_vector_temp.push_back(type_uint);
   }
+  // Rides after the layout's dwords so their offsets are untouched.
+  const bool sample_index_in_push_constants =
+      key.dest_msaa_samples != xenos::MsaaSamples::k1X &&
+      !options.sample_rate_shading_supported &&
+      options.sample_index_push_constant;
+  uint32_t push_constants_member_sample_index = UINT32_MAX;
+  if (sample_index_in_push_constants) {
+    push_constants_member_sample_index = uint32_t(id_vector_temp.size());
+    id_vector_temp.push_back(type_uint);
+  }
   spv::Id push_constants = spv::NoResult;
   if (!id_vector_temp.empty()) {
     spv::Id type_push_constants =
@@ -492,6 +502,15 @@ std::vector<uint32_t> BuildEdramTransferShaderSpirv(
                   pipeline_layout_info.used_push_constant_dwords &
                   (kEdramTransferUsedPushConstantDwordStencilMaskBit - 1)));
     }
+    if (sample_index_in_push_constants) {
+      builder.addMemberName(type_push_constants,
+                            push_constants_member_sample_index, "sample_index");
+      builder.addMemberDecoration(
+          type_push_constants, push_constants_member_sample_index,
+          spv::DecorationOffset,
+          sizeof(uint32_t) *
+              xe::bit_count(pipeline_layout_info.used_push_constant_dwords));
+    }
     builder.addDecoration(type_push_constants, spv::DecorationBlock);
     push_constants = builder.createVariable(
         spv::NoPrecision, spv::StorageClassPushConstant, type_push_constants,
@@ -506,6 +525,7 @@ std::vector<uint32_t> BuildEdramTransferShaderSpirv(
   main_interface.push_back(input_fragment_coord);
   spv::Id input_sample_id = spv::NoResult;
   spv::Id spec_const_sample_id = spv::NoResult;
+  spv::Id output_sample_mask = spv::NoResult;
   if (key.dest_msaa_samples != xenos::MsaaSamples::k1X) {
     if (options.sample_rate_shading_supported) {
       // One draw for all samples.
@@ -518,9 +538,20 @@ std::vector<uint32_t> BuildEdramTransferShaderSpirv(
       main_interface.push_back(input_sample_id);
     } else {
       // One sample per draw, with different sample masks.
-      spec_const_sample_id = builder.makeUintConstant(0, true);
-      builder.addName(spec_const_sample_id, "xe_transfer_sample_id");
-      builder.addDecoration(spec_const_sample_id, spv::DecorationSpecId, 0);
+      if (!options.sample_index_push_constant) {
+        spec_const_sample_id = builder.makeUintConstant(0, true);
+        builder.addName(spec_const_sample_id, "xe_transfer_sample_id");
+        builder.addDecoration(spec_const_sample_id, spv::DecorationSpecId, 0);
+      }
+      if (options.sample_mask_output) {
+        output_sample_mask = builder.createVariable(
+            spv::NoPrecision, spv::StorageClassOutput,
+            builder.makeArrayType(type_int, builder.makeUintConstant(1), 0),
+            "gl_SampleMask");
+        builder.addDecoration(output_sample_mask, spv::DecorationBuiltIn,
+                              static_cast<int>(spv::BuiltIn::SampleMask));
+        main_interface.push_back(output_sample_mask);
+      }
     }
   }
 
@@ -622,9 +653,31 @@ std::vector<uint32_t> BuildEdramTransferShaderSpirv(
           spv::OpBitcast, type_uint,
           builder.createLoad(input_sample_id, spv::NoPrecision));
     } else {
-      assert_true(spec_const_sample_id != spv::NoResult);
-      // Already uint.
-      dest_sample_id = spec_const_sample_id;
+      if (sample_index_in_push_constants) {
+        id_vector_temp.clear();
+        id_vector_temp.push_back(builder.makeIntConstant(
+            int32_t(push_constants_member_sample_index)));
+        dest_sample_id = builder.createLoad(
+            builder.createAccessChain(spv::StorageClassPushConstant,
+                                      push_constants, id_vector_temp),
+            spv::NoPrecision);
+      } else {
+        assert_true(spec_const_sample_id != spv::NoResult);
+        // Already uint.
+        dest_sample_id = spec_const_sample_id;
+      }
+      if (output_sample_mask != spv::NoResult) {
+        id_vector_temp.clear();
+        id_vector_temp.push_back(builder.makeUintConstant(0));
+        builder.createStore(
+            builder.createUnaryOp(
+                spv::OpBitcast, type_int,
+                builder.createBinOp(spv::OpShiftLeftLogical, type_uint,
+                                    builder.makeUintConstant(1),
+                                    dest_sample_id)),
+            builder.createAccessChain(spv::StorageClassOutput,
+                                      output_sample_mask, id_vector_temp));
+      }
     }
   }
 

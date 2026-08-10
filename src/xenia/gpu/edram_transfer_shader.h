@@ -263,8 +263,21 @@ struct EdramTransferShaderOptions {
   bool stencil_reference_output_supported = false;
 
   // Whether the host can run the fragment shader per sample, which is how a
-  // multisampled destination addresses one guest sample per invocation.
+  // multisampled destination addresses one guest sample per invocation. When
+  // off, the sample index comes from specialization constant 0 and the
+  // destination's samples are covered by one draw each.
   bool sample_rate_shading_supported = false;
+
+  // Write the covered sample from the shader instead of taking it from a
+  // pipeline-level sample mask, for hosts that have no such state. Only
+  // meaningful on the per-draw-sample path.
+  bool sample_mask_output = false;
+
+  // Take the sample index from a dword appended after the layout's push
+  // constants rather than from specialization constant 0, so one pipeline
+  // covers every sample instead of one per sample. Only meaningful on the
+  // per-draw-sample path.
+  bool sample_index_push_constant = false;
 
   // float24 depth handling, from the cvars of the same name as the backend
   // resolved them: whether guest depth was already rounded to float24 by the
