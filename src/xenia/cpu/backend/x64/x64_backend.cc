@@ -237,7 +237,9 @@ bool X64Backend::Initialize(Processor* processor) {
 
   Xbyak::util::Cpu cpu;
 #if XE_PLATFORM_MAC
-  if (!cpu.has(Xbyak::util::Cpu::tAVX)) {
+  // Rosetta 2 hides AVX from CPUID, so consult the feature flags, which force
+  // the AVX2 bits on there.
+  if (!(amd64::GetFeatureFlags() & amd64::kX64EmitAVX2)) {
     XELOGW(
         "This CPU does not support AVX. Continuing anyway (performance and "
         "compatibility may be reduced).");

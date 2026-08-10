@@ -407,7 +407,6 @@ class X64Emitter : public Xbyak::CodeGenerator {
   XbyakAllocator* allocator_ = nullptr;
   XexModule* guest_module_ = nullptr;
   bool synchronize_stack_on_next_instruction_ = false;
-  Xbyak::util::Cpu cpu_;
   uint64_t feature_flags_ = 0;
   uint32_t current_guest_function_ = 0;
   Xbyak::Label* epilog_label_ = nullptr;
