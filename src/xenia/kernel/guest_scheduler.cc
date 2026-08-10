@@ -936,7 +936,7 @@ void GuestScheduler::WakeAll() {
   // most one backoff interval.
   bool any_blocked = false;
   for (int i = 0; i < kMaxCpus; ++i) {
-    if (cpus_[i].has_blocked.load(std::memory_order_relaxed)) {
+    if (cpus_[i].has_blocked.load()) {
       any_blocked = true;
       break;
     }
@@ -978,7 +978,7 @@ void GuestScheduler::WakeForSignal(const XObject* object,
   }
   bool any_blocked = false;
   for (int i = 0; i < kMaxCpus; ++i) {
-    if (cpus_[i].has_blocked.load(std::memory_order_relaxed)) {
+    if (cpus_[i].has_blocked.load()) {
       any_blocked = true;
       break;
     }
@@ -1110,6 +1110,25 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
   }
   {
     std::lock_guard<std::mutex> lock(lock_);
+    // A signal between the caller's failed poll and this park bumped the epoch
+    // but walked the blocked list before we joined it, so nothing would re-poll
+    // us before the backstop. Compare under the walk's own lock and poke this
+    // CPU on a mismatch; returning to re-poll instead livelocks when the epoch
+    // churns faster than a park roundtrip.
+    if (gated) {
+      uint32_t epoch_now = 0;
+      bool epoch_gated = false;
+      if (wait_object) {
+        epoch_now = wait_object->cooperative_signal_epoch();
+        epoch_gated = true;
+      } else if (self->cooperative_wait_set_count()) {
+        epoch_now = self->cooperative_wait_set_epoch();
+        epoch_gated = true;
+      }
+      if (epoch_gated && epoch_now != wait_epoch) {
+        cpus_[cpu_index].repoll_now.store(true, std::memory_order_relaxed);
+      }
+    }
     auto& links = self->scheduler_links();
     // Park self (running, in no list) on this CPU's blocked list.
     links.blocked = true;
@@ -1140,7 +1159,9 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
     if (due && due < cpu.next_timed_repoll_ms) {
       cpu.next_timed_repoll_ms = due;
     }
-    cpu.has_blocked.store(true, std::memory_order_relaxed);
+    // seq_cst pairs with the wake pre-filters' loads: epoch-read-then-store
+    // here vs bump-then-load there, so at least one side always sees the other.
+    cpu.has_blocked.store(true);
   }
   self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_WAITING;
   YieldToScheduler();
