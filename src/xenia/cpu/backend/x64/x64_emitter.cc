@@ -1109,15 +1109,13 @@ void X64Emitter::MovMem64(const Xbyak::RegExp& addr, uint64_t v) {
     }
   }
 }
-static inline vec128_t v128_setr_bytes(unsigned char v0, unsigned char v1,
-                                       unsigned char v2, unsigned char v3,
-                                       unsigned char v4, unsigned char v5,
-                                       unsigned char v6, unsigned char v7,
-                                       unsigned char v8, unsigned char v9,
-                                       unsigned char v10, unsigned char v11,
-                                       unsigned char v12, unsigned char v13,
-                                       unsigned char v14, unsigned char v15) {
-  vec128_t result;
+static constexpr vec128_t v128_setr_bytes(
+    unsigned char v0, unsigned char v1, unsigned char v2, unsigned char v3,
+    unsigned char v4, unsigned char v5, unsigned char v6, unsigned char v7,
+    unsigned char v8, unsigned char v9, unsigned char v10, unsigned char v11,
+    unsigned char v12, unsigned char v13, unsigned char v14,
+    unsigned char v15) {
+  vec128_t result{};
 
   result.u8[0] = v0;
   result.u8[1] = v1;
@@ -1139,9 +1137,9 @@ static inline vec128_t v128_setr_bytes(unsigned char v0, unsigned char v1,
   return result;
 }
 
-static inline vec128_t v128_setr_words(uint32_t v0, uint32_t v1, uint32_t v2,
-                                       uint32_t v3) {
-  vec128_t result;
+static constexpr vec128_t v128_setr_words(uint32_t v0, uint32_t v1, uint32_t v2,
+                                          uint32_t v3) {
+  vec128_t result{};
   result.u32[0] = v0;
   result.u32[1] = v1;
   result.u32[2] = v2;
@@ -1149,7 +1147,9 @@ static inline vec128_t v128_setr_words(uint32_t v0, uint32_t v1, uint32_t v2,
   return result;
 }
 
-static const vec128_t xmm_consts[] = {
+// constinit keeps this out of .bss: a dynamically initialized copy loses
+// stores that land on a fresh page under Rosetta 2.
+static constinit const vec128_t xmm_consts[] = {
     /* XMMZero                */ vec128f(0.0f),
     /* XMMByteSwapMask        */
     vec128i(0x00010203u, 0x04050607u, 0x08090A0Bu, 0x0C0D0E0Fu),
