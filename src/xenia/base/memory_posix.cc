@@ -434,6 +434,37 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   return ret;
 #else
   auto full_path = "/" / path;
+#if XE_PLATFORM_LINUX
+  // If /dev/shm is mounted noexec fallback to memfd
+  {
+    std::ifstream mounts("/proc/mounts");
+    std::string line;
+    while (std::getline(mounts, line)) {
+      if (line.find("/dev/shm") != std::string::npos &&
+          line.find("noexec") != std::string::npos) {
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef MFD_EXEC
+#define MFD_EXEC 0x0010U
+#endif
+        int memfd = memfd_create(path.c_str(), MFD_CLOEXEC | MFD_EXEC);
+        if (memfd < 0 && errno == EINVAL) {
+          memfd = memfd_create(path.c_str(), MFD_CLOEXEC);
+        }
+        if (memfd < 0 || ftruncate(memfd, length) < 0) {
+          XELOGE("memfd fallback for {} failed: {} ({})", path.string(),
+                 strerror(errno), errno);
+          if (memfd >= 0) {
+            close(memfd);
+          }
+          return kFileMappingHandleInvalid;
+        }
+        return memfd;
+      }
+    }
+  }
+#endif  // XE_PLATFORM_LINUX
   int ret = shm_open(full_path.c_str(), oflag, 0777);
   if (ret < 0) {
     XELOGE("shm_open({}) failed: {} ({})", full_path.string(), strerror(errno),
