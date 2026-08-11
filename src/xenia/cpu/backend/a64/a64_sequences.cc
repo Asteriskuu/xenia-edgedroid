@@ -4603,60 +4603,6 @@ struct SET_ROUNDING_MODE
 };
 EMITTER_OPCODE_TABLE(OPCODE_SET_ROUNDING_MODE, SET_ROUNDING_MODE);
 
-// PPC frsqrte lookup table implementation (PowerISA Table E-5).
-// Matches the x64 backend's EmitFrsqrteHelper.
-static uint64_t PpcFrsqrte(uint64_t bits) {
-  uint32_t sign = (uint32_t)(bits >> 63);
-  uint32_t exp = (uint32_t)((bits >> 52) & 0x7FF);
-  uint64_t mantissa = bits & 0x000FFFFFFFFFFFFFULL;
-
-  // NaN → QNaN (quiet it, preserve sign and payload)
-  if (exp == 0x7FF && mantissa != 0) {
-    return bits | (1ULL << 51);
-  }
-  // ±0 → ±inf
-  if (exp == 0 && mantissa == 0) {
-    return sign ? 0xFFF0000000000000ULL : 0x7FF0000000000000ULL;
-  }
-  // +inf → +0
-  if (exp == 0x7FF && !sign) {
-    return 0;
-  }
-  // -inf or negative → QNaN
-  if (sign) {
-    return 0x7FF8000000000000ULL;
-  }
-
-  // Denormal: normalize (matching x64 EmitFrsqrteHelper L25).
-  int32_t effective_exp = (int32_t)exp;
-  uint64_t norm_mantissa = mantissa;
-  if (exp == 0) {
-    int lz = (int)xe::lzcnt(mantissa);  // leading zeros in 64-bit
-    norm_mantissa = mantissa << (lz - 11);
-    effective_exp = 12 - lz;
-  }
-
-  // PPC frsqrte lookup table (16 entries, 8 bits each).
-  static constexpr uint8_t table[] = {241, 216, 192, 168, 152, 136, 128, 112,
-                                      96,  76,  60,  48,  32,  24,  16,  8};
-
-  // Index: bit 3 = !(exp & 1), bits 2:0 = top 3 mantissa bits.
-  // For denormals, norm_mantissa has implicit 1 at bit 52; & 7 masks it out.
-  uint32_t top3 = (uint32_t)(norm_mantissa >> 49) & 7;
-  uint32_t index = (((uint32_t)effective_exp & 1) << 3) | top3;
-  index ^= 8;
-
-  // Result exponent = 1022 - floor((effective_exp - 1023) / 2).
-  int32_t unbiased = effective_exp - 1023;
-  int32_t half = unbiased >> 1;  // arithmetic shift = floor division
-  uint32_t result_exp = (uint32_t)(1022 - half);
-
-  // Construct result: exponent in bits 62:52, table value in bits 51:44.
-  uint64_t result =
-      ((uint64_t)result_exp << 52) | ((uint64_t)table[index] << 44);
-  return result;
-}
-
 // ============================================================================
 // OPCODE_RSQRT
 // ============================================================================
@@ -4682,7 +4628,6 @@ struct RSQRT_F32 : Sequence<RSQRT_F32, I<OPCODE_RSQRT, F32Op, F32Op>> {
 struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // PPC frsqrte uses a specific lookup table, not a high-precision estimate.
-    // Call PpcFrsqrte directly (pure integer math, no FPCR impact).
     DReg src = i.src1.is_constant ? e.d0 : DReg(i.src1.reg().getIdx());
     if (i.src1.is_constant) {
       union {
@@ -4694,123 +4639,32 @@ struct RSQRT_F64 : Sequence<RSQRT_F64, I<OPCODE_RSQRT, F64Op, F64Op>> {
       e.fmov(e.d0, e.x0);
     }
     e.fmov(e.x0, src);
-    e.mov(e.x9, reinterpret_cast<uint64_t>(PpcFrsqrte));
+    e.mov(e.x9, reinterpret_cast<uint64_t>(e.backend()->frsqrte_helper()));
     e.blr(e.x9);
     e.fmov(i.dest, e.x0);
   }
 };
-// PPC vrsqrtefp per-lane implementation.
-// Uses the same 32-entry lookup table + interpolation as x64's
-// EmitScalarVRsqrteHelper.
-static uint32_t PpcVrsqrtefpLane(uint32_t bits) {
-  static constexpr uint32_t table[32] = {
-      0x0568B4FD, 0x04F3AF97, 0x048DAAA5, 0x0435A618, 0x03E7A1E4, 0x03A29DFE,
-      0x03659A5C, 0x032E96F8, 0x02FC93CA, 0x02D090CE, 0x02A88DFE, 0x02838B57,
-      0x026188D4, 0x02438673, 0x02268431, 0x020B820B, 0x03D27FFA, 0x03807C29,
-      0x033878AA, 0x02F97572, 0x02C27279, 0x02926FB7, 0x02666D26, 0x023F6AC0,
-      0x021D6881, 0x01FD6665, 0x01E16468, 0x01C76287, 0x01AF60C1, 0x01995F12,
-      0x01855D79, 0x01735BF4,
-  };
-
-  uint32_t sign = bits >> 31;
-  uint32_t biased_exp = (bits >> 23) & 0xFF;
-  uint32_t mantissa = bits & 0x007FFFFF;
-
-  // -Inf → QNaN
-  if (bits == 0xFF800000u) {
-    return 0x7FC00000u;
-  }
-
-  // Denormal or zero (exp == 0)
-  if (biased_exp == 0) {
-    // ±0 or denormal with NJM on → flush to ±0 → ±Inf
-    return sign ? 0xFF800000u : 0x7F800000u;
-  }
-
-  // NaN/Inf (exp == 255)
-  if (biased_exp == 255) {
-    if (mantissa == 0) {
-      // +Inf → +0 (-Inf already handled above)
-      return 0;
-    }
-    // NaN: quiet it (set bit 22), preserve sign and payload
-    return bits | 0x00400000u;
-  }
-
-  // Negative normal → QNaN
-  if (sign) {
-    return 0x7FC00000u;
-  }
-
-  // Normal positive: table lookup + interpolation
-  int32_t unbiased_exp = (int32_t)biased_exp - 127;
-
-  // Table index: exp parity selects half, top 4 mantissa bits select entry
-  uint32_t exp_parity = ((uint32_t)(unbiased_exp << 4)) & 16;
-  uint32_t top4 = mantissa >> 19;
-  uint32_t index = (exp_parity | top4) ^ 16;
-
-  // 10-bit interpolation factor from mantissa
-  uint32_t interp = (mantissa >> 9) & 1023;
-
-  // Result exponent (arithmetic shift)
-  int32_t result_exp = (127 - (int32_t)biased_exp) >> 1;
-
-  // Lookup + linear interpolation
-  uint32_t entry = table[index];
-  uint32_t slope = entry >> 16;
-  uint32_t base = (entry << 10) & 0x3FFFC00u;
-  int32_t raw = (int32_t)base - (int32_t)(interp * slope);
-
-  // Normalize if bit 25 not set
-  if (!(raw & (1 << 25))) {
-    uint32_t val = (uint32_t)raw & 0x1FFFFFF;
-    uint32_t lz = (uint32_t)xe::lzcnt(val);
-    int32_t shift = (int32_t)lz - 6;
-    result_exp += 6;
-    result_exp -= (int32_t)lz;
-    raw <<= shift;
-  }
-
-  // Rounding
-  if ((raw & 5) && (raw & 2)) {
-    raw += 4;
-  }
-
-  // Assemble result
-  uint32_t res_exp = (uint32_t)((result_exp << 23) + 0x3F800000);
-  uint32_t res_man = ((uint32_t)raw >> 2) & 0x7FFFFF;
-  uint32_t result = res_exp | res_man;
-
-  // DAZ: flush denormal output to +0
-  if (((result >> 23) & 0xFF) == 0 && (result & 0x7FFFFF)) {
-    result = 0;
-  }
-
-  return result;
-}
-
 struct RSQRT_V128 : Sequence<RSQRT_V128, I<OPCODE_RSQRT, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // Call PpcVrsqrtefpLane directly per lane (pure integer math).
-    // Save source to stack scratch, accumulate results there, load at end.
-    int src_idx = SrcVReg(e, i.src1, 0);
-    e.str(QReg(src_idx),
-          Xbyak_aarch64::ptr(e.sp,
-                             static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
-    for (int lane = 0; lane < 4; lane++) {
-      e.ldr(e.w0, Xbyak_aarch64::ptr(
-                      e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                                lane * 4));
-      e.mov(e.x9, reinterpret_cast<uint64_t>(PpcVrsqrtefpLane));
+    const int src_idx = SrcVReg(e, i.src1, 0);
+    // The vast majority of inputs to vrsqrte come from vmsum3 or vmsum4 as part
+    // of a vector normalization sequence, where every lane holds the same value
+    // and one estimate covers all four.
+    if (i.src1.value && i.src1.value->AllFloatVectorLanesSameValue()) {
+      e.umov(e.w0, VReg(src_idx).s4[0]);
+      e.mov(e.x9,
+            reinterpret_cast<uint64_t>(e.backend()->vrsqrtefp_scalar_helper()));
       e.blr(e.x9);
-      e.str(e.w0, Xbyak_aarch64::ptr(
-                      e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                                lane * 4));
+      e.dup(VReg(i.dest.reg().getIdx()).s4, e.w0);
+      return;
     }
-    e.ldr(QReg(i.dest.reg().getIdx()),
-          Xbyak_aarch64::ptr(e.sp,
-                             static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
+    if (src_idx != 0) {
+      e.mov(VReg(0).b16, VReg(src_idx).b16);
+    }
+    e.mov(e.x9,
+          reinterpret_cast<uint64_t>(e.backend()->vrsqrtefp_vector_helper()));
+    e.blr(e.x9);
+    e.mov(VReg(i.dest.reg().getIdx()).b16, VReg(0).b16);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RSQRT, RSQRT_F32, RSQRT_F64, RSQRT_V128);
