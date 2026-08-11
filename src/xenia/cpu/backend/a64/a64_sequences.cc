@@ -4293,7 +4293,7 @@ struct MUL_SUB_V128
 EMITTER_OPCODE_TABLE(OPCODE_MUL_SUB, MUL_SUB_F64, MUL_SUB_V128);
 
 // ============================================================================
-// POW2 / LOG2 / DOT_PRODUCT C helper functions (called via CallNativeSafe)
+// POW2 / LOG2 C helper functions (called via CallNativeSafe)
 // ============================================================================
 
 // POW2 (vexptefp): 2^x for each of 4 float lanes.
@@ -4312,46 +4312,6 @@ static void EmulateLog2(void* /*ctx*/, void* vdata) {
   for (int i = 0; i < 4; i++) {
     data->f32[i] = std::log2(data->f32[i]);
   }
-}
-
-// DOT_PRODUCT_3 (vmsum3fp): dot product of first 3 elements.
-// Uses double-precision intermediates; overflow -> QNaN.
-// Args: x0=PPCContext* (unused), x1=pointer to 2 consecutive vec128_t
-//       (src1 at offset 0, src2 at offset 16). Result stored in src1.
-static void EmulateDotProduct3(void* /*ctx*/, void* vdata) {
-  auto* data = reinterpret_cast<vec128_t*>(vdata);
-  vec128_t& src1 = data[0];
-  vec128_t& src2 = data[1];
-  double d0 = (double)src1.f32[0] * (double)src2.f32[0];
-  double d1 = (double)src1.f32[1] * (double)src2.f32[1];
-  double d2 = (double)src1.f32[2] * (double)src2.f32[2];
-  double sum = d0 + d1 + d2;
-  float result = (float)sum;
-  if (std::isinf(result)) {
-    uint32_t qnan = 0x7FC00000u;
-    memcpy(&result, &qnan, sizeof(result));
-  }
-  src1.f32[0] = src1.f32[1] = src1.f32[2] = src1.f32[3] = result;
-}
-
-// DOT_PRODUCT_4 (vmsum4fp): dot product of all 4 elements.
-// Uses double-precision intermediates; overflow -> QNaN.
-// Args: x0=PPCContext* (unused), x1=pointer to 2 consecutive vec128_t.
-static void EmulateDotProduct4(void* /*ctx*/, void* vdata) {
-  auto* data = reinterpret_cast<vec128_t*>(vdata);
-  vec128_t& src1 = data[0];
-  vec128_t& src2 = data[1];
-  double d0 = (double)src1.f32[0] * (double)src2.f32[0];
-  double d1 = (double)src1.f32[1] * (double)src2.f32[1];
-  double d2 = (double)src1.f32[2] * (double)src2.f32[2];
-  double d3 = (double)src1.f32[3] * (double)src2.f32[3];
-  double sum = d0 + d1 + d2 + d3;
-  float result = (float)sum;
-  if (std::isinf(result)) {
-    uint32_t qnan = 0x7FC00000u;
-    memcpy(&result, &qnan, sizeof(result));
-  }
-  src1.f32[0] = src1.f32[1] = src1.f32[2] = src1.f32[3] = result;
 }
 
 // ============================================================================
@@ -4415,6 +4375,30 @@ EMITTER_OPCODE_TABLE(OPCODE_LOG2, LOG2_F32, LOG2_F64, LOG2_V128);
 // ============================================================================
 // OPCODE_DOT_PRODUCT_3
 // ============================================================================
+// The guest returns QNaN when the double sum overflows on the narrowing to
+// float32, but preserves an infinity that came from an infinite input. Both
+// leave an infinite result; only the overflow leaves a finite sum behind, so
+// the second test only has to run once the first one says the result is
+// infinite. Takes the result in s0 and the sum in d1; clobbers v2, v3 and x17.
+static void EmitDotProductResult(A64Emitter& e, int dest_idx) {
+  auto& done = e.NewCachedLabel();
+  e.fabs(SReg(2), SReg(0));
+  e.mov(e.w17, 0x7F800000u);  // +inf
+  e.fmov(SReg(3), e.w17);
+  e.fcmp(SReg(2), SReg(3));
+  e.b(Xbyak_aarch64::NE, done);
+  e.fabs(DReg(2), DReg(1));
+  e.mov(e.x17, 0x7FF0000000000000ULL);  // +inf
+  e.fmov(DReg(3), e.x17);
+  e.fcmp(DReg(2), DReg(3));
+  e.b(Xbyak_aarch64::EQ, done);
+  e.mov(e.w17, 0x7FC00000u);  // QNaN
+  e.fmov(SReg(0), e.w17);
+  e.L(done);
+  // Splat result to all 4 lanes.
+  e.dup(VReg(dest_idx).s4, VReg(0).s4[0]);
+}
+
 struct DOT_PRODUCT_3_V128
     : Sequence<DOT_PRODUCT_3_V128,
                I<OPCODE_DOT_PRODUCT_3, V128Op, V128Op, V128Op>> {
@@ -4438,18 +4422,7 @@ struct DOT_PRODUCT_3_V128
       e.fadd(DReg(1), DReg(1), DReg(2));
       // Convert back to float.
       e.fcvt(SReg(0), DReg(1));
-      // Check for infinity → QNaN.
-      e.fabs(SReg(1), SReg(0));
-      e.mov(e.w17, 0x7F800000u);  // +inf
-      e.fmov(SReg(2), e.w17);
-      e.fcmp(SReg(1), SReg(2));
-      auto& not_inf = e.NewCachedLabel();
-      e.b(Xbyak_aarch64::NE, not_inf);
-      e.mov(e.w17, 0x7FC00000u);  // QNaN
-      e.fmov(SReg(0), e.w17);
-      e.L(not_inf);
-      // Splat result to all 4 lanes.
-      e.dup(VReg(d).s4, VReg(0).s4[0]);
+      EmitDotProductResult(e, d);
     });
   }
 };
@@ -4480,18 +4453,7 @@ struct DOT_PRODUCT_4_V128
       e.faddp(DReg(1), VReg(0).d2);
       // Convert back to float.
       e.fcvt(SReg(0), DReg(1));
-      // Check for infinity → QNaN.
-      e.fabs(SReg(1), SReg(0));
-      e.mov(e.w17, 0x7F800000u);
-      e.fmov(SReg(2), e.w17);
-      e.fcmp(SReg(1), SReg(2));
-      auto& not_inf = e.NewCachedLabel();
-      e.b(Xbyak_aarch64::NE, not_inf);
-      e.mov(e.w17, 0x7FC00000u);
-      e.fmov(SReg(0), e.w17);
-      e.L(not_inf);
-      // Splat result to all 4 lanes.
-      e.dup(VReg(d).s4, VReg(0).s4[0]);
+      EmitDotProductResult(e, d);
     });
   }
 };
