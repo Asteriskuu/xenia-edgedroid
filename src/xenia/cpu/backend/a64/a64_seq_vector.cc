@@ -1916,13 +1916,65 @@ struct LVR_V128 : Sequence<LVR_V128, I<OPCODE_LVR, V128Op, I64Op>> {
 };
 EMITTER_OPCODE_TABLE(OPCODE_LVR, LVR_V128);
 
+// Copy count (0..16) bytes from [src] to [dst] with overlapping power-of-two
+// accesses, so nothing outside the range is touched. Baseline NEON has no
+// byte-masked store, and merging a whole 16-byte block back with a blend would
+// lose a concurrent write to the bytes this store is not supposed to reach.
+static void EmitPartialVectorStore(A64Emitter& e,
+                                   const Xbyak_aarch64::XReg& dst,
+                                   const Xbyak_aarch64::XReg& src,
+                                   const Xbyak_aarch64::WReg& count) {
+  // Unqualified Label here is hir::Label.
+  Xbyak_aarch64::Label from8, from4, from2, from1, done;
+
+  e.cmp(count, 8);
+  e.b(Xbyak_aarch64::HS, from8);
+  e.cmp(count, 4);
+  e.b(Xbyak_aarch64::HS, from4);
+  e.cmp(count, 2);
+  e.b(Xbyak_aarch64::HS, from2);
+  e.cbnz(count, from1);
+  e.b(done);
+
+  e.L(from8);
+  e.sub(e.w6, count, 8);
+  e.ldr(e.x3, ptr(src));
+  e.str(e.x3, ptr(dst));
+  e.ldr(e.x3, ptr(src, e.x6));
+  e.str(e.x3, ptr(dst, e.x6));
+  e.b(done);
+
+  e.L(from4);
+  e.sub(e.w6, count, 4);
+  e.ldr(e.w3, ptr(src));
+  e.str(e.w3, ptr(dst));
+  e.ldr(e.w3, ptr(src, e.x6));
+  e.str(e.w3, ptr(dst, e.x6));
+  e.b(done);
+
+  e.L(from2);
+  e.sub(e.w6, count, 2);
+  e.ldrh(e.w3, ptr(src));
+  e.strh(e.w3, ptr(dst));
+  e.ldrh(e.w3, ptr(src, e.x6));
+  e.strh(e.w3, ptr(dst, e.x6));
+  e.b(done);
+
+  e.L(from1);
+  e.ldrb(e.w3, ptr(src));
+  e.strb(e.w3, ptr(dst));
+
+  e.L(done);
+}
+
 // ============================================================================
 // OPCODE_STVL (Store Vector Left)
 // ============================================================================
 struct STVL_V128 : Sequence<STVL_V128, I<OPCODE_STVL, VoidOp, I64Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // Store bytes offset..15 from the byte-swapped source, touching only the
-    // in-range bytes so concurrent writes to the rest of the line survive.
+    // Store bytes offset..15 of the block holding the address, taking them from
+    // the head of the byte-swapped source. That is 16 - offset bytes ending at
+    // the block boundary, so it is one contiguous copy.
     int s = SrcVReg(e, i.src2, 0);
 
     // Stash rev32(src) so its bytes can be addressed individually.
@@ -1930,25 +1982,13 @@ struct STVL_V128 : Sequence<STVL_V128, I<OPCODE_STVL, VoidOp, I64Op, V128Op>> {
     e.str(QReg(0),
           ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
 
-    // x16 = aligned destination base, w17 = offset, x0 = stash base.
     auto addr = ComputeMemoryAddress(e, i.src1);
     e.add(e.x0, e.GetMembaseReg(), addr);
-    e.and_(e.w17, e.w0, 0xF);
-    e.and_(e.x16, e.x0, ~0xFull);
-    e.add(e.x0, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
-
-    // for (i = offset; i < 16; ++i) mem[base + i] = stash[i - offset];
-    Xbyak_aarch64::Label loop, done;
-    e.mov(e.w1, e.w17);
-    e.L(loop);
-    e.cmp(e.w1, 16);
-    e.b(Xbyak_aarch64::GE, done);
-    e.sub(e.w2, e.w1, e.w17);
-    e.ldrb(e.w3, ptr(e.x0, e.x2));
-    e.strb(e.w3, ptr(e.x16, e.x1));
-    e.add(e.w1, e.w1, 1);
-    e.b(loop);
-    e.L(done);
+    e.and_(e.w2, e.w0, 0xF);
+    e.mov(e.w1, 16);
+    e.sub(e.w2, e.w1, e.w2);
+    e.add(e.x1, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
+    EmitPartialVectorStore(e, e.x0, e.x1, e.w2);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_STVL, STVL_V128);
@@ -1958,35 +1998,22 @@ EMITTER_OPCODE_TABLE(OPCODE_STVL, STVL_V128);
 // ============================================================================
 struct STVR_V128 : Sequence<STVR_V128, I<OPCODE_STVR, VoidOp, I64Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // Store bytes 0..offset-1 from the byte-swapped source tail, touching only
-    // the in-range bytes. offset == 0 stores nothing.
+    // Store bytes 0..offset-1 of the block from the tail of the byte-swapped
+    // source, again contiguous. offset == 0 stores nothing, which matters:
+    // memcpy tails use stvrx on an address that can sit one past a valid page.
     int s = SrcVReg(e, i.src2, 0);
 
     e.rev32(VReg(0).b16, VReg(s).b16);
     e.str(QReg(0),
           ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
 
-    // x16 = aligned destination base, w17 = offset, x0 = stash base.
     auto addr = ComputeMemoryAddress(e, i.src1);
     e.add(e.x0, e.GetMembaseReg(), addr);
-    e.and_(e.w17, e.w0, 0xF);
-    e.and_(e.x16, e.x0, ~0xFull);
-    e.add(e.x0, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
-    e.mov(e.w6, 16);
-    e.sub(e.w6, e.w6, e.w17);  // source tail starts at 16 - offset
-
-    // for (i = 0; i < offset; ++i) mem[base + i] = stash[16 - offset + i];
-    Xbyak_aarch64::Label loop, done;
-    e.mov(e.w1, 0);
-    e.L(loop);
-    e.cmp(e.w1, e.w17);
-    e.b(Xbyak_aarch64::GE, done);
-    e.add(e.w2, e.w1, e.w6);
-    e.ldrb(e.w3, ptr(e.x0, e.x2));
-    e.strb(e.w3, ptr(e.x16, e.x1));
-    e.add(e.w1, e.w1, 1);
-    e.b(loop);
-    e.L(done);
+    e.and_(e.w2, e.w0, 0xF);
+    e.and_(e.x0, e.x0, ~0xFull);
+    e.add(e.x1, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH) + 16);
+    e.sub(e.x1, e.x1, e.x2);
+    EmitPartialVectorStore(e, e.x0, e.x1, e.w2);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_STVR, STVR_V128);
