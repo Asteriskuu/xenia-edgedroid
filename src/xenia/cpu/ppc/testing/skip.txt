@@ -13718,10 +13718,7 @@ vcmpbfp_650_GEN
 vcmpbfp_650_cr_GEN
 vexptefp_13_GEN
 vexptefp_17_GEN
-vlogefp_2_GEN
-vlogefp_3_GEN
 vlogefp_4_GEN
-vlogefp_5_GEN
 vlogefp_6_GEN
 vlogefp_7_GEN
 vlogefp_8_GEN
@@ -13732,16 +13729,10 @@ vlogefp_12_GEN
 vlogefp_13_GEN
 vlogefp_14_GEN
 vlogefp_15_GEN
-vlogefp_16_GEN
-vlogefp_17_GEN
 vlogefp_18_GEN
 vlogefp_19_GEN
 vlogefp_20_GEN
-vlogefp_21_GEN
-vlogefp_22_GEN
-vlogefp_23_GEN
 vlogefp_24_GEN
-vlogefp_25_GEN
 vmaddfp_29_GEN
 vmaddfp_44_GEN
 vmaddfp_48_GEN

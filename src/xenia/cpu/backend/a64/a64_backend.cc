@@ -886,6 +886,11 @@ void A64Backend::UninstallBreakpoint(Breakpoint* breakpoint) {
   breakpoint->backend_data().clear();
 }
 
+// The backend context is carved out of the allocation granule immediately
+// before the guest context, so it has to stay inside one page.
+static_assert(sizeof(A64BackendContext) < 4096,
+              "A64BackendContext must fit in the granule before the context");
+
 void A64Backend::InitializeBackendContext(void* ctx) {
   auto* a64_ctx = BackendContextForGuestContext(ctx);
   std::memset(a64_ctx, 0, sizeof(A64BackendContext));
@@ -895,6 +900,45 @@ void A64Backend::InitializeBackendContext(void* ctx) {
   a64_ctx->fpcr_vmx = DEFAULT_VMX_FPCR;
   a64_ctx->flags = (1U << kA64BackendNJMOn);  // NJM on by default
   a64_ctx->guest_tick_count = Clock::GetGuestTickCountPointer();
+
+  auto set_est = [&](int index, float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    for (int lane = 0; lane < 4; lane++) {
+      a64_ctx->est_consts[index][lane] = bits;
+    }
+  };
+  auto set_est_bits = [&](int index, uint32_t bits) {
+    for (int lane = 0; lane < 4; lane++) {
+      a64_ctx->est_consts[index][lane] = bits;
+    }
+  };
+  // 2^f on [0,1), max relative error 7.7e-08.
+  set_est(kEstExp2Poly + 0, 0.9999999266823865f);
+  set_est(kEstExp2Poly + 1, 0.6931530239113992f);
+  set_est(kEstExp2Poly + 2, 0.24015381838022493f);
+  set_est(kEstExp2Poly + 3, 0.055826172900559086f);
+  set_est(kEstExp2Poly + 4, 0.008989127362479102f);
+  set_est(kEstExp2Poly + 5, 0.0018777841277241077f);
+  // log2(1+u) on [0,1], max absolute error 1.85e-06.
+  set_est(kEstLog2Poly + 0, 1.8456866772102942e-06f);
+  set_est(kEstLog2Poly + 1, 1.4424953159391898f);
+  set_est(kEstLog2Poly + 2, -0.7177910762015521f);
+  set_est(kEstLog2Poly + 3, 0.4565216600899004f);
+  set_est(kEstLog2Poly + 4, -0.2765407398023532f);
+  set_est(kEstLog2Poly + 5, 0.12100223739860312f);
+  set_est(kEstLog2Poly + 6, -0.025691088797142478f);
+  set_est(kEstScale, 2048.0f);
+  set_est(kEstUnscale, 1.0f / 2048.0f);
+  set_est(kEstExp2Max, 128.0f);
+  set_est(kEstExp2Min, -126.0f);
+  set_est_bits(kEstOne, 0x3F800000u);
+  set_est_bits(kEstInt127, 127u);
+  set_est_bits(kEstPosInf, 0x7F800000u);
+  set_est_bits(kEstNegInf, 0xFF800000u);
+  set_est_bits(kEstQNaN, 0x7FC00000u);
+  set_est_bits(kEstMantissaMask, 0x007FFFFFu);
+  set_est_bits(kEstQuietBit, 0x00400000u);
 
   // Allocate stackpoints for longjmp detection.
   if (cvars::a64_enable_host_guest_stack_synchronization) {

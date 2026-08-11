@@ -75,7 +75,28 @@ enum : uint32_t {
 };
 
 // Located prior to the context register (x20) in memory.
+// vexptefp/vlogefp estimate constants, splatted across all four lanes. a64 has
+// no memory operands and only v0-v3 are scratch, so these live in the backend
+// context and load with a single ldr q rather than being materialized.
+enum A64EstConst {
+  kEstExp2Poly = 0,                 // 6 entries, 2^f minimax on [0,1)
+  kEstLog2Poly = kEstExp2Poly + 6,  // 7 entries, log2(1+u) minimax on [0,1]
+  kEstScale = kEstLog2Poly + 7,     // 2048.0f
+  kEstUnscale,                      // 1.0f / 2048.0f
+  kEstExp2Max,                      // 128.0f
+  kEstExp2Min,                      // -126.0f
+  kEstOne,                          // 0x3F800000
+  kEstInt127,                       // 127
+  kEstPosInf,                       // 0x7F800000
+  kEstNegInf,                       // 0xFF800000
+  kEstQNaN,                         // 0x7FC00000
+  kEstMantissaMask,                 // 0x007FFFFF
+  kEstQuietBit,                     // 0x00400000
+  kEstConstCount,
+};
+
 struct A64BackendContext {
+  alignas(16) uint32_t est_consts[kEstConstCount][4];
   // Scratch vectors for helper routines.
   // Using uint8_t[16] instead of NEON intrinsic types to avoid including
   // arm_neon.h in the header.

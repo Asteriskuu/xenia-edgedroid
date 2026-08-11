@@ -1316,6 +1316,29 @@ static constinit const vec128_t xmm_consts[] = {
     v128_setr_bytes(13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3, 0x80),
     // XMMVSRMask
     vec128b(1),
+    // XMMExp2Poly, 2^f on [0,1), max relative error 7.7e-08
+    vec128f(0.9999999266823865f), vec128f(0.6931530239113992f),
+    vec128f(0.24015381838022493f), vec128f(0.055826172900559086f),
+    vec128f(0.008989127362479102f), vec128f(0.0018777841277241077f),
+    // XMMLog2Poly, log2(1+u) on [0,1], max absolute error 1.85e-06
+    vec128f(1.8456866772102942e-06f), vec128f(1.4424953159391898f),
+    vec128f(-0.7177910762015521f), vec128f(0.4565216600899004f),
+    vec128f(-0.2765407398023532f), vec128f(0.12100223739860312f),
+    vec128f(-0.025691088797142478f),
+    // XMMEstScale
+    vec128f(2048.0f),
+    // XMMEstUnscale
+    vec128f(1.0f / 2048.0f),
+    // XMMExp2Max
+    vec128f(128.0f),
+    // XMMExp2Min
+    vec128f(-126.0f),
+    // XMMQuietBit
+    vec128i(0x00400000u),
+    // XMMFloatNegInf
+    vec128i(0xFF800000u),
+    // XMMMantissaMask
+    vec128i(0x007FFFFFu),
     // XMMVRsqrteTableStart
     v128_setr_words(0x568B4FD, 0x4F3AF97, 0x48DAAA5, 0x435A618),
     v128_setr_words(0x3E7A1E4, 0x3A29DFE, 0x3659A5C, 0x32E96F8),

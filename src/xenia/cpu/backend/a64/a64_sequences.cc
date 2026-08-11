@@ -4293,30 +4293,48 @@ struct MUL_SUB_V128
 EMITTER_OPCODE_TABLE(OPCODE_MUL_SUB, MUL_SUB_F64, MUL_SUB_V128);
 
 // ============================================================================
-// POW2 / LOG2 C helper functions (called via CallNativeSafe)
-// ============================================================================
-
-// POW2 (vexptefp): 2^x for each of 4 float lanes.
-// Args: x0=PPCContext* (unused), x1=pointer to vec128_t (in-place).
-static void EmulatePow2(void* /*ctx*/, void* vdata) {
-  auto* data = reinterpret_cast<vec128_t*>(vdata);
-  for (int i = 0; i < 4; i++) {
-    data->f32[i] = std::exp2(data->f32[i]);
-  }
-}
-
-// LOG2 (vlogefp): log2(x) for each of 4 float lanes.
-// Args: x0=PPCContext* (unused), x1=pointer to vec128_t (in-place).
-static void EmulateLog2(void* /*ctx*/, void* vdata) {
-  auto* data = reinterpret_cast<vec128_t*>(vdata);
-  for (int i = 0; i < 4; i++) {
-    data->f32[i] = std::log2(data->f32[i]);
-  }
-}
-
-// ============================================================================
 // OPCODE_POW2
 // ============================================================================
+static void LoadEstConst(A64Emitter& e, int vreg_idx, int const_idx) {
+  e.ldr(QReg(vreg_idx),
+        ptr(e.GetBackendCtxReg(),
+            static_cast<int32_t>(offsetof(A64BackendContext, est_consts) +
+                                 const_idx * 16)));
+}
+
+// Horner in v2/v3 with the variable in v1, alternating so each fmla has its
+// accumulator in the other register. Returns the register holding the result.
+static int EmitEstPoly(A64Emitter& e, int first, int count) {
+  int acc = 2;
+  LoadEstConst(e, acc, first + count - 1);
+  for (int k = count - 2; k >= 0; k--) {
+    const int next = acc ^ 1;  // 2 <-> 3
+    LoadEstConst(e, next, first + k);
+    e.fmla(VReg(next).s4, VReg(acc).s4, VReg(1).s4);
+    acc = next;
+  }
+  return acc;
+}
+
+// Snap onto the guest's 2^-11 estimate grid. Not cosmetic: it is what keeps
+// 2^0 == 1.0 and log2(2^n) == n exact once the math is a polynomial.
+static void EmitEstGridSnap(A64Emitter& e, int r, int tmp) {
+  LoadEstConst(e, tmp, kEstScale);
+  e.fmul(VReg(r).s4, VReg(r).s4, VReg(tmp).s4);
+  e.frintn(VReg(r).s4, VReg(r).s4);
+  LoadEstConst(e, tmp, kEstUnscale);
+  e.fmul(VReg(r).s4, VReg(r).s4, VReg(tmp).s4);
+}
+
+// NaN in, quieted NaN out. Consumes the source and writes the destination.
+static void EmitEstQuietNan(A64Emitter& e, int r, int s, int d) {
+  e.fcmeq(VReg(0).s4, VReg(s).s4, VReg(s).s4);  // all-ones where NOT NaN
+  LoadEstConst(e, 1, kEstQuietBit);
+  e.orr(VReg(1).b16, VReg(s).b16, VReg(1).b16);
+  e.bif(VReg(r).b16, VReg(1).b16, VReg(0).b16);
+  e.mov(VReg(d).b16, VReg(r).b16);
+}
+
 struct POW2_F32 : Sequence<POW2_F32, I<OPCODE_POW2, F32Op, F32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     assert_always("POW2_F32 should not be emitted");
@@ -4329,16 +4347,39 @@ struct POW2_F64 : Sequence<POW2_F64, I<OPCODE_POW2, F64Op, F64Op>> {
 };
 struct POW2_V128 : Sequence<POW2_V128, I<OPCODE_POW2, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // No hardware FP emitted — the C++ helper does all math.
-    // GuestToHostThunk restores FPCR after the native call.
-    int s = SrcVReg(e, i.src1, 0);
-    int d = i.dest.reg().getIdx();
-    e.str(QReg(s),
-          ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
-    e.add(e.x1, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
-    e.CallNativeSafe(reinterpret_cast<void*>(EmulatePow2));
-    e.ldr(QReg(d),
-          ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
+    EmitWithVmxFpcr(e, [&] {
+      const int d = i.dest.reg().getIdx();
+      int s = SrcVReg(e, i.src1, 0);
+      if (s < 4) {
+        // A constant landed in the scratch bank, which the math below needs.
+        e.mov(VReg(d).b16, VReg(s).b16);
+        s = d;
+      }
+      // 2^x = 2^floor(x) * 2^frac(x). Splitting on floor rather than nearest
+      // puts the second factor in [1,2), so it lands on the grid directly.
+      e.frintm(VReg(0).s4, VReg(s).s4);
+      e.fsub(VReg(1).s4, VReg(s).s4, VReg(0).s4);
+      e.fcvtzs(VReg(0).s4, VReg(0).s4);
+      e.shl(VReg(0).s4, VReg(0).s4, 23);
+      LoadEstConst(e, 2, kEstOne);
+      e.add(VReg(0).s4, VReg(0).s4, VReg(2).s4);  // (127 + n) << 23
+      const int r = EmitEstPoly(e, kEstExp2Poly, 6);
+      EmitEstGridSnap(e, r, r ^ 1);
+      e.fmul(VReg(r).s4, VReg(r).s4, VReg(0).s4);
+
+      // Out-of-range and non-finite inputs never reached the guest's
+      // estimator. Denormals need no case of their own: floor is 0 either way,
+      // so the grid snap returns exactly 1.0.
+      LoadEstConst(e, 0, kEstExp2Max);
+      e.fcmge(VReg(0).s4, VReg(s).s4, VReg(0).s4);
+      LoadEstConst(e, 1, kEstPosInf);
+      e.bit(VReg(r).b16, VReg(1).b16, VReg(0).b16);
+      LoadEstConst(e, 0, kEstExp2Min);
+      e.fcmgt(VReg(0).s4, VReg(0).s4, VReg(s).s4);
+      e.movi(VReg(1).s4, 0);
+      e.bit(VReg(r).b16, VReg(1).b16, VReg(0).b16);
+      EmitEstQuietNan(e, r, s, d);
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_POW2, POW2_F32, POW2_F64, POW2_V128);
@@ -4358,16 +4399,42 @@ struct LOG2_F64 : Sequence<LOG2_F64, I<OPCODE_LOG2, F64Op, F64Op>> {
 };
 struct LOG2_V128 : Sequence<LOG2_V128, I<OPCODE_LOG2, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // No hardware FP emitted — the C++ helper does all math.
-    // GuestToHostThunk restores FPCR after the native call.
-    int s = SrcVReg(e, i.src1, 0);
-    int d = i.dest.reg().getIdx();
-    e.str(QReg(s),
-          ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
-    e.add(e.x1, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
-    e.CallNativeSafe(reinterpret_cast<void*>(EmulateLog2));
-    e.ldr(QReg(d),
-          ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
+    EmitWithVmxFpcr(e, [&] {
+      const int d = i.dest.reg().getIdx();
+      int s = SrcVReg(e, i.src1, 0);
+      if (s < 4) {
+        e.mov(VReg(d).b16, VReg(s).b16);
+        s = d;
+      }
+      // log2(x) = exponent(x) + log2(mantissa(x)). Negatives are masked off
+      // below, so the sign bit can ride along in the exponent shift.
+      e.ushr(VReg(0).s4, VReg(s).s4, 23);
+      LoadEstConst(e, 2, kEstInt127);
+      e.sub(VReg(0).s4, VReg(0).s4, VReg(2).s4);
+      e.scvtf(VReg(0).s4, VReg(0).s4);
+      LoadEstConst(e, 1, kEstMantissaMask);
+      e.and_(VReg(1).b16, VReg(s).b16, VReg(1).b16);
+      LoadEstConst(e, 2, kEstOne);
+      e.orr(VReg(1).b16, VReg(1).b16, VReg(2).b16);  // mantissa in [1,2)
+      e.fsub(VReg(1).s4, VReg(1).s4, VReg(2).s4);
+      const int r = EmitEstPoly(e, kEstLog2Poly, 7);
+      e.fadd(VReg(r).s4, VReg(r).s4, VReg(0).s4);
+      EmitEstGridSnap(e, r, r ^ 1);
+
+      LoadEstConst(e, 1, kEstPosInf);
+      e.fcmeq(VReg(0).s4, VReg(s).s4, VReg(1).s4);
+      e.bit(VReg(r).b16, VReg(1).b16, VReg(0).b16);
+      e.sshr(VReg(0).s4, VReg(s).s4, 31);
+      LoadEstConst(e, 1, kEstQNaN);
+      e.bit(VReg(r).b16, VReg(1).b16, VReg(0).b16);
+      // Zero and denormal both reach the estimator as zero, so both give -inf.
+      LoadEstConst(e, 0, kEstPosInf);
+      e.and_(VReg(0).b16, VReg(s).b16, VReg(0).b16);
+      e.cmeq(VReg(0).s4, VReg(0).s4, 0);
+      LoadEstConst(e, 1, kEstNegInf);
+      e.bit(VReg(r).b16, VReg(1).b16, VReg(0).b16);
+      EmitEstQuietNan(e, r, s, d);
+    });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_LOG2, LOG2_F32, LOG2_F64, LOG2_V128);

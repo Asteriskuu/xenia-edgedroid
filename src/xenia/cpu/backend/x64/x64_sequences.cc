@@ -2237,28 +2237,54 @@ struct POW2_F64 : Sequence<POW2_F64, I<OPCODE_POW2, F64Op, F64Op>> {
     assert_impossible_sequence(POW2_F64);
   }
 };
-struct POW2_V128 : Sequence<POW2_V128, I<OPCODE_POW2, V128Op, V128Op>> {
-  static __m128 EmulatePow2(void*, __m128 src) {
-    alignas(16) float values[4];
-    _mm_store_ps(values, src);
-    for (size_t i = 0; i < 4; ++i) {
-      values[i] = std::exp2(values[i]);
+// Evaluate a minimax polynomial in xmm2 by Horner's rule, with the variable in
+// xmm1 and `count` coefficients starting at `first` in descending order.
+static void EmitEstPoly(X64Emitter& e, XmmConst first, int count) {
+  e.vmovaps(e.xmm2, e.GetXmmConstPtr(XmmConst(first + count - 1)));
+  for (int k = count - 2; k >= 0; k--) {
+    auto coeff = e.GetXmmConstPtr(XmmConst(first + k));
+    if (e.IsFeatureEnabled(kX64EmitFMA)) {
+      e.vfmadd213ps(e.xmm2, e.xmm1, coeff);
+    } else {
+      e.vmulps(e.xmm2, e.xmm2, e.xmm1);
+      e.vaddps(e.xmm2, e.xmm2, coeff);
     }
-    return _mm_load_ps(values);
   }
+}
+
+// Snap xmm2 onto the guest's 2^-11 estimate grid. This is not cosmetic: it is
+// what keeps 2^0 == 1.0 and log2(2^n) == n exact once the math is a polynomial.
+static void EmitEstGridSnap(X64Emitter& e) {
+  e.vmulps(e.xmm2, e.xmm2, e.GetXmmConstPtr(XMMEstScale));
+  e.vroundps(e.xmm2, e.xmm2, 0);  // round to nearest even, ignoring MXCSR.RC
+  e.vmulps(e.xmm2, e.xmm2, e.GetXmmConstPtr(XMMEstUnscale));
+}
+
+struct POW2_V128 : Sequence<POW2_V128, I<OPCODE_POW2, V128Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.ChangeMxcsrMode(MXCSRMode::Vmx);
     Xmm src1 = GetInputRegOrConstant(e, i.src1, e.xmm3);
 
-#if XE_PLATFORM_WIN32
-    // Windows x64 ABI: __m128 is passed by implicit pointer
-    e.lea(e.GetNativeParam(0), e.StashXmm(0, src1));
-#else
-    // Linux/Mac System V ABI: __m128 passed in xmm0, return in xmm0
-    e.vmovaps(e.xmm0, src1);
-#endif
-    e.CallNativeSafe(reinterpret_cast<void*>(EmulatePow2));
-    e.vmovaps(i.dest, e.xmm0);
+    // 2^x = 2^floor(x) * 2^frac(x). Splitting on floor rather than nearest
+    // puts the second factor in [1,2), so it lands on the grid directly.
+    e.vroundps(e.xmm0, src1, 1);     // floor(x)
+    e.vsubps(e.xmm1, src1, e.xmm0);  // frac(x)
+    EmitEstPoly(e, XMMExp2Poly, 6);
+    EmitEstGridSnap(e);
+    e.vcvtps2dq(e.xmm0, e.xmm0);
+    e.vpslld(e.xmm0, e.xmm0, 23);
+    e.vpaddd(e.xmm0, e.xmm0, e.GetXmmConstPtr(XMMOne));  // (127 + n) << 23
+    e.vmulps(e.xmm2, e.xmm2, e.xmm0);
+
+    // Out-of-range and non-finite inputs never reached the guest's estimator.
+    // Denormals need no case of their own: DAZ flushes them, so frac is 0.
+    e.vcmpgeps(e.xmm1, src1, e.GetXmmConstPtr(XMMExp2Max));
+    e.vblendvps(e.xmm2, e.xmm2, e.GetXmmConstPtr(XMMFloatInf), e.xmm1);
+    e.vcmpltps(e.xmm1, src1, e.GetXmmConstPtr(XMMExp2Min));
+    e.vblendvps(e.xmm2, e.xmm2, e.GetXmmConstPtr(XMMZero), e.xmm1);
+    e.vcmpunordps(e.xmm1, src1, src1);
+    e.vorps(e.xmm0, src1, e.GetXmmConstPtr(XMMQuietBit));
+    e.vblendvps(i.dest, e.xmm2, e.xmm0, e.xmm1);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_POW2, POW2_F32, POW2_F64, POW2_V128);
@@ -2266,9 +2292,6 @@ EMITTER_OPCODE_TABLE(OPCODE_POW2, POW2_F32, POW2_F64, POW2_V128);
 // ============================================================================
 // OPCODE_LOG2
 // ============================================================================
-// TODO(benvanik): use approx here:
-//     https://jrfonseca.blogspot.com/2008/09/fast-sse2-pow-tables-or-polynomials.html
-// TODO(benvanik): this emulated fn destroys all xmm registers! don't do it!
 struct LOG2_F32 : Sequence<LOG2_F32, I<OPCODE_LOG2, F32Op, F32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     assert_impossible_sequence(LOG2_F32);
@@ -2280,27 +2303,33 @@ struct LOG2_F64 : Sequence<LOG2_F64, I<OPCODE_LOG2, F64Op, F64Op>> {
   }
 };
 struct LOG2_V128 : Sequence<LOG2_V128, I<OPCODE_LOG2, V128Op, V128Op>> {
-  static __m128 EmulateLog2(void*, __m128 src) {
-    alignas(16) float values[4];
-    _mm_store_ps(values, src);
-    for (size_t i = 0; i < 4; ++i) {
-      values[i] = std::log2(values[i]);
-    }
-    return _mm_load_ps(values);
-  }
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.ChangeMxcsrMode(MXCSRMode::Vmx);
     Xmm src1 = GetInputRegOrConstant(e, i.src1, e.xmm3);
 
-#if XE_PLATFORM_WIN32
-    // Windows x64 ABI: __m128 is passed by implicit pointer
-    e.lea(e.GetNativeParam(0), e.StashXmm(0, src1));
-#else
-    // Linux/Mac System V ABI: __m128 passed in xmm0, return in xmm0
-    e.vmovaps(e.xmm0, src1);
-#endif
-    e.CallNativeSafe(reinterpret_cast<void*>(EmulateLog2));
-    e.vmovaps(i.dest, e.xmm0);
+    // log2(x) = exponent(x) + log2(mantissa(x)). Negatives are masked off
+    // below, so the sign bit can ride along in the exponent shift.
+    e.vpsrld(e.xmm0, src1, 23);
+    e.vpsubd(e.xmm0, e.xmm0, e.GetXmmConstPtr(XMMInt127));
+    e.vcvtdq2ps(e.xmm0, e.xmm0);
+    e.vandps(e.xmm1, src1, e.GetXmmConstPtr(XMMMantissaMask));
+    e.vorps(e.xmm1, e.xmm1, e.GetXmmConstPtr(XMMOne));  // mantissa in [1,2)
+    e.vsubps(e.xmm1, e.xmm1, e.GetXmmConstPtr(XMMOne));
+    EmitEstPoly(e, XMMLog2Poly, 7);
+    e.vaddps(e.xmm2, e.xmm2, e.xmm0);
+    EmitEstGridSnap(e);
+
+    // Zero and denormal both reach the estimator as zero, so both give -inf.
+    e.vcmpeqps(e.xmm1, src1, e.GetXmmConstPtr(XMMFloatInf));
+    e.vblendvps(e.xmm2, e.xmm2, e.GetXmmConstPtr(XMMFloatInf), e.xmm1);
+    e.vpsrad(e.xmm1, src1, 31);
+    e.vblendvps(e.xmm2, e.xmm2, e.GetXmmConstPtr(XMMQNaN), e.xmm1);
+    e.vandps(e.xmm1, src1, e.GetXmmConstPtr(XMMFloatInf));
+    e.vpcmpeqd(e.xmm1, e.xmm1, e.GetXmmConstPtr(XMMZero));
+    e.vblendvps(e.xmm2, e.xmm2, e.GetXmmConstPtr(XMMFloatNegInf), e.xmm1);
+    e.vcmpunordps(e.xmm1, src1, src1);
+    e.vorps(e.xmm0, src1, e.GetXmmConstPtr(XMMQuietBit));
+    e.vblendvps(i.dest, e.xmm2, e.xmm0, e.xmm1);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_LOG2, LOG2_F32, LOG2_F64, LOG2_V128);
