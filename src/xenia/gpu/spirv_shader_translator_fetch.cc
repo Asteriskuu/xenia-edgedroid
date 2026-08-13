@@ -675,6 +675,11 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
 
     uint32_t fetch_constant_index = instr.operands[1].storage_index;
     uint32_t fetch_constant_word_0_index = 6 * fetch_constant_index;
+    xenos::FetchOpDimension coordinate_dimension =
+        instr.dimension == xenos::FetchOpDimension::k1D &&
+                instr.operands[0].component_count > 1
+            ? xenos::FetchOpDimension::k2D
+            : instr.dimension;
 
     spv::Id sampler = spv::NoResult;
     spv::Id image_2d_array_or_cube_unsigned = spv::NoResult;
@@ -786,7 +791,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // `mul` gives a value that would be floored as expected, but the
       // left/upper pixel is still sampled instead.
       constexpr float kRoundingOffset = 1.5f / 1024.0f;
-      switch (instr.dimension) {
+      switch (coordinate_dimension) {
         case xenos::FetchOpDimension::k1D:
           offset_values[0] = instr.attributes.offset_x + kRoundingOffset;
           if (instr.opcode == ucode::FetchOpcode::kGetTextureWeights) {
@@ -863,7 +868,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // texture filled with LOD indices is used, coordinates will need to be
       // normalized as normally).
       if (!instr.attributes.unnormalized_coordinates) {
-        switch (instr.dimension) {
+        switch (coordinate_dimension) {
           case xenos::FetchOpDimension::k1D:
             // Always need size for 1D textures to support wide 1D textures.
             size_needed_components |= 0b0001;
@@ -881,7 +886,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // Size needed for normalization (or, for stacked texture layers,
       // denormalization) and for offsets.
       size_needed_components |= offsets_not_zero;
-      switch (instr.dimension) {
+      switch (coordinate_dimension) {
         case xenos::FetchOpDimension::k1D:
           // Always need size for 1D textures to handle wide 1D textures
           // (> 8192 wide) which are mapped to 2D grids. The shader needs
@@ -960,7 +965,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                                    spv::StorageClassUniform,
                                    uniform_fetch_constants_, id_vector_temp_),
                                spv::NoPrecision);
-      switch (instr.dimension) {
+      switch (coordinate_dimension) {
         case xenos::FetchOpDimension::k1D: {
           if (size_needed_components & 0b1) {
             size[0] = builder_->createTriOp(
@@ -1166,8 +1171,8 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
     uint32_t coordinates_needed_components =
         instr.opcode == ucode::FetchOpcode::kGetTextureWeights
             ? used_result_nonzero_components
-            : ((UINT32_C(1)
-                << xenos::GetFetchOpDimensionComponentCount(instr.dimension)) -
+            : ((UINT32_C(1) << xenos::GetFetchOpDimensionComponentCount(
+                    coordinate_dimension)) -
                1);
     assert_not_zero(coordinates_needed_components);
     spv::Id coordinates_operand =
@@ -1235,7 +1240,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
       // is resolution-scaled, size has already been scaled up to host texels
       // above so dividing the offset by it yields a 1-host-texel step.
       for (uint32_t i = 0;
-           i <= uint32_t(instr.dimension != xenos::FetchOpDimension::k1D);
+           i <= uint32_t(coordinate_dimension != xenos::FetchOpDimension::k1D);
            ++i) {
         spv::Id& coordinate_ref = coordinates[i];
         spv::Id component_offset =
@@ -1813,7 +1818,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
               type_float_, ext_inst_glsl_std_450_, GLSLstd450Exp2,
               builder_->createNoContractionBinOp(spv::OpFAdd, type_float_, lod,
                                                  grad_exp_adjust_v));
-          switch (instr.dimension) {
+          switch (coordinate_dimension) {
             case xenos::FetchOpDimension::k1D: {
               spv::Id gradient_h_x, gradient_v_x;
               spv::Id gradient_h_y, gradient_v_y;
