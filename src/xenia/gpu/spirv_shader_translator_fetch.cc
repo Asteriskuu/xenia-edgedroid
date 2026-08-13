@@ -894,7 +894,10 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           size_needed_components |= 0b0001;
           break;
         case xenos::FetchOpDimension::k2D:
-          if (instr.attributes.unnormalized_coordinates) {
+          // A promoted tfetch1D always needs the size - the interpretation is
+          // selected at runtime, and the width feeds the wide 1D remap.
+          if (instr.dimension == xenos::FetchOpDimension::k1D ||
+              instr.attributes.unnormalized_coordinates) {
             size_needed_components |= 0b0011;
           }
           break;
@@ -992,6 +995,47 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
             size[1] = builder_->createTriOp(
                 spv::OpBitFieldUExtract, type_uint_, fetch_constant_word_2,
                 width_height_bit_count, width_height_bit_count);
+          }
+          if (instr.dimension == xenos::FetchOpDimension::k1D) {
+            // tfetch1D promoted to 2D because of a 2-component source swizzle.
+            // The promotion is static (swizzle-only), so the fetch constant
+            // may still be an actual 1D texture - select the size
+            // interpretation by the runtime dimension (word 5, bits 9-10), and
+            // keep the 24-bit width for the wide 1D remap below, which
+            // performs its own runtime dimension check.
+            assert_true((size_needed_components & 0b11) == 0b11);
+            id_vector_temp_.clear();
+            id_vector_temp_.push_back(const_int_0_);
+            id_vector_temp_.push_back(builder_->makeIntConstant(
+                int((fetch_constant_word_0_index + 5) >> 2)));
+            id_vector_temp_.push_back(builder_->makeIntConstant(
+                int((fetch_constant_word_0_index + 5) & 3)));
+            spv::Id fetch_constant_word_5_promoted = builder_->createLoad(
+                builder_->createAccessChain(spv::StorageClassUniform,
+                                            uniform_fetch_constants_,
+                                            id_vector_temp_),
+                spv::NoPrecision);
+            spv::Id constant_is_1d = builder_->createBinOp(
+                spv::OpIEqual, type_bool_,
+                builder_->createTriOp(spv::OpBitFieldUExtract, type_uint_,
+                                      fetch_constant_word_5_promoted,
+                                      builder_->makeUintConstant(9),
+                                      builder_->makeUintConstant(2)),
+                builder_->makeUintConstant(
+                    static_cast<unsigned int>(xenos::DataDimension::k1D)));
+            spv::Id width_1d_minus_1 = builder_->createTriOp(
+                spv::OpBitFieldUExtract, type_uint_, fetch_constant_word_2,
+                const_uint_0_,
+                builder_->makeUintConstant(xenos::kTexture1DMaxWidthLog2));
+            // Height 1 (stored as 0) if actually 1D - the host texture is a
+            // single row unless wide, and the wide remap overwrites Y.
+            size[0] =
+                builder_->createTriOp(spv::OpSelect, type_uint_, constant_is_1d,
+                                      width_1d_minus_1, size[0]);
+            size[1] =
+                builder_->createTriOp(spv::OpSelect, type_uint_, constant_is_1d,
+                                      const_uint_0_, size[1]);
+            size_1d_width_minus_1_uint = width_1d_minus_1;
           }
           assert_zero(size_needed_components & 0b100);
         } break;
@@ -1332,12 +1376,17 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           spv::Id row_width_float = builder_->makeFloatConstant(
               float(xenos::kTexture2DCubeMaxWidthHeight));
 
-          // num_rows = ceil(original_width / row_width)
-          spv::Id num_rows = builder_->createUnaryBuiltinCall(
-              type_float_, ext_inst_glsl_std_450_, GLSLstd450Ceil,
-              builder_->createNoContractionBinOp(spv::OpFDiv, type_float_,
-                                                 original_width_float,
-                                                 row_width_float));
+          // num_rows = min(ceil(original_width / row_width), row cap)
+          // The cap matches the texture cache's materialized row cap for
+          // index-space widths far larger than the real data.
+          spv::Id num_rows = builder_->createBinBuiltinCall(
+              type_float_, ext_inst_glsl_std_450_, GLSLstd450NMin,
+              builder_->createUnaryBuiltinCall(
+                  type_float_, ext_inst_glsl_std_450_, GLSLstd450Ceil,
+                  builder_->createNoContractionBinOp(spv::OpFDiv, type_float_,
+                                                     original_width_float,
+                                                     row_width_float)),
+              builder_->makeFloatConstant(float(xenos::kTexture1DWideMaxRows)));
 
           // linear_x = coord * original_width (denormalize to texel space)
           spv::Id linear_x = builder_->createNoContractionBinOp(
@@ -1359,9 +1408,17 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
           coord_x_wide = builder_->createNoContractionBinOp(
               spv::OpFDiv, type_float_, x_in_row, row_width_float);
 
-          // coord_2d.y = row_index / num_rows (normalized)
+          // coord_2d.y = (row_index + 0.5) / num_rows (normalized) - sample at
+          // the center of the row, not its edge. At the edge, linear filtering
+          // would blend 50/50 with the previous row (texels 8192 apart), and
+          // even point sampling could pick the previous row when
+          // (row_index / num_rows) * num_rows rounds to just below row_index.
           coord_y_wide = builder_->createNoContractionBinOp(
-              spv::OpFDiv, type_float_, row_index, num_rows);
+              spv::OpFDiv, type_float_,
+              builder_->createNoContractionBinOp(
+                  spv::OpFAdd, type_float_, row_index,
+                  builder_->makeFloatConstant(0.5f)),
+              num_rows);
         }
         if_wide_1d.makeEndIf();
         coordinates[0] =
@@ -1787,6 +1844,27 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
                             !instr.attributes.use_register_gradients &&
                             instr.dimension == xenos::FetchOpDimension::kCube;
 
+        if (use_lod_bias) {
+          // The per-axis gradient exponent biases can't be applied to the
+          // host's implicit gradients, so we approximate them by adding the
+          // greater of the two to the LOD bias. Scaling both gradients by 2^n
+          // shifts the computed LOD by n, so this is exact whenever both biases
+          // are equal, and biases a blurrier mip rather than a shimmering one.
+          spv::Id grad_exp_adjust_max = builder_->createBinBuiltinCall(
+              type_int_, ext_inst_glsl_std_450_, GLSLstd450SMax,
+              builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
+                                    fetch_constant_word_4_signed,
+                                    builder_->makeUintConstant(22),
+                                    builder_->makeUintConstant(5)),
+              builder_->createTriOp(spv::OpBitFieldSExtract, type_int_,
+                                    fetch_constant_word_4_signed,
+                                    builder_->makeUintConstant(27),
+                                    builder_->makeUintConstant(5)));
+          lod = builder_->createNoContractionBinOp(
+              spv::OpFAdd, type_float_, lod,
+              builder_->createUnaryOp(spv::OpConvertSToF, type_float_,
+                                      grad_exp_adjust_max));
+        }
         // Calculate the gradients for sampling the texture if needed.
         // 2D vectors for k1D (because 1D images are emulated as 2D arrays),
         // k2D.

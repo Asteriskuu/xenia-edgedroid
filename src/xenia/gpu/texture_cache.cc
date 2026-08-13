@@ -1049,6 +1049,7 @@ void TextureCache::BindingInfoFromFetchConstant(
     // No texture data at all.
     return;
   }
+  uint32_t pitch = fetch.pitch;
   if (fetch.dimension == xenos::DataDimension::k1D) {
     bool is_invalid_1d = false;
     // Handle wide 1D textures (> 8192 wide) by mapping them to a 2D grid.
@@ -1058,6 +1059,11 @@ void TextureCache::BindingInfoFromFetchConstant(
       uint32_t total_width = width_minus_1 + 1;
       uint32_t row_width = xenos::kTexture2DCubeMaxWidthHeight;
       uint32_t num_rows = (total_width + row_width - 1) / row_width;
+      // Cap the materialized rows - huge widths are index-space declarations
+      // with little real data behind them, and the full extent may run past
+      // the 512 MB physical space (making the load fail entirely). Kept in
+      // sync with the shader-side row cap.
+      num_rows = std::min(num_rows, xenos::kTexture1DWideMaxRows);
       width_minus_1 = row_width - 1;
       height_minus_1 = num_rows - 1;
       // Disable mipmaps for wide 1D textures. The shader's coordinate remapping
@@ -1066,6 +1072,9 @@ void TextureCache::BindingInfoFromFetchConstant(
       // when num_rows >> N becomes 1 while the shader still expects multiple
       // rows. Mipmaps are rarely used with 1D lookup textures anyway.
       mip_max_level = 0;
+      // The guest pitch is meaningless for a texture the guest believes is 1D
+      // (the 9 bit field couldn't even express the line width).
+      pitch = xenos::kTexture2DCubeMaxWidthHeight >> 5;
     }
     assert_false(fetch.tiled);
     if (fetch.tiled) {
@@ -1096,7 +1105,7 @@ void TextureCache::BindingInfoFromFetchConstant(
   key_out.width_minus_1 = width_minus_1;
   key_out.height_minus_1 = height_minus_1;
   key_out.depth_or_array_size_minus_1 = depth_or_array_size_minus_1;
-  key_out.pitch = fetch.pitch;
+  key_out.pitch = pitch;
   key_out.mip_max_level = mip_max_level;
   key_out.tiled = fetch.tiled;
   key_out.packed_mips = fetch.packed_mips;

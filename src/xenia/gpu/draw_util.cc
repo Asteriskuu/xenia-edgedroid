@@ -29,15 +29,6 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    depth_bias_shader_offset, false,
-    "Route decal host render target draws with polygon offset through shader "
-    "depth. This avoids Z-fighting in games that rely on tiny depth bias "
-    "values that host fixed function depth bias cannot reproduce reliably."
-    "This likely causes some minor performance penalty, but the cost should "
-    "be minimal if only a small portion of the scene is affected.",
-    "GPU");
-
-DEFINE_bool(
     resolve_check_number_format, true,
     "Require the destination number format to match before using fast color "
     "resolves.\n"
@@ -56,6 +47,15 @@ DEFINE_bool(
     "Compatible 8_8_8_8 destinations are written back as PWL gamma.\n"
     "Leave enabled for games that otherwise look overexposed after gamma "
     "MSAA resolves. Disable only if it causes a title-specific regression.",
+    "GPU");
+
+DEFINE_bool(
+    depth_bias_shader_offset, false,
+    "Route decal host render target draws with polygon offset through shader "
+    "depth. This avoids Z-fighting in games that rely on tiny depth bias "
+    "values that host fixed function depth bias cannot reproduce reliably."
+    "This likely causes some minor performance penalty, but the cost should "
+    "be minimal if only a small portion of the scene is affected.",
     "GPU");
 
 namespace xe {

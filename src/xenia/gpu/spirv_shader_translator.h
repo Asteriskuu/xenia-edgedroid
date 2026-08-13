@@ -42,7 +42,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // TODO(Triang3l): Change to 0xYYYYMMDD once it's out of the rapid
     // prototyping stage (easier to do small granular updates with an
     // incremental counter).
-    static constexpr uint32_t kVersion = 16;
+    static constexpr uint32_t kVersion = 19;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -535,7 +535,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
                                        bool round_to_nearest_even,
                                        bool remap_from_0_to_0_5,
                                        spv::Id ext_inst_glsl_std_450);
-  // Converts the 20e4 number in bits [f24_shift, f24_shift + 10) to a 32-bit
+  // Converts the 20e4 number in bits [f24_shift, f24_shift + 24) to a 32-bit
   // float.
   static spv::Id Depth20e4To32(SpirvBuilder& builder, spv::Id f24_uint_scalar,
                                uint32_t f24_shift, bool remap_to_0_to_0_5,
