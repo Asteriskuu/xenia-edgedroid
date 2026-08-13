@@ -209,6 +209,10 @@ class Emulator {
                      const std::string_view mount_path);
 
   enum class FileSignatureType {
+    XEX0,
+    XEXQ,
+    XEXH,
+    XEXP,
     XEX1,
     XEX2,
     ELF,
@@ -216,6 +220,7 @@ class Emulator {
     LIVE,
     PIRS,
     XISO,
+    XBE,
     ZAR,
     EXE,
     Unknown
