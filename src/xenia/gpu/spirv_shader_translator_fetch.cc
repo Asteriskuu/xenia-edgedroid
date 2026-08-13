@@ -89,11 +89,15 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
     // not a texture fetch) here instead of dropping draws with invalid vertex
     // fetch constants on the CPU when proper bound checks are added - vfetch
     // may be conditional, so fetch constants may also be used conditionally.
+    // Mask to physical, in dwords - the guest may use a mirror window.
     address = builder_->createUnaryOp(
         spv::OpBitcast, type_int_,
-        builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
-                              fetch_constant_word_0,
-                              builder_->makeUintConstant(2)));
+        builder_->createBinOp(
+            spv::OpBitwiseAnd, type_uint_,
+            builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+                                  fetch_constant_word_0,
+                                  builder_->makeUintConstant(2)),
+            builder_->makeUintConstant(0x1FFFFFFF >> 2)));
     // address is the base now. The exclusive end is base + size (size in words
     // in bits 2:25 of the second word). Store it for the subsequent
     // vfetch_mini, which reuses this fetch constant.

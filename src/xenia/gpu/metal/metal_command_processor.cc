@@ -2372,7 +2372,8 @@ bool MetalCommandProcessor::IssueDrawMsl(
                 vfetch_index, vfetch.dword_0, vfetch.dword_1);
             return false;
         }
-        uint32_t buffer_offset = vfetch.address << 2;
+        // Mask to physical like the shader - the guest may use a mirror window.
+        uint32_t buffer_offset = xenos::CpuToGpu(vfetch.address << 2);
         uint32_t buffer_length = vfetch.size << 2;
         if (buffer_offset > SharedMemory::kBufferSize ||
             SharedMemory::kBufferSize - buffer_offset < buffer_length) {

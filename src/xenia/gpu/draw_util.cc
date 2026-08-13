@@ -896,12 +896,15 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
     }
     uint32_t stream_size_bytes =
         stream.index_count * (format_info.bits_per_pixel >> 3);
+    // Mask to physical like the shader - the guest may use a mirror window.
+    uint32_t stream_base_address_dwords =
+        xenos::CpuToGpu(uint32_t(stream.base_address) << 2) >> 2;
     // Try to reduce the number of shared memory operations when writing
     // different elements into the same buffer through different exports
     // (happens in 4D5307E6).
     bool range_reused = false;
     for (MemExportRange& range : ranges_out) {
-      if (range.base_address_dwords == stream.base_address) {
+      if (range.base_address_dwords == stream_base_address_dwords) {
         range.size_bytes = std::max(range.size_bytes, stream_size_bytes);
         range_reused = true;
         break;
@@ -909,7 +912,7 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
     }
     // Add a new range if haven't expanded an existing one.
     if (!range_reused) {
-      ranges_out.emplace_back(uint32_t(stream.base_address), stream_size_bytes);
+      ranges_out.emplace_back(stream_base_address_dwords, stream_size_bytes);
     }
   }
 }
