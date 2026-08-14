@@ -217,8 +217,8 @@ uint32_t XamUserReadProfileSettingsEx(
   uint32_t needed_data_size = 0;
   for (uint32_t i = 0; i < setting_count; ++i) {
     needed_header_size += sizeof(X_USER_PROFILE_SETTING);
-    AttributeKey setting_key;
-    setting_key.value = static_cast<uint32_t>(setting_ids[i]);
+    const AttributeKey setting_key =
+        UserData::get_attribute_key(static_cast<uint32_t>(setting_ids[i]));
     switch (static_cast<X_USER_DATA_TYPE>(setting_key.type)) {
       case X_USER_DATA_TYPE::WSTRING:
       case X_USER_DATA_TYPE::BINARY:

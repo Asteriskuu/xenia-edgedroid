@@ -445,6 +445,19 @@ inline std::u16string read_u16string_and_swap(const char16_t* string_ptr) {
   return output_str;
 }
 
+// Variant for strings read out of a fixed size buffer, stops at max_chars
+inline std::u16string read_u16string_and_swap(const char16_t* string_ptr,
+                                              size_t max_chars) {
+  std::u16string_view input_str(string_ptr, max_chars);
+  input_str = input_str.substr(0, input_str.find(u'\0'));
+
+  std::u16string output_str = {};
+  output_str.resize(input_str.size() + 1);
+  copy_and_swap_truncating(output_str.data(), input_str, output_str.size());
+  output_str.pop_back();  // Remove nullptr added by copy_and_swap.
+  return output_str;
+}
+
 }  // namespace string_util
 }  // namespace xe
 

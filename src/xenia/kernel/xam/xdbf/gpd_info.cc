@@ -57,8 +57,18 @@ void GpdInfo::AddImage(uint32_t id, std::span<const uint8_t> image_data) {
   UpsertEntry(&new_entry);
 }
 
-X_XDBF_GPD_SETTING_HEADER* GpdInfo::GetSetting(uint32_t id) {
+Entry* GpdInfo::GetSettingEntry(uint32_t id) {
   Entry* entry = GetEntry(static_cast<uint16_t>(GpdSection::kSetting), id);
+
+  if (!entry || entry->data.size() < sizeof(X_XDBF_GPD_SETTING_HEADER)) {
+    return nullptr;
+  }
+
+  return entry;
+}
+
+X_XDBF_GPD_SETTING_HEADER* GpdInfo::GetSetting(uint32_t id) {
+  Entry* entry = GetSettingEntry(id);
 
   if (!entry) {
     return nullptr;
@@ -68,20 +78,27 @@ X_XDBF_GPD_SETTING_HEADER* GpdInfo::GetSetting(uint32_t id) {
 }
 
 std::span<const uint8_t> GpdInfo::GetSettingData(uint32_t id) {
-  X_XDBF_GPD_SETTING_HEADER* setting = GetSetting(id);
+  const Entry* entry = GetSettingEntry(id);
 
-  if (!setting) {
+  if (!entry) {
     return {};
   }
+
+  const auto setting =
+      reinterpret_cast<const X_XDBF_GPD_SETTING_HEADER*>(entry->data.data());
 
   if (setting->setting_type != X_USER_DATA_TYPE::BINARY &&
       setting->setting_type != X_USER_DATA_TYPE::WSTRING) {
     return {};
   }
 
-  const uint32_t size = setting->base_data.binary.size;
-  const uint8_t* data_ptr = reinterpret_cast<uint8_t*>(setting + 1);
-  return {data_ptr, size};
+  // The declared size comes from the file, clamp it to what the entry holds
+  const size_t available =
+      entry->data.size() - sizeof(X_XDBF_GPD_SETTING_HEADER);
+  const size_t size =
+      std::min(static_cast<size_t>(setting->base_data.binary.size), available);
+
+  return {entry->data.data() + sizeof(X_XDBF_GPD_SETTING_HEADER), size};
 }
 
 void GpdInfo::UpsertSetting(const UserSetting* setting_data) {
@@ -103,7 +120,8 @@ std::u16string GpdInfo::GetString(uint32_t id) const {
   }
 
   return string_util::read_u16string_and_swap(
-      reinterpret_cast<const char16_t*>(entry->data.data()));
+      reinterpret_cast<const char16_t*>(entry->data.data()),
+      entry->data.size() / sizeof(char16_t));
 }
 
 void GpdInfo::AddString(uint32_t id, std::u16string string_data) {
@@ -112,7 +130,8 @@ void GpdInfo::AddString(uint32_t id, std::u16string string_data) {
       GetEntry(static_cast<uint16_t>(GpdSection::kString), id);
   if (existing_entry) {
     std::u16string existing_string = string_util::read_u16string_and_swap(
-        reinterpret_cast<const char16_t*>(existing_entry->data.data()));
+        reinterpret_cast<const char16_t*>(existing_entry->data.data()),
+        existing_entry->data.size() / sizeof(char16_t));
     if (existing_string == string_data) {
       // String hasn't changed, no need to update
       return;
