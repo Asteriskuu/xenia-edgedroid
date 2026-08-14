@@ -875,13 +875,19 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     } else {
       if (poll_reg_addr == XE_GPU_REG_COHER_STATUS_HOST) {
         // A pending request (non-zero status, cleared by MakeCoherent) is the
-        // guest asking for a range to be made visible to it, so any export
-        // output landing there has to have reached guest RAM first.
-        if (cvars::memexport_await_fences &&
-            register_file_->values[XE_GPU_REG_COHER_STATUS_HOST]) {
-          COMMAND_PROCESSOR::AwaitMemexportForCoherency(
+        // guest naming a range it wants made visible to it. Export output
+        // landing there has to have reached guest RAM first, and it is also
+        // what releases held resolve output.
+        if (register_file_->values[XE_GPU_REG_COHER_STATUS_HOST]) {
+          COMMAND_PROCESSOR::NoteResolveCoherency(
               register_file_->values[XE_GPU_REG_COHER_BASE_HOST],
-              register_file_->values[XE_GPU_REG_COHER_SIZE_HOST]);
+              register_file_->values[XE_GPU_REG_COHER_SIZE_HOST],
+              register_file_->values[XE_GPU_REG_COHER_STATUS_HOST]);
+          if (cvars::memexport_await_fences) {
+            COMMAND_PROCESSOR::AwaitMemexportForCoherency(
+                register_file_->values[XE_GPU_REG_COHER_BASE_HOST],
+                register_file_->values[XE_GPU_REG_COHER_SIZE_HOST]);
+          }
         }
         MakeCoherent();
         value = value_ref;

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "xenia/base/assert.h"
+#include "xenia/base/logging.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #include "xenia/gpu/d3d12/d3d12_primitive_processor.h"
@@ -366,6 +367,22 @@ class D3D12CommandProcessor final : public CommandProcessor {
   bool IssueCopy() override;
   XE_NOINLINE
   bool IssueCopy_ReadbackResolvePath();
+  // Copies a held resolve range into guest RAM and waits for it, out of the
+  // shared memory buffer or out of the destination's hold snapshot. Called
+  // from NoteResolveCoherency.
+  void FlushResolveRangeToGuestRam(uint32_t address, uint32_t length,
+                                   bool from_snapshot);
+
+  // Hold snapshot storage for command_processor_resolve_readwatch.inc, which
+  // owns the pool itself.
+  struct ResolveHoldSnapshotBuffer {
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+  };
+  bool CreateResolveHoldSnapshotBuffer(ResolveHoldSnapshotBuffer& buffer,
+                                       uint32_t size);
+  void DestroyResolveHoldSnapshotBuffer(ResolveHoldSnapshotBuffer& buffer);
+  // Deletion is deferred here, so nothing has to be drained up front.
+  void PrepareResolveHoldSnapshotEviction() {}
 
   void InitializeTrace() override;
 

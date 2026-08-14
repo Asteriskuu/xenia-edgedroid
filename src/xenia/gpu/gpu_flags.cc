@@ -238,11 +238,13 @@ DEFINE_bool(
     "reading back specific pixel values (e.g., for gamma detection).",
     "GPU");
 
-DEFINE_bool(readback_resolve_sync, true,
+DEFINE_bool(readback_resolve_sync, false,
             "Stall the GPU after each readback_resolve copy so guest RAM is "
-            "coherent in "
-            "the same frame, instead of copying asynchronously.",
+            "coherent in the same frame, instead of copying asynchronously.\n"
+            "The copies a guest read actually waits on stall on their own, so "
+            "this only adds a stall for the rest.",
             "GPU");
+UPDATE_from_bool(readback_resolve_sync, 2026, 8, 14, 12, true);
 
 DEFINE_bool(gpu_3d_to_2d_texture, true,
             "Handle shaders that sample 3D textures as 2D by creating a 2D "

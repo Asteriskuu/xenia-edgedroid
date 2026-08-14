@@ -50,6 +50,17 @@ enum class ReadbackResolveMode {
 // The readback_resolve_sync cvar makes fast/all copies stall for same-frame
 // coherency instead of running deferred, about a frame behind.
 
+// What a resolve's output should do, decided per resolve by
+// DecideResolveHostCopy.
+enum class ResolveHostCopyAction {
+  // Leave it where the resolve put it, held or not.
+  kSkip,
+  kToGuestRam,
+  // Downscale into a hold snapshot, the scaled resolve buffer cannot be
+  // downscaled from once the release comes around.
+  kToHoldSnapshot,
+};
+
 // Occlusion queries - ZPD report mode.
 enum class ZPDMode {
   kFake,     // Fake sample counts, no real GPU queries (fake)
@@ -204,6 +215,10 @@ class CommandProcessor {
   // the CPU, so there is nothing to wait for.
   void AwaitMemexportForFence() {}
   void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {}
+  // Shadowed by backends that hold resolve output in the shared memory buffer
+  // (see command_processor_resolve_readwatch.inc), where a coherency request
+  // naming a held range is what releases it into guest RAM.
+  void NoteResolveCoherency(uint32_t base, uint32_t size, uint32_t status) {}
 
   void RestoreRegisters(uint32_t first_register,
                         const uint32_t* register_values,

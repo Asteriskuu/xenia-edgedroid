@@ -26,6 +26,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/hash.h"
+#include "xenia/base/logging.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -301,6 +302,23 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
+
+  // Copies a held resolve range into guest RAM and waits for it, out of the
+  // shared memory buffer or out of the destination's hold snapshot. Called
+  // from NoteResolveCoherency.
+  void FlushResolveRangeToGuestRam(uint32_t address, uint32_t length,
+                                   bool from_snapshot);
+
+  // Hold snapshot storage for command_processor_resolve_readwatch.inc, which
+  // owns the pool itself.
+  struct ResolveHoldSnapshotBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+  };
+  bool CreateResolveHoldSnapshotBuffer(ResolveHoldSnapshotBuffer& buffer,
+                                       uint32_t size);
+  void DestroyResolveHoldSnapshotBuffer(ResolveHoldSnapshotBuffer& buffer);
+  void PrepareResolveHoldSnapshotEviction();
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;

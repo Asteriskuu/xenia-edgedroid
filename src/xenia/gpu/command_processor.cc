@@ -77,7 +77,16 @@ DEFINE_string(
     readback_resolve, "fast",
     "Controls which render-to-texture resolves are copied back into guest "
     "RAM.\n"
-    " fast: Copy only resolves the CPU reads back (default)\n"
+    " fast: Copy only the resolves the guest actually reads back (default).\n"
+    "       A resolve qualifies if the CPU is caught reading its destination, "
+    "if\n"
+    "       the destination cycles a ring of buffers the draw owns exclusively "
+    "(so\n"
+    "       something consumes it a frame or more later), or if the guest asks "
+    "for\n"
+    "       that exact range to be made coherent. Everything else stays in the "
+    "GPU\n"
+    "       buffer, which is where GPU-side consumers read it anyway.\n"
     " all: Copy every resolve\n"
     " none: Disable readback completely (improves performance).\n",
     "GPU");
