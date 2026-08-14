@@ -7,6 +7,9 @@ on:
       - 'docs/**'
       - 'LICENSE'
   pull_request:
+    # ready_for_review is what starts the pipeline for a PR that was opened as
+    # a draft, since the build job below skips while it stays one.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - '*.md'
       - 'docs/**'
@@ -26,6 +29,10 @@ jobs:
   # read-only on its startup write probe.
   build:
     name: Build
+    # Draft PRs don't need the pipeline. Marking one ready re-triggers it.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.draft == false
     permissions:
       contents: read
       actions: write
