@@ -529,7 +529,7 @@ class TextureCache {
 
   struct TextureBinding {
     TextureKey key;
-    // Packed integer scale, 5 bits per component.
+    // Packed integer scale, 6 bits per component.
     uint32_t integer_scale_bits;
     // Destination swizzle merged with guest to host format swizzle.
     uint32_t host_swizzle;
@@ -612,7 +612,7 @@ class TextureCache {
   // shader to restore guest integer units from normalized host samples.
   static uint32_t GetIntegerScaleBits(xenos::TextureFormat guest_format,
                                       uint32_t num_format,
-                                      uint32_t host_swizzle,
+                                      uint32_t guest_swizzle,
                                       uint8_t swizzled_signs);
   bool LoadTextureData(Texture& texture);
   void LoadTexturesData(Texture** textures, uint32_t n_textures);

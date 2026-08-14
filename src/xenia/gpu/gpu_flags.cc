@@ -269,3 +269,10 @@ DEFINE_bool(use_fuzzy_alpha_epsilon, false,
             "Use approximate compare for alpha values to prevent flickering on "
             "NVIDIA graphics cards",
             "GPU");
+
+DEFINE_bool(
+    force_depth_clamp, false,
+    "Use host depth clamping instead of near and far plane clipping when "
+    "guest clipping is enabled. X/Y/W clipping is unaffected. On Vulkan, "
+    "this requires depthClamp support.",
+    "GPU");

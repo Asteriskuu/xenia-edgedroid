@@ -347,7 +347,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // Integer num_format on fixed textures. Each dword packs the scale needed
     // to turn normalized host samples back into guest integer values.
     // bits 0:3 = component_bits - 1
-    // bit 4 = signed.
+    // bit 4 = signed
+    // bit 5 = unsigned-biased
     // Zero means no scale.
     // Appended at the very tail (std140 uint4 [35]) so it disturbs neither the
     // xenos_draw.glsli tessellation offsets nor the interpreter [34] slot.
