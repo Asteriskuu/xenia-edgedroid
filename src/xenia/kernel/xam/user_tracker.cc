@@ -165,10 +165,6 @@ void UserTracker::AddTitleToPlayedList(uint64_t xuid) {
     UpdateTitleGpdFile();
   }
 
-  if (!spa_data_->include_in_profile()) {
-    return;
-  }
-
   const uint64_t current_time = Clock::QueryGuestSystemTime();
 
   auto title_info = user->dashboard_gpd_.GetTitleInfo(title_id);
@@ -191,11 +187,37 @@ void UserTracker::RemoveTitleFromPlayedList(uint64_t xuid, uint32_t title_id) {
     return;
   }
 
-  if (user->dashboard_gpd_.RemoveTitle(title_id)) {
-    UpdateSettingValue(xuid, kDashboardID,
-                       UserSettingId::XPROFILE_GAMERCARD_TITLES_PLAYED, -1);
-    FlushUserData(xuid);
+  auto title_data = user->dashboard_gpd_.GetTitleInfo(title_id);
+  if (!title_data) {
+    return;
   }
+
+  // Get the number of achievements and gamer score we got from this title.
+  int32_t gamerscore_earned =
+      static_cast<int32_t>(title_data->gamerscore_earned);
+  int32_t achievements_unlocked =
+      static_cast<int32_t>(title_data->achievements_unlocked);
+
+  // Remove the title's GPD.
+  if (!user->RemoveGpd(title_id)) {
+    return;
+  }
+
+  // Remove the title from dashboard GPD.
+  if (!user->dashboard_gpd_.RemoveTitle(title_id)) {
+    return;
+  }
+
+  // Lower the profile's stats.
+  UpdateSettingValue(xuid, kDashboardID,
+                     UserSettingId::XPROFILE_GAMERCARD_TITLES_PLAYED, -1);
+  UpdateSettingValue(xuid, kDashboardID, UserSettingId::XPROFILE_GAMERCARD_CRED,
+                     -gamerscore_earned);
+  UpdateSettingValue(xuid, kDashboardID,
+                     UserSettingId::XPROFILE_GAMERCARD_ACHIEVEMENTS_EARNED,
+                     -achievements_unlocked);
+
+  FlushUserData(xuid);
 }
 
 // Privates
