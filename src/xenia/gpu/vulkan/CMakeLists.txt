@@ -16,7 +16,7 @@ target_link_libraries(xenia-gpu-vulkan PUBLIC
 xe_target_defaults(xenia-gpu-vulkan)
 
 if(XENIA_BUILD_MISC)
-  add_executable(xenia-gpu-vulkan-trace-viewer
+  add_executable(xenia-gpu-vulkan-trace-viewer WIN32
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_trace_viewer_main.cc
   )
   xe_windowed_app_main(xenia-gpu-vulkan-trace-viewer)
