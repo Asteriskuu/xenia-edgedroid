@@ -898,17 +898,25 @@ struct PERMUTE_I32
     int s2 = SrcVReg(e, i.src2, 0);
     int s3 = SrcVReg(e, i.src3, 1);
     int d = i.dest.reg().getIdx();
-    // Build TBL control from the I32 permute control word.
     // Each byte of control selects: bits [1:0] = which dword, bit [2] = src2 vs
     // src3. PPC word i = vec128_t.u32[i] = NEON element s[i] (direct mapping).
-    uint8_t tbl_ctrl[16];
+    uint8_t words[4];
     for (int idx = 0; idx < 4; idx++) {
       uint8_t sel = (control >> (idx * 8)) & 0xFF;
-      uint8_t src_dword = sel & 0x3;
-      bool from_src3 = (sel >> 2) & 1;
-      uint8_t base = from_src3 ? 16 : 0;
+      words[idx] = (sel & 0x3) | (((sel >> 2) & 1) << 2);
+    }
+    // A consecutive run of words is a byte aligned extract from the src2:src3
+    // pair, which ext does in one instruction.
+    if (words[0] >= 1 && words[0] <= 3 && words[1] == words[0] + 1 &&
+        words[2] == words[0] + 2 && words[3] == words[0] + 3) {
+      e.ext(VReg(d).b16, VReg(s2).b16, VReg(s3).b16, words[0] * 4);
+      return;
+    }
+    // Build TBL control from the I32 permute control word.
+    uint8_t tbl_ctrl[16];
+    for (int idx = 0; idx < 4; idx++) {
       for (int b = 0; b < 4; b++) {
-        tbl_ctrl[idx * 4 + b] = base + src_dword * 4 + b;
+        tbl_ctrl[idx * 4 + b] = words[idx] * 4 + b;
       }
     }
     // Ensure src2 in v0, src3 in v1 (consecutive for TBL).

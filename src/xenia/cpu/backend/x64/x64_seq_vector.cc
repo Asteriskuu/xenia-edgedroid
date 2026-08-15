@@ -2421,6 +2421,14 @@ struct PERMUTE_I32
       } else {
         src3 = i.src3;
       }
+      // Words 0-1 from src2 and 2-3 from src3 is exactly vshufps, one
+      // instruction instead of two shuffles and a blend.
+      constexpr uint32_t kSelectBits = MakePermuteMask(1, 0, 1, 0, 1, 0, 1, 0);
+      if ((control & kSelectBits) == MakePermuteMask(0, 0, 0, 0, 1, 0, 1, 0)) {
+        e.vshufps(i.dest, src2, src3, src_control);
+        return;
+      }
+
       if (i.dest != src3) {
         e.vpshufd(i.dest, src2, src_control);
         e.vpshufd(e.xmm0, src3, src_control);
