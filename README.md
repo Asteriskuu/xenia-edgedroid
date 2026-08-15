@@ -4,10 +4,10 @@
     </a>
 </p>
 
-<h1 align="center">Xenia Edgedroid - Xbox 360 Emulator For Android</h1>
+<h1 align="center">Xenia Edgedroid - Xbox 360 Emulator For Android (CANCELLED)</h1>
 
 > [!NOTE]
-> Maybe not. maybe this will take longer..
+> Theres already a xendroid emulator.
 
 > [!WARNING]
 > I wouldn't recommend downloading any actions build yet. most of them dont work well.
