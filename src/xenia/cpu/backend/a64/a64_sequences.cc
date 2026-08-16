@@ -3326,7 +3326,7 @@ struct MAX_V128 : Sequence<MAX_V128, I<OPCODE_MAX, V128Op, V128Op, V128Op>> {
       int s1, s2;
       PrepareVmxFpSources(e, i.src1, i.src2, s1, s2);
       e.fmax(VReg(2).s4, VReg(s1).s4, VReg(s2).s4);
-      // PPC vmaxfp: if either input is NaN, result = src1 (vA).
+      // PPC vmaxfp: a NaN input is returned as-is, vA before vB.
       FixupVmxMaxMinNan(e);
       if (!e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
         FlushDenormals_V128(e, 2, 0, 1);
@@ -3471,7 +3471,7 @@ struct MIN_V128 : Sequence<MIN_V128, I<OPCODE_MIN, V128Op, V128Op, V128Op>> {
       int s1, s2;
       PrepareVmxFpSources(e, i.src1, i.src2, s1, s2);
       e.fmin(VReg(2).s4, VReg(s1).s4, VReg(s2).s4);
-      // PPC vminfp: if either input is NaN, result = src1 (vA).
+      // PPC vminfp: a NaN input is returned as-is, vA before vB.
       FixupVmxMaxMinNan(e);
       if (!e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
         FlushDenormals_V128(e, 2, 0, 1);

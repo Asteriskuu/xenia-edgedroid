@@ -389,23 +389,20 @@ inline void FlushDenormals_V128(A64Emitter& e, int vreg, int sa = 2,
   e.bic(VReg(vreg).b16, VReg(vreg).b16, VReg(sa).b16);
 }
 
-// Fixup for vmaxfp/vminfp when BOTH inputs are NaN.
-// ARM64 fmax/fmin with DN=0 correctly propagates NaN when only one input is
-// NaN, but when both are NaN it may quiet an SNaN differently than x64.
-// x64 uses maxps(a,b)|maxps(b,a) which effectively gives src1|src2 for NaN
-// lanes. We replicate that: use src1|src2 only for lanes where BOTH are NaN.
+// Fixup for vmaxfp/vminfp NaN lanes.
+// ARM64 fmax/fmin do propagate a NaN, but by ARM's rules: an SNaN in either
+// operand outranks a QNaN in the other. PPC is strictly positional, so a NaN
+// lane takes src1 where src1 is NaN and src2 otherwise.
+// Does not quiet a signalling NaN, matching x64.
 // Expects: v0=flushed src1, v1=flushed src2, v2=hardware fmax/fmin result.
-// Modifies v2 in place. Clobbers v0, v1, v3.
+// Modifies v2 in place. Clobbers v3.
 inline void FixupVmxMaxMinNan(A64Emitter& e) {
-  // Compute OR fallback first (before clobbering v0/v1).
-  e.orr(VReg(3).b16, VReg(0).b16, VReg(1).b16);  // v3 = src1 | src2
-  // Build "at least one not NaN" mask.
-  e.fcmeq(VReg(0).s4, VReg(0).s4, VReg(0).s4);   // v0 = non-NaN mask for src1
-  e.fcmeq(VReg(1).s4, VReg(1).s4, VReg(1).s4);   // v1 = non-NaN mask for src2
-  e.orr(VReg(0).b16, VReg(0).b16, VReg(1).b16);  // v0 = 1 where at least one ok
-  // BSL: mask=1 → v2 (fmax result), mask=0 → v3 (src1|src2 for both-NaN)
-  e.bsl(VReg(0).b16, VReg(2).b16, VReg(3).b16);
-  e.mov(VReg(2).b16, VReg(0).b16);
+  // Lanes where src2 is NaN take src2, the rest keep the arithmetic result.
+  e.fcmeq(VReg(3).s4, VReg(1).s4, VReg(1).s4);  // v3 = non-NaN mask for src2
+  e.bsl(VReg(3).b16, VReg(2).b16, VReg(1).b16);
+  // src1 wins over both of those wherever it is the NaN.
+  e.fcmeq(VReg(2).s4, VReg(0).s4, VReg(0).s4);  // v2 = non-NaN mask for src1
+  e.bsl(VReg(2).b16, VReg(3).b16, VReg(0).b16);
 }
 
 // Prepare two V128 operands for a VMX FP operation: copy to scratch v0/v1
