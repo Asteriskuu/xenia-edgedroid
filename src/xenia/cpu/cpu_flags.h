@@ -15,6 +15,8 @@ DECLARE_string(cpu);
 
 DECLARE_string(load_module_map);
 
+DECLARE_bool(accurate_vmx_denormal_flush);
+
 DECLARE_bool(disassemble_functions);
 
 DECLARE_bool(trace_functions);

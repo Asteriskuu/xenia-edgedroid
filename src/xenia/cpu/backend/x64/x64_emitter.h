@@ -64,7 +64,9 @@ enum class SimdDomain : uint32_t {
                // CONFLICTING means its used in multiple domains)
 };
 
-enum class MXCSRMode : uint32_t { Unknown, Fpu, Vmx };
+// VmxDaz is Vmx with denormal handling pinned on, for the VMX ops that flush
+// regardless of NJM.
+enum class MXCSRMode : uint32_t { Unknown, Fpu, Vmx, VmxDaz };
 XE_MAYBE_UNUSED
 static SimdDomain PickDomain2(SimdDomain dom1, SimdDomain dom2) {
   if (dom1 == dom2) {
@@ -342,8 +344,9 @@ class X64Emitter : public Xbyak::CodeGenerator {
       bool already_set = false);  // already_set means that the caller already
                                   // did vldmxcsr, used for SET_ROUNDING_MODE
 
-  void LoadFpuMxcsrDirect();  // unsafe, does not change mxcsr_mode_
-  void LoadVmxMxcsrDirect();  // unsafe, does not change mxcsr_mode_
+  void LoadFpuMxcsrDirect();     // unsafe, does not change mxcsr_mode_
+  void LoadVmxMxcsrDirect();     // unsafe, does not change mxcsr_mode_
+  void LoadVmxDazMxcsrDirect();  // unsafe, does not change mxcsr_mode_
 
   XexModule* GuestModule() { return guest_module_; }
 

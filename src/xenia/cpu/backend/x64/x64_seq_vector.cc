@@ -3600,7 +3600,11 @@ struct SET_NJM_I8 : Sequence<SET_NJM_I8, I<OPCODE_SET_NJM, VoidOp, I8Op>> {
       e.cmove(e.edx, e.eax);
       e.mov(addr_vmx, e.edx);
     }
-    e.ChangeMxcsrMode(MXCSRMode::Vmx);
+    // mxcsr_vmx just changed underneath us, so no state check can tell us
+    // whether a reload is needed. Load it and declare the mode.
+    e.ForgetMxcsrMode();
+    e.LoadVmxMxcsrDirect();
+    e.ChangeMxcsrMode(MXCSRMode::Vmx, /*already_set=*/true);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_SET_NJM, SET_NJM_I8);

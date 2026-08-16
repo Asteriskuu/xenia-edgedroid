@@ -24,6 +24,7 @@
 #include "xenia/cpu/backend/a64/a64_seq_util.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/backend/a64/a64_tracers.h"
+#include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/instr.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 
@@ -4158,7 +4159,7 @@ struct MUL_ADD_V128
     //   1. Flush s3 into v3, save to stack[32].
     //   2. Flush s1/s2 into v0/v1, save to stack[0]/stack[16].
     //   3. Restore s3 into v3, fmla into v2, NaN fixup, flush output.
-    EmitWithVmxFpcr(e, [&] {
+    EmitWithVmxDenormalFlushFpcr(e, [&] {
       int d = i.dest.reg().getIdx();
 
       // Flush s3 → v3, save to stack slot 2.
@@ -4248,7 +4249,7 @@ struct MUL_SUB_V128
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // dest = s1*s2 - s3 with VMX denormal flushing + PPC NaN propagation.
     // Same as MUL_ADD but negate s3 before the fmla.
-    EmitWithVmxFpcr(e, [&] {
+    EmitWithVmxDenormalFlushFpcr(e, [&] {
       int d = i.dest.reg().getIdx();
 
       // Flush s3 → v3, save un-negated for NaN fixup.
@@ -4470,7 +4471,7 @@ struct DOT_PRODUCT_3_V128
     : Sequence<DOT_PRODUCT_3_V128,
                I<OPCODE_DOT_PRODUCT_3, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    EmitWithVmxFpcr(e, [&] {
+    EmitWithVmxDenormalFlushFpcr(e, [&] {
       // Inline NEON: multiply in double precision, sum 3 elements, convert
       // back. Uses v0-v3 as scratch.
       int s1 = SrcVReg(e, i.src1, 0);
@@ -4502,7 +4503,7 @@ struct DOT_PRODUCT_4_V128
     : Sequence<DOT_PRODUCT_4_V128,
                I<OPCODE_DOT_PRODUCT_4, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    EmitWithVmxFpcr(e, [&] {
+    EmitWithVmxDenormalFlushFpcr(e, [&] {
       // Inline NEON: multiply in double precision, sum all 4 elements.
       int s1 = SrcVReg(e, i.src1, 0);
       int s2 = SrcVReg(e, i.src2, 1);

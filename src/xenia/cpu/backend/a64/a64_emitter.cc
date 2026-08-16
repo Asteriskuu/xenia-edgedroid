@@ -775,19 +775,40 @@ bool A64Emitter::ChangeFpcrMode(FPCRMode new_mode, bool already_set) {
   if (fpcr_mode_ == new_mode) {
     return false;
   }
+  const FPCRMode old_mode = fpcr_mode_;
   fpcr_mode_ = new_mode;
   if (!already_set) {
     // Load the pre-computed FPCR value from the backend context.
     // This avoids an expensive MRS + read-modify-write cycle.
     auto bctx = GetBackendCtxReg();
+    uint32_t fpcr_offset;
     if (new_mode == FPCRMode::Vmx) {
-      ldr(w0, Xbyak_aarch64::ptr(bctx, static_cast<uint32_t>(offsetof(
-                                           A64BackendContext, fpcr_vmx))));
+      fpcr_offset =
+          static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_vmx));
+    } else if (new_mode == FPCRMode::VmxDaz) {
+      fpcr_offset =
+          static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_vmx_daz));
     } else {
-      ldr(w0, Xbyak_aarch64::ptr(bctx, static_cast<uint32_t>(offsetof(
-                                           A64BackendContext, fpcr_fpu))));
+      fpcr_offset =
+          static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_fpu));
     }
+
+    // SET_NJM only toggles FZ in fpcr_vmx and nothing else writes it, so with
+    // NJM on it already equals fpcr_vmx_daz and the two vmx modes are the same
+    // bits. Skipping then saves the msr, which is the expensive part.
+    const bool vmx_variant_switch =
+        IsVmxFpcrMode(old_mode) && IsVmxFpcrMode(new_mode);
+    Xbyak_aarch64::Label skip;
+    if (vmx_variant_switch) {
+      ldr(w0, Xbyak_aarch64::ptr(bctx, static_cast<uint32_t>(offsetof(
+                                           A64BackendContext, flags))));
+      tbnz(w0, kA64BackendNJMOn, skip);
+    }
+    ldr(w0, Xbyak_aarch64::ptr(bctx, fpcr_offset));
     msr(3, 3, 4, 4, 0, x0);  // msr FPCR, x0
+    if (vmx_variant_switch) {
+      L(skip);
+    }
   }
   return true;
 }

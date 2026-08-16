@@ -1849,33 +1849,89 @@ void X64Emitter::EmitPreemptCheck() {
   L(after);
 }
 
-template <bool switching_to_fpu>
-static void ChangeMxcsrModeDynamicHelper(X64Emitter& e) {
-  auto flags = e.GetBackendFlagsPtr();
-  if (switching_to_fpu) {
-    e.btr(flags, 0);  // bit 0 set to 0 = is fpu mode
+static void LoadMxcsrDirectForMode(X64Emitter& e, MXCSRMode mode) {
+  if (mode == MXCSRMode::Fpu) {
+    e.LoadFpuMxcsrDirect();
+  } else if (mode == MXCSRMode::Vmx) {
+    e.LoadVmxMxcsrDirect();
+  } else if (mode == MXCSRMode::VmxDaz) {
+    e.LoadVmxDazMxcsrDirect();
   } else {
-    e.bts(flags, 0);  // bit 0 set to 1 = is vmx mode
+    assert_unhandled_case(mode);
   }
-  Xbyak::Label& come_back = e.NewCachedLabel();
+}
 
-  Xbyak::Label& reload_bailout =
-      e.AddToTail([&come_back](X64Emitter& e, Xbyak::Label& thislabel) {
+static bool IsVmxMode(MXCSRMode mode) {
+  return mode == MXCSRMode::Vmx || mode == MXCSRMode::VmxDaz;
+}
+
+// Record which of the three mxcsr values is live. The daz bit only means
+// anything while the mode bit says vmx, and only while NJM is off.
+static void SetMxcsrModeFlags(X64Emitter& e, MXCSRMode mode) {
+  auto flags = e.GetBackendFlagsPtr();
+  if (mode == MXCSRMode::Fpu) {
+    e.btr(flags, kX64BackendMXCSRModeBit);
+  } else {
+    e.bts(flags, kX64BackendMXCSRModeBit);
+    if (mode == MXCSRMode::VmxDaz) {
+      e.bts(flags, kX64BackendMXCSRDazBit);
+    } else {
+      e.btr(flags, kX64BackendMXCSRDazBit);
+    }
+  }
+}
+
+// SET_NJM only ever writes mxcsr_vmx one of two values, and the NJM on value is
+// the one mxcsr_vmx_daz always holds. So while NJM is on the two vmx mxcsrs are
+// the same bits and switching between them is nothing at all. Switching with
+// the mode statically known then costs a test and a fallthrough, not a
+// vldmxcsr.
+static void ChangeVmxVariantWithNjmGate(X64Emitter& e, MXCSRMode new_mode) {
+  Xbyak::Label& come_back = e.NewCachedLabel();
+  Xbyak::Label& reload = e.AddToTail(
+      [&come_back, new_mode](X64Emitter& e, Xbyak::Label& thislabel) {
         e.L(thislabel);
-        if (switching_to_fpu) {
-          e.LoadFpuMxcsrDirect();
-        } else {
-          e.LoadVmxMxcsrDirect();
-        }
+        LoadMxcsrDirectForMode(e, new_mode);
+        SetMxcsrModeFlags(e, new_mode);
         e.jmp(come_back, X64Emitter::T_NEAR);
       });
-  if (switching_to_fpu) {
-    e.jc(reload_bailout,
-         X64Emitter::T_NEAR);  // if carry flag was set, we were VMX mxcsr mode.
+  e.bt(e.GetBackendFlagsPtr(), kX64BackendNJMOn);
+  e.jnc(reload, X64Emitter::T_NEAR);
+  e.L(come_back);
+}
+
+static void ChangeMxcsrModeDynamicHelper(X64Emitter& e, MXCSRMode new_mode) {
+  auto flags = e.GetBackendFlagsPtr();
+  Xbyak::Label& come_back = e.NewCachedLabel();
+
+  Xbyak::Label& reload_bailout = e.AddToTail(
+      [&come_back, new_mode](X64Emitter& e, Xbyak::Label& thislabel) {
+        e.L(thislabel);
+        LoadMxcsrDirectForMode(e, new_mode);
+        // Reached by any test below, so normalize both bits here.
+        SetMxcsrModeFlags(e, new_mode);
+        e.jmp(come_back, X64Emitter::T_NEAR);
+      });
+
+  // Each bt both records the bit we want and reports what it was, so a
+  // mismatch on either one falls out to the reload.
+  if (new_mode == MXCSRMode::Fpu) {
+    e.btr(flags, kX64BackendMXCSRModeBit);
+    e.jc(reload_bailout, X64Emitter::T_NEAR);  // was one of the vmx mxcsrs
   } else {
-    e.jnc(
-        reload_bailout,
-        X64Emitter::T_NEAR);  // if carry flag was set, we were VMX mxcsr mode.
+    e.bts(flags, kX64BackendMXCSRModeBit);
+    e.jnc(reload_bailout, X64Emitter::T_NEAR);  // was the fpu mxcsr
+    // Some vmx mxcsr is live and with NJM on both are the same bits, so it
+    // already serves whichever of the two we were asked for.
+    e.bt(flags, kX64BackendNJMOn);
+    e.jc(come_back, X64Emitter::T_NEAR);
+    if (new_mode == MXCSRMode::VmxDaz) {
+      e.bts(flags, kX64BackendMXCSRDazBit);
+      e.jnc(reload_bailout, X64Emitter::T_NEAR);  // was plain vmx
+    } else {
+      e.btr(flags, kX64BackendMXCSRDazBit);
+      e.jc(reload_bailout, X64Emitter::T_NEAR);  // was daz vmx
+    }
   }
   e.L(come_back);
 }
@@ -1893,37 +1949,22 @@ bool X64Emitter::ChangeMxcsrMode(MXCSRMode new_mode, bool already_set) {
     // check the mode dynamically
     mxcsr_mode_ = new_mode;
     if (!already_set) {
-      if (new_mode == MXCSRMode::Fpu) {
-        ChangeMxcsrModeDynamicHelper<true>(*this);
-      } else if (new_mode == MXCSRMode::Vmx) {
-        ChangeMxcsrModeDynamicHelper<false>(*this);
-      } else {
-        assert_unhandled_case(new_mode);
-      }
+      ChangeMxcsrModeDynamicHelper(*this, new_mode);
     } else {  // even if already set, we still need to update flags to reflect
               // our mode
-      if (new_mode == MXCSRMode::Fpu) {
-        btr(GetBackendFlagsPtr(), kX64BackendMXCSRModeBit);
-      } else if (new_mode == MXCSRMode::Vmx) {
-        bts(GetBackendFlagsPtr(), kX64BackendMXCSRModeBit);
-      } else {
-        assert_unhandled_case(new_mode);
-      }
+      SetMxcsrModeFlags(*this, new_mode);
     }
   } else {
+    MXCSRMode old_mode = mxcsr_mode_;
     mxcsr_mode_ = new_mode;
     if (!already_set) {
-      if (new_mode == MXCSRMode::Fpu) {
-        LoadFpuMxcsrDirect();
-        btr(GetBackendFlagsPtr(), kX64BackendMXCSRModeBit);
-        return true;
-      } else if (new_mode == MXCSRMode::Vmx) {
-        LoadVmxMxcsrDirect();
-        bts(GetBackendFlagsPtr(), kX64BackendMXCSRModeBit);
-        return true;
+      if (IsVmxMode(old_mode) && IsVmxMode(new_mode)) {
+        ChangeVmxVariantWithNjmGate(*this, new_mode);
       } else {
-        assert_unhandled_case(new_mode);
+        LoadMxcsrDirectForMode(*this, new_mode);
+        SetMxcsrModeFlags(*this, new_mode);
       }
+      return true;
     }
   }
   return false;
@@ -1933,6 +1974,9 @@ void X64Emitter::LoadFpuMxcsrDirect() {
 }
 void X64Emitter::LoadVmxMxcsrDirect() {
   vldmxcsr(GetBackendCtxPtr(offsetof(X64BackendContext, mxcsr_vmx)));
+}
+void X64Emitter::LoadVmxDazMxcsrDirect() {
+  vldmxcsr(GetBackendCtxPtr(offsetof(X64BackendContext, mxcsr_vmx_daz)));
 }
 Xbyak::Address X64Emitter::GetBackendFlagsPtr() const {
   Xbyak::Address pt = GetBackendCtxPtr(offsetof(X64BackendContext, flags));

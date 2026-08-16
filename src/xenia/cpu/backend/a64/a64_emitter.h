@@ -40,7 +40,12 @@ using namespace arm64;
 class A64Backend;
 class A64CodeCache;
 
-enum class FPCRMode : uint32_t { Unknown, Fpu, Vmx };
+// VmxDaz is Vmx with FZ pinned on, for the VMX ops that flush regardless of
+// NJM.
+enum class FPCRMode : uint32_t { Unknown, Fpu, Vmx, VmxDaz };
+inline bool IsVmxFpcrMode(FPCRMode mode) {
+  return mode == FPCRMode::Vmx || mode == FPCRMode::VmxDaz;
+}
 
 // Unfortunately due to the design of xbyak we have to pass this to the ctor.
 class XbyakA64Allocator : public Xbyak_aarch64::Allocator {
@@ -143,7 +148,7 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   static void HandleStackpointOverflowError(ppc::PPCContext* context);
 
   void ForgetFpcrMode() {
-    if (fpcr_mode_ == FPCRMode::Vmx) {
+    if (IsVmxFpcrMode(fpcr_mode_)) {
       ChangeFpcrMode(FPCRMode::Fpu);
     }
     fpcr_mode_ = FPCRMode::Unknown;

@@ -1898,7 +1898,8 @@ void X64Backend::InitializeBackendContext(void* ctx) {
                           : nullptr;
   bctx->current_stackpoint_depth = 0;
   bctx->mxcsr_vmx = DEFAULT_VMX_MXCSR;
-  bctx->flags = (1U << kX64BackendNJMOn);  // NJM on by default
+  bctx->mxcsr_vmx_daz = DEFAULT_VMX_MXCSR;  // never follows NJM
+  bctx->flags = (1U << kX64BackendNJMOn);   // NJM on by default
   // https://media.discordapp.net/attachments/440280035056943104/1000765256643125308/unknown.png
   bctx->Ox1000 = 0x1000;
   bctx->guest_tick_count = Clock::GetGuestTickCountPointer();

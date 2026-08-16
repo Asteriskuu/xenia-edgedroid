@@ -10,6 +10,8 @@
 #ifndef XENIA_CPU_BACKEND_A64_A64_SEQ_UTIL_H_
 #define XENIA_CPU_BACKEND_A64_A64_SEQ_UTIL_H_
 
+#include <utility>
+
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/vec128.h"
@@ -17,6 +19,7 @@
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
+#include "xenia/cpu/cpu_flags.h"
 
 #include "xbyak_aarch64.h"
 
@@ -42,14 +45,32 @@ using Xbyak_aarch64::WReg;
 using Xbyak_aarch64::XReg;
 
 template <typename Fn>
-inline void EmitWithVmxFpcr(A64Emitter& e, Fn&& emit_op) {
-  // Enter VMX FPCR mode using tracked lazy switching.  If the emitter
-  // is already in VMX mode (e.g. consecutive VMX ops in the same basic
-  // block) this is a no-op — no system register access at all.
+inline void EmitWithFpcrMode(A64Emitter& e, FPCRMode mode, Fn&& emit_op) {
+  // Enter the requested FPCR mode using tracked lazy switching.  If the
+  // emitter is already in that mode (e.g. consecutive VMX ops in the same
+  // basic block) this is a no-op — no system register access at all.
   // FPU mode is restored at block boundaries and calls via ForgetFpcrMode,
   // or on demand by scalar FP sequences via ChangeFpcrMode(Fpu).
-  e.ChangeFpcrMode(FPCRMode::Vmx);
+  e.ChangeFpcrMode(mode);
   emit_op();
+}
+
+template <typename Fn>
+inline void EmitWithVmxFpcr(A64Emitter& e, Fn&& emit_op) {
+  EmitWithFpcrMode(e, FPCRMode::Vmx, std::forward<Fn>(emit_op));
+}
+
+// The multiply-add family and the dot products flush denormals whatever NJM
+// says. Pinning that on needs an FPCR of its own, which costs an msr wherever
+// they interleave with the rest of VMX, so it is opt in. Without it they follow
+// NJM like every other VMX op, which only differs once a title clears VSCR.NJ.
+inline FPCRMode VmxDenormalFlushFpcrMode() {
+  return cvars::accurate_vmx_denormal_flush ? FPCRMode::VmxDaz : FPCRMode::Vmx;
+}
+
+template <typename Fn>
+inline void EmitWithVmxDenormalFlushFpcr(A64Emitter& e, Fn&& emit_op) {
+  EmitWithFpcrMode(e, VmxDenormalFlushFpcrMode(), std::forward<Fn>(emit_op));
 }
 
 // True iff the 64-bit value is encodable as a MOVI Dn, #imm8 immediate.

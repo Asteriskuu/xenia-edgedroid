@@ -120,6 +120,8 @@ struct A64BackendContext {
   // bit 1 = got reserve
   unsigned int flags;
   unsigned int Ox1000;  // constant 0x1000
+  // DEFAULT_VMX_FPCR regardless of NJM, for the ops that always flush
+  unsigned int fpcr_vmx_daz;
 };
 
 // Default FPCR for FPU mode (round to nearest, no flush to zero).

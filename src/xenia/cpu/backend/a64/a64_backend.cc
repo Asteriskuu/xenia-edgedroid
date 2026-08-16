@@ -1191,6 +1191,7 @@ void A64Backend::InitializeBackendContext(void* ctx) {
   a64_ctx->Ox1000 = 0x1000;
   a64_ctx->fpcr_fpu = DEFAULT_FPU_FPCR;
   a64_ctx->fpcr_vmx = DEFAULT_VMX_FPCR;
+  a64_ctx->fpcr_vmx_daz = DEFAULT_VMX_FPCR;   // never follows NJM
   a64_ctx->flags = (1U << kA64BackendNJMOn);  // NJM on by default
   a64_ctx->guest_tick_count = Clock::GetGuestTickCountPointer();
 

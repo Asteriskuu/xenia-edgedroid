@@ -17,6 +17,13 @@ DEFINE_string(
     "database.",
     "CPU");
 
+DEFINE_bool(accurate_vmx_denormal_flush, false,
+            "Flush denormals in the VMX multiply-add and dot product opcodes "
+            "even while the guest has NJM cleared, which is what hardware "
+            "does. Costs performance in vector heavy code and only matters to "
+            "a title that clears VSCR.NJ through mtvscr.",
+            "CPU");
+
 DEFINE_bool(disassemble_functions, false,
             "Disassemble functions during generation.", "CPU");
 

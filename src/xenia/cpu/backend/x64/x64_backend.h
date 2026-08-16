@@ -93,6 +93,8 @@ enum : uint32_t {
       2,  // non-java mode bit is currently set. for use in software fp routines
   kX64BackendNonIEEEMode =
       3,  // non-ieee mode is currently enabled for scalar fpu.
+  kX64BackendMXCSRDazBit =
+      4,  // when the mode bit says vmx, the loaded mxcsr is mxcsr_vmx_daz
 };
 // located prior to the ctx register
 // some things it would be nice to have be per-emulator instance instead of per
@@ -122,6 +124,8 @@ struct X64BackendContext {
   unsigned int flags;
   unsigned int Ox1000;  // constant 0x1000 so we can shrink each tail emitted
                         // add of it by... 2 bytes lol
+  // DEFAULT_VMX_MXCSR regardless of NJM, for the ops that always flush
+  unsigned int mxcsr_vmx_daz;
 };
 constexpr unsigned int DEFAULT_VMX_MXCSR =
     0x8000 |                   // flush to zero

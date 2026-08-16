@@ -36,6 +36,7 @@
 // Needed for MXCSR scratch storage.
 #include "xenia/cpu/backend/x64/x64_stack_layout.h"
 #include "xenia/cpu/backend/x64/x64_util.h"
+#include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/processor.h"
 
@@ -68,6 +69,16 @@ using namespace xe::cpu;
 using namespace xe::cpu::hir;
 
 using xe::cpu::hir::Instr;
+
+// The multiply-add family and the dot products flush denormals whatever NJM
+// says. Pinning that on needs an MXCSR of its own, which costs a mode switch
+// wherever they interleave with the rest of VMX, so it is opt in. Without it
+// they follow NJM like every other VMX op, which only differs once a title
+// clears VSCR.NJ.
+static MXCSRMode VmxDenormalFlushMode() {
+  return cvars::accurate_vmx_denormal_flush ? MXCSRMode::VmxDaz
+                                            : MXCSRMode::Vmx;
+}
 
 typedef bool (*SequenceSelectFn)(X64Emitter&, const Instr*, InstrKeyValue ikey);
 std::unordered_map<uint32_t, SequenceSelectFn>& SequenceTable() {
@@ -1961,7 +1972,7 @@ struct MUL_ADD_V128
     : Sequence<MUL_ADD_V128,
                I<OPCODE_MUL_ADD, V128Op, V128Op, V128Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.ChangeMxcsrMode(MXCSRMode::Vmx);
+    e.ChangeMxcsrMode(VmxDenormalFlushMode());
 
     Xmm src1 = GetInputRegOrConstant(e, i.src1, e.xmm0);
     Xmm src2 = GetInputRegOrConstant(e, i.src2, e.xmm1);
@@ -2017,7 +2028,7 @@ struct MUL_SUB_V128
     : Sequence<MUL_SUB_V128,
                I<OPCODE_MUL_SUB, V128Op, V128Op, V128Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.ChangeMxcsrMode(MXCSRMode::Vmx);
+    e.ChangeMxcsrMode(VmxDenormalFlushMode());
 
     Xmm src1 = GetInputRegOrConstant(e, i.src1, e.xmm0);
     Xmm src2 = GetInputRegOrConstant(e, i.src2, e.xmm1);
@@ -2390,7 +2401,7 @@ struct DOT_PRODUCT_3_V128
     : Sequence<DOT_PRODUCT_3_V128,
                I<OPCODE_DOT_PRODUCT_3, V128Op, V128Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.ChangeMxcsrMode(MXCSRMode::Vmx);
+    e.ChangeMxcsrMode(VmxDenormalFlushMode());
     e.vmovaps(e.xmm2, e.GetXmmConstPtr(XMMThreeFloatMask));
     bool is_lensqr = i.instr->src1.value == i.instr->src2.value;
 
@@ -2447,7 +2458,7 @@ struct DOT_PRODUCT_4_V128
     : Sequence<DOT_PRODUCT_4_V128,
                I<OPCODE_DOT_PRODUCT_4, V128Op, V128Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.ChangeMxcsrMode(MXCSRMode::Vmx);
+    e.ChangeMxcsrMode(VmxDenormalFlushMode());
     bool is_lensqr = i.instr->src1.value == i.instr->src2.value;
 
     auto src1v = e.xmm3;
