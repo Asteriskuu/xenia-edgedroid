@@ -86,20 +86,21 @@ int InstrEmit_fdivsx(PPCHIRBuilder& f, const InstrData& i) {
 #if XE_PLATFORM_LINUX
   // TODO(has207): verify if this is needed on Windows
   // On Linux, fdivs needs to use A format fields instead of X format
-  Value* a = f.LoadFPR(i.A.FRA);
-  Value* b = f.LoadFPR(i.A.FRB);
-  f.BeginFPSCRUpdate(i.A.Rc);
-  Value* v = f.ToSingle(f.Div(a, b));
-  f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR({a, b}, i.A.Rc);
+  uint32_t fra = i.A.FRA, frb = i.A.FRB, frt = i.A.FRT;
+  bool rc = i.A.Rc;
 #else
-  Value* a = f.LoadFPR(i.X.RA);
-  Value* b = f.LoadFPR(i.X.RB);
-  f.BeginFPSCRUpdate(i.X.Rc);
-  Value* v = f.ToSingle(f.Div(a, b));
-  f.StoreFPR(i.X.RT, v);
-  f.UpdateFPSCR({a, b}, i.X.Rc);
+  uint32_t fra = i.X.RA, frb = i.X.RB, frt = i.X.RT;
+  bool rc = i.X.Rc;
 #endif
+  Value* a = f.LoadFPR(fra);
+  Value* b = f.LoadFPR(frb);
+  f.BeginFPSCRUpdate(rc);
+  Value* v = f.Div(a, b);
+  // A denormalized operand keeps the double quotient, unrounded.
+  Value* denormal = f.SingleDenormalOperand({a, b});
+  Value* before_rounding = f.SnapshotFpExceptions(rc);
+  f.StoreFPR(frt, f.Select(denormal, v, f.ToSingle(v)));
+  f.UpdateFPSCRForUnroundedSingle({a, b}, rc, denormal, before_rounding);
   return 0;
 }
 
@@ -189,11 +190,16 @@ static int InstrEmit_fsqrt(PPCHIRBuilder& f, const InstrData& i, bool single) {
   Value* b = f.LoadFPR(i.A.FRB);
   f.BeginFPSCRUpdate(i.A.Rc);
   Value* v = f.Sqrt(b);
-  if (single) {
-    v = f.ToSingle(v);
+  if (!single) {
+    f.StoreFPR(i.A.FRT, v);
+    f.UpdateFPSCR({b}, i.A.Rc);
+    return 0;
   }
-  f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR({b}, i.A.Rc);
+  // A denormalized operand keeps the double root, unrounded.
+  Value* denormal = f.SingleDenormalOperand({b});
+  Value* before_rounding = f.SnapshotFpExceptions(i.A.Rc);
+  f.StoreFPR(i.A.FRT, f.Select(denormal, v, f.ToSingle(v)));
+  f.UpdateFPSCRForUnroundedSingle({b}, i.A.Rc, denormal, before_rounding);
   return 0;
 }
 int InstrEmit_fsqrtx(PPCHIRBuilder& f, const InstrData& i) {

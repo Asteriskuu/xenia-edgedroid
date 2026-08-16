@@ -79,6 +79,13 @@ class PPCHIRBuilder : public hir::HIRBuilder {
   // default QNaN and raises nothing. Feed the condition to both of the above.
   Value* SingleDenormalOperand(std::initializer_list<Value*> operands);
   Value* ApplySingleDenormalOperand(Value* quirk, Value* result);
+  // Divide and square root take the other half of the quirk: a denormalized
+  // operand skips the rounding to single instead. Snapshot the status between
+  // the arithmetic and the rounding, then hand both to the update.
+  Value* SnapshotFpExceptions(bool update_cr1);
+  void UpdateFPSCRForUnroundedSingle(std::initializer_list<Value*> operands,
+                                     bool update_cr1, Value* quirk,
+                                     Value* before_rounding);
   // For the estimates, whose host stand-ins raise nothing of their own.
   void UpdateFPSCRForEstimate(Value* b, bool is_sqrt_estimate, bool update_cr1);
   // For the conversions to integer, whose out of range invalid the host does

@@ -573,6 +573,26 @@ Value* PPCHIRBuilder::ApplySingleDenormalOperand(Value* quirk, Value* result) {
                 result);
 }
 
+Value* PPCHIRBuilder::SnapshotFpExceptions(bool update_cr1) {
+  return update_cr1 ? LoadFpExceptions() : nullptr;
+}
+
+// The rounding to single never happened for a denormal operand, so what it
+// would have raised is not reported either. The host status is cumulative, so
+// the snapshot taken before it is the whole answer for that case.
+void PPCHIRBuilder::UpdateFPSCRForUnroundedSingle(
+    std::initializer_list<Value*> operands, bool update_cr1, Value* quirk,
+    Value* before_rounding) {
+  if (!update_cr1) {
+    ClearFPSCRExceptions(false);
+    return;
+  }
+  Value* raised = Or(Select(quirk, before_rounding, LoadFpExceptions()),
+                     FpExceptionBit(*this, FpInvalidFromOperands(operands),
+                                    FP_EXCEPTION_INVALID));
+  StoreFPSCRSummary(raised, true);
+}
+
 void PPCHIRBuilder::UpdateFPSCRForMultiplyAdd(Value* a, Value* c, Value* b,
                                               bool update_cr1,
                                               Value* suppress) {
@@ -622,6 +642,15 @@ void PPCHIRBuilder::UpdateFPSCRForEstimate(Value* b, bool is_sqrt_estimate,
   // alike.
   Value* raised = Or(FpExceptionBit(*this, invalid, FP_EXCEPTION_INVALID),
                      FpExceptionBit(*this, is_zero, FP_EXCEPTION_DIV_BY_ZERO));
+  if (!is_sqrt_estimate) {
+    // fres is single-precision, so the reciprocal of anything under 2^-128
+    // leaves its range. Zero is a divide rather than an overflow.
+    Value* overflows =
+        And(IsTrue(magnitude),
+            CompareULT(magnitude, LoadConstantUint64(0x37F0000000000000ull)));
+    raised =
+        Or(raised, FpExceptionBit(*this, overflows, FP_EXCEPTION_OVERFLOW));
+  }
   StoreFPSCRSummary(raised, true);
 }
 
