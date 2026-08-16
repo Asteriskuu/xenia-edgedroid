@@ -2099,8 +2099,13 @@ struct MUL_ADD_V128
     const bool negate = (i.instr->flags & ARITHMETIC_NEGATE_RESULT) != 0;
     if (e.IsFeatureEnabled(kX64EmitFMA)) {
       // todo: this is garbage
+      // 132 rather than 213, for free: the host ranks NaN operands
+      // multiplicand, multiplier, addend, so this form propagates A, C, B where
+      // 213 propagates C, A, B. PPC wants A, B, C, so this buys every case
+      // where A and C are both NaN. B can never outrank C on x64 - it is the
+      // addend, which the host always ranks last.
       e.vmovaps(e.xmm3, src1);
-      e.vfmadd213ps(e.xmm3, src2, src3);
+      e.vfmadd132ps(e.xmm3, src3, src2);
       if (!negate) {
         e.vmovaps(i.dest, e.xmm3);
       }
