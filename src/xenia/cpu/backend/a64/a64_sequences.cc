@@ -4160,49 +4160,21 @@ struct MUL_ADD_V128
     : Sequence<MUL_ADD_V128,
                I<OPCODE_MUL_ADD, V128Op, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // dest = s1*s2 + s3 with VMX denormal flushing + PPC NaN propagation.
-    // Scratch register plan:
-    //   1. Flush s3 into v3, save to stack[32].
-    //   2. Flush s1/s2 into v0/v1, save to stack[0]/stack[16].
-    //   3. Restore s3 into v3, fmla into v2, NaN fixup, flush output.
+    // dest = s1*s2 + s3 with VMX denormal flushing and PPC NaN propagation.
     EmitWithVmxDenormalFlushFpcr(e, [&] {
-      int d = i.dest.reg().getIdx();
+      const int d = i.dest.reg().getIdx();
 
-      // Flush s3 → v3, save to stack slot 2.
-      int s3 = SrcVReg(e, i.src3, 3);
-      if (s3 != 3) {
-        e.mov(VReg(3).b16, VReg(s3).b16);
-      }
-      if (!e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
-        FlushDenormals_V128(e, 3, 0, 1);
-      }
-      e.str(QReg(3),
-            Xbyak_aarch64::ptr(
-                e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) + 32));
+      // dest is free until the result is stored, so it lends the fixup the
+      // scratch register v0-v3 cannot cover.
+      PrepareVmxFmaSources(e, i.src1, i.src2, i.src3, d);
 
-      // Flush s1/s2 → v0/v1, save to stack slots 0/1.
-      int s1, s2;
-      PrepareVmxFpSources(e, i.src1, i.src2, s1, s2);
-      e.str(QReg(0), Xbyak_aarch64::ptr(e.sp, static_cast<int32_t>(
-                                                  StackLayout::GUEST_SCRATCH)));
-      e.str(QReg(1),
-            Xbyak_aarch64::ptr(
-                e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) + 16));
+      e.mov(VReg(2).b16, VReg(3).b16);
+      e.fmla(VReg(2).s4, VReg(0).s4, VReg(1).s4);
 
-      // Restore flushed s3, compute fmla into v2 via copy.
-      e.ldr(QReg(2),
-            Xbyak_aarch64::ptr(
-                e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) + 32));
-      e.fmla(VReg(2).s4, VReg(s1).s4, VReg(s2).s4);
-
-      // Negate before the fixup, never after: the fixup overwrites every NaN
-      // lane, and hardware leaves a NaN result's sign alone.
       if (i.instr->flags & ARITHMETIC_NEGATE_RESULT) {
         e.fneg(VReg(2).s4, VReg(2).s4);
       }
-
-      // PPC NaN fixup (sources on stack at offsets 0/16/32).
-      FixupVmxNan_V128_Fma(e);
+      FixupVmxNan_V128_Fma(e, d);
 
       // Flush output denormals.
       if (!e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
@@ -4260,38 +4232,17 @@ struct MUL_SUB_V128
     : Sequence<MUL_SUB_V128,
                I<OPCODE_MUL_SUB, V128Op, V128Op, V128Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // dest = s1*s2 - s3 with VMX denormal flushing + PPC NaN propagation.
-    // Same as MUL_ADD but negate s3 before the fmla.
+    // dest = s1*s2 - s3 with VMX denormal flushing and PPC NaN propagation.
+    // Same as MUL_ADD but negate s3 before the fmla. v3 keeps the un-negated
+    // s3, which is the operand the fixup propagates.
     EmitWithVmxDenormalFlushFpcr(e, [&] {
-      int d = i.dest.reg().getIdx();
+      const int d = i.dest.reg().getIdx();
 
-      // Flush s3 → v3, save un-negated for NaN fixup.
-      int s3 = SrcVReg(e, i.src3, 3);
-      if (s3 != 3) {
-        e.mov(VReg(3).b16, VReg(s3).b16);
-      }
-      if (!e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
-        FlushDenormals_V128(e, 3, 0, 1);
-      }
-      e.str(QReg(3),
-            Xbyak_aarch64::ptr(
-                e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) + 32));
+      PrepareVmxFmaSources(e, i.src1, i.src2, i.src3, d);
 
-      // Flush s1/s2 → v0/v1, save for NaN fixup.
-      int s1, s2;
-      PrepareVmxFpSources(e, i.src1, i.src2, s1, s2);
-      e.str(QReg(0), Xbyak_aarch64::ptr(e.sp, static_cast<int32_t>(
-                                                  StackLayout::GUEST_SCRATCH)));
-      e.str(QReg(1),
-            Xbyak_aarch64::ptr(
-                e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) + 16));
-
-      // Reload flushed s3, negate into v2, fmla: v2 = -s3 + s1*s2 = s1*s2 - s3.
-      e.ldr(QReg(2),
-            Xbyak_aarch64::ptr(
-                e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) + 32));
+      e.mov(VReg(2).b16, VReg(3).b16);
       e.fneg(VReg(2).s4, VReg(2).s4);
-      e.fmla(VReg(2).s4, VReg(s1).s4, VReg(s2).s4);
+      e.fmla(VReg(2).s4, VReg(0).s4, VReg(1).s4);
 
       // Negate before the fixup, never after: the fixup overwrites every NaN
       // lane, and hardware leaves a NaN result's sign alone.
@@ -4299,8 +4250,7 @@ struct MUL_SUB_V128
         e.fneg(VReg(2).s4, VReg(2).s4);
       }
 
-      // PPC NaN fixup (sources on stack at offsets 0/16/32).
-      FixupVmxNan_V128_Fma(e);
+      FixupVmxNan_V128_Fma(e, d);
 
       // Flush output denormals.
       if (!e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {

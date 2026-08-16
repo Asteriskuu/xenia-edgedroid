@@ -504,66 +504,57 @@ inline void FixupVmxNan_V128(A64Emitter& e) {
   e.L(done);
 }
 
-// Fix PPC NaN propagation for V128 FMA result (3 source operands).
-// Expects: result in v2, flushed sources saved on stack at:
-//   GUEST_SCRATCH + 0  = src1 (16 bytes)
-//   GUEST_SCRATCH + 16 = src2 (16 bytes)
-//   GUEST_SCRATCH + 32 = src3 (16 bytes)
-// For MUL_ADD/MUL_SUB the HIR operands are (A, C, B), and hardware returns the
-// first NaN in A, B, C order — measured off the captured vectors, and NOT the
-// operand order, so the walk below is src1, src3, src2.
-// Clobbers v0, v1, v3, w0, w16, w17.
-inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
-  using namespace Xbyak_aarch64;
-  auto& done = e.NewCachedLabel();
-
-  // Fast path: if no result lane is NaN, skip entirely.
-  e.fcmeq(VReg(3).s4, VReg(2).s4, VReg(2).s4);
-  e.uminv(SReg(3), VReg(3).s4);
-  e.fmov(e.w0, SReg(3));
-  // `done` is bound a bounded number of instructions below — near is safe.
-  e.cbnz_near(e.w0, done);
-
-  // NaN threshold constant.
-  e.mov(e.w16, 0xFF000000u);
-
-  static constexpr int32_t kOperandOrder[3] = {0, 32, 16};
-
-  for (int lane = 0; lane < 4; lane++) {
-    auto& lane_ok = e.NewCachedLabel();
-    auto& use_default = e.NewCachedLabel();
-
-    // Check if result[lane] is NaN.
-    e.umov(e.w0, VReg(2).s4[lane]);
-    e.lsl(e.w17, e.w0, 1);
-    e.cmp(e.w17, e.w16);
-    e.b_near(LS, lane_ok);
-
-    for (int step = 0; step < 3; ++step) {
-      auto& next = step == 2 ? use_default : e.NewCachedLabel();
-      e.ldr(e.w0, ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                                kOperandOrder[step] + lane * 4));
-      e.lsl(e.w17, e.w0, 1);
-      e.cmp(e.w17, e.w16);
-      e.b_near(LS, next);
-      e.orr(e.w0, e.w0, static_cast<uint64_t>(1u << 22));
-      e.ins(VReg(2).s4[lane], e.w0);
-      e.b(lane_ok);
-      if (step != 2) {
-        e.L(next);
-      }
-    }
-
-    e.L(use_default);
-    // No NaN operand, so this is an invalid operation. No captured vector
-    // reaches here, so the sign is not something the tests pin down.
-    e.mov(e.w0, 0xFFC00000u);
-    e.ins(VReg(2).s4[lane], e.w0);
-
-    e.L(lane_ok);
+// Load an FMA's three sources into the registers FixupVmxNan_V128_Fma reads:
+// v0 = src1 (A), v1 = src2 (C), v3 = src3 (B), flushing input denormals in
+// software where FPCR.FZ does not. Uses v2 and `tmp` as flush scratch.
+template <typename T1, typename T2, typename T3>
+inline void PrepareVmxFmaSources(A64Emitter& e, const T1& op1, const T2& op2,
+                                 const T3& op3, int tmp) {
+  const int s1 = SrcVReg(e, op1, 0);
+  if (s1 != 0) {
+    e.mov(VReg(0).b16, VReg(s1).b16);
   }
+  const int s2 = SrcVReg(e, op2, 1);
+  if (s2 != 1) {
+    e.mov(VReg(1).b16, VReg(s2).b16);
+  }
+  const int s3 = SrcVReg(e, op3, 3);
+  if (s3 != 3) {
+    e.mov(VReg(3).b16, VReg(s3).b16);
+  }
+  if (!e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
+    FlushDenormals_V128(e, 0, 2, tmp);
+    FlushDenormals_V128(e, 1, 2, tmp);
+    FlushDenormals_V128(e, 3, 2, tmp);
+  }
+}
 
-  e.L(done);
+// Fix PPC NaN propagation for a V128 FMA result (3 source operands).
+// Hardware returns the first NaN in A, B, C order, quieted, and the HIR
+// operands are (A, C, B). An invalid operation with no NaN operand needs
+// nothing: ARM's default NaN is already the one PPC produces.
+// Expects: v0 = flushed A, v1 = flushed C, v3 = flushed B, v2 = the FMA result.
+// `tmp` must be a register free until the result is stored, which v0-v3 cannot
+// supply. Modifies v2 in place. Clobbers v1 and tmp.
+inline void FixupVmxNan_V128_Fma(A64Emitter& e, int tmp) {
+  using namespace Xbyak_aarch64;
+  // Lowest priority first, so an earlier operand overwrites a later one: C,
+  // then B, then A. BIF inserts an operand wherever its self-compare is false,
+  // which is exactly where that operand is NaN.
+  e.fcmeq(VReg(tmp).s4, VReg(1).s4, VReg(1).s4);
+  e.bif(VReg(2).b16, VReg(1).b16, VReg(tmp).b16);
+  e.fcmeq(VReg(tmp).s4, VReg(3).s4, VReg(3).s4);
+  e.bif(VReg(2).b16, VReg(3).b16, VReg(tmp).b16);
+  e.fcmeq(VReg(tmp).s4, VReg(0).s4, VReg(0).s4);
+  e.bif(VReg(2).b16, VReg(0).b16, VReg(tmp).b16);
+
+  // Quiet whatever NaN each lane ended up with. A lane still holding the
+  // arithmetic result is either not NaN or already the default NaN, so this
+  // only ever quiets an operand that was signalling.
+  e.fcmeq(VReg(tmp).s4, VReg(2).s4, VReg(2).s4);
+  e.movi(VReg(1).s4, 0x40, LSL, 16);
+  e.bic(VReg(1).b16, VReg(1).b16, VReg(tmp).b16);
+  e.orr(VReg(2).b16, VReg(2).b16, VReg(1).b16);
 }
 
 // VMX float32x4 binary operations with full PPC semantics.
