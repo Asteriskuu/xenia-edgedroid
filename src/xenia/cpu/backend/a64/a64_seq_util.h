@@ -433,75 +433,27 @@ inline void PrepareVmxFpSources(A64Emitter& e, const T1& op1, const T2& op2,
 }
 
 // Fix PPC NaN propagation for V128 float32 lanes after a NEON FP operation.
+// Hardware returns the first NaN by operand position, quieted. An invalid
+// operation with no NaN operand needs nothing: ARM's default NaN is already
+// the one PPC produces.
 // Expects: v0=flushed src1, v1=flushed src2, v2=hardware FP result.
-// Modifies v2 in place. Clobbers v0, v1, v3, w0, w16, w17.
-// PPC rule: first NaN by operand position wins; SNaN is quieted (bit 22 set).
-// If neither input was NaN but the op generated NaN (e.g., inf-inf),
-// use the PPC default NaN (0xFFC00000).
+// Modifies v2 in place. Clobbers v1, v3.
 inline void FixupVmxNan_V128(A64Emitter& e) {
   using namespace Xbyak_aarch64;
-  auto& done = e.NewCachedLabel();
+  // Lowest priority first, so src1 overwrites src2. BIF inserts an operand
+  // wherever its self-compare is false, which is exactly where it is NaN.
+  e.fcmeq(VReg(3).s4, VReg(1).s4, VReg(1).s4);
+  e.bif(VReg(2).b16, VReg(1).b16, VReg(3).b16);
+  e.fcmeq(VReg(3).s4, VReg(0).s4, VReg(0).s4);
+  e.bif(VReg(2).b16, VReg(0).b16, VReg(3).b16);
 
-  // Fast path: if no result lane is NaN, skip entirely.
-  e.fcmeq(VReg(3).s4, VReg(2).s4, VReg(2).s4);  // all-1s for non-NaN
-  e.uminv(SReg(3), VReg(3).s4);                 // min across lanes
-  e.fmov(e.w0, SReg(3));
-  // `done` is bound a bounded number of instructions below — near is safe.
-  e.cbnz_near(e.w0, done);  // all non-NaN → skip
-
-  // Save s1/s2 to stack for scalar lane extraction.
-  e.str(QReg(0), ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
-  e.str(QReg(1),
-        ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) + 16));
-
-  // NaN threshold: (val<<1) > 0xFF000000 means val is NaN.
-  e.mov(e.w16, 0xFF000000u);
-
-  for (int lane = 0; lane < 4; lane++) {
-    auto& lane_ok = e.NewCachedLabel();
-    auto& s1_not_nan = e.NewCachedLabel();
-    auto& use_default = e.NewCachedLabel();
-
-    // Check if result[lane] is NaN.
-    e.umov(e.w0, VReg(2).s4[lane]);
-    e.lsl(e.w17, e.w0, 1);
-    e.cmp(e.w17, e.w16);
-    e.b_near(LS, lane_ok);
-
-    // Result is NaN. Check s1[lane].
-    e.ldr(e.w0, ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                              lane * 4));
-    e.lsl(e.w17, e.w0, 1);
-    e.cmp(e.w17, e.w16);
-    e.b_near(LS, s1_not_nan);
-
-    // s1 is NaN: quiet it and insert.
-    e.orr(e.w0, e.w0, static_cast<uint64_t>(1u << 22));
-    e.ins(VReg(2).s4[lane], e.w0);
-    e.b(lane_ok);
-
-    e.L(s1_not_nan);
-    // Check s2[lane].
-    e.ldr(e.w0, ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                              16 + lane * 4));
-    e.lsl(e.w17, e.w0, 1);
-    e.cmp(e.w17, e.w16);
-    e.b_near(LS, use_default);
-
-    // s2 is NaN: quiet it and insert.
-    e.orr(e.w0, e.w0, static_cast<uint64_t>(1u << 22));
-    e.ins(VReg(2).s4[lane], e.w0);
-    e.b(lane_ok);
-
-    e.L(use_default);
-    // Generated NaN (neither input was NaN): use PPC default NaN.
-    e.mov(e.w0, 0xFFC00000u);
-    e.ins(VReg(2).s4[lane], e.w0);
-
-    e.L(lane_ok);
-  }
-
-  e.L(done);
+  // Quiet whatever NaN each lane ended up with. A lane still holding the
+  // arithmetic result is either not NaN or already the default NaN, so this
+  // only ever quiets an operand that was signalling.
+  e.fcmeq(VReg(3).s4, VReg(2).s4, VReg(2).s4);
+  e.movi(VReg(1).s4, 0x40, LSL, 16);
+  e.bic(VReg(1).b16, VReg(1).b16, VReg(3).b16);
+  e.orr(VReg(2).b16, VReg(2).b16, VReg(1).b16);
 }
 
 // Load an FMA's three sources into the registers FixupVmxNan_V128_Fma reads:
@@ -562,7 +514,7 @@ enum class VmxFpBinOp { Add, Sub, Mul, Div };
 
 // Execute a VMX float32x4 binary operation with denormal flushing and PPC NaN
 // propagation.  Result goes into dest_idx.
-// Clobbers v0-v3, w0, w16, w17.
+// Clobbers v0-v3, w0.
 template <typename T1, typename T2>
 inline void EmitVmxFpBinOp_V128(A64Emitter& e, int dest_idx, const T1& src1,
                                 const T2& src2, VmxFpBinOp op) {
@@ -587,7 +539,7 @@ inline void EmitVmxFpBinOp_V128(A64Emitter& e, int dest_idx, const T1& src1,
         break;
     }
 
-    // PPC NaN propagation fixup (fast-path skip when no NaN).
+    // PPC NaN propagation fixup.
     FixupVmxNan_V128(e);
 
     // Flush output denormals. FPCR.FZ guarantees output flushing per the
