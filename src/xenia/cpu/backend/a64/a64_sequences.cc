@@ -570,9 +570,9 @@ struct ADD_I64 : Sequence<ADD_I64, I<OPCODE_ADD, I64Op, I64Op, I64Op>> {
 // NaN canonicalization helpers.
 // PPC NaN selection for 2-operand FP ops (add, sub, mul, div):
 // First NaN by operand position wins, quieted if SNaN.
-// If no input is NaN, use hardware; generated NaN becomes PPC default QNaN.
 // ARM64 may propagate a different NaN than PPC's positional rule, so NaN
-// inputs are handled entirely in software.
+// inputs are handled entirely in software. An invalid operation with no NaN
+// operand needs nothing: ARM's default NaN is the one PPC produces.
 enum class FpBinOp { Add, Sub, Mul, Div };
 
 static void EmitFpBinOpWithPpcNan_F32(A64Emitter& e, SReg dest, SReg s1,
@@ -603,10 +603,6 @@ static void EmitFpBinOpWithPpcNan_F32(A64Emitter& e, SReg dest, SReg s1,
       e.fdiv(dest, s1, s2);
       break;
   }
-  e.fcmp(dest, dest);
-  e.b_near(VC, done);
-  e.mov(e.w0, static_cast<uint64_t>(0xFFC00000u));
-  e.fmov(dest, e.w0);
   e.b(done);
 
   // Slow path: first NaN by position wins, quiet if SNaN.
@@ -653,10 +649,6 @@ static void EmitFpBinOpWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1,
       e.fdiv(dest, s1, s2);
       break;
   }
-  e.fcmp(dest, dest);
-  e.b_near(VC, done);
-  e.mov(e.x0, static_cast<uint64_t>(0xFFF8000000000000ull));
-  e.fmov(dest, e.x0);
   e.b(done);
 
   // Slow path: first NaN by position wins, quiet if SNaN.
