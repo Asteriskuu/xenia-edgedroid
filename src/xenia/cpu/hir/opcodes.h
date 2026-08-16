@@ -39,6 +39,18 @@ enum LoadStoreFlags {
   LOAD_STORE_BYTE_SWAP = 1 << 0,
 };
 
+// Backend-neutral form of the host FP exception status, as produced by
+// OPCODE_LOAD_FP_EXCEPTIONS. Denormal-operand is deliberately absent: x86
+// reports it and ARM reports it separately, while PPC has no such bit.
+enum FpExceptionFlags {
+  FP_EXCEPTION_INVALID = 1 << 0,
+  FP_EXCEPTION_DIV_BY_ZERO = 1 << 1,
+  FP_EXCEPTION_OVERFLOW = 1 << 2,
+  FP_EXCEPTION_UNDERFLOW = 1 << 3,
+  FP_EXCEPTION_INEXACT = 1 << 4,
+  FP_EXCEPTION_ALL = 0x1F,
+};
+
 enum CacheControlType {
   CACHE_CONTROL_TYPE_DATA_TOUCH,
   CACHE_CONTROL_TYPE_DATA_TOUCH_FOR_STORE,
@@ -288,6 +300,10 @@ enum Opcode {
   OPCODE_UNPACK,
   OPCODE_ATOMIC_COMPARE_EXCHANGE,
   OPCODE_SET_ROUNDING_MODE,
+  // Host FP exception status, for deriving FPSCR. Clear before the arithmetic
+  // and load after it, so the loaded set belongs to that one operation.
+  OPCODE_CLEAR_FP_EXCEPTIONS,
+  OPCODE_LOAD_FP_EXCEPTIONS,
   OPCODE_VECTOR_DENORMFLUSH,  // converts denormals to signed zeros in a vector
   OPCODE_TO_SINGLE,  // i could not find a decent name to assign to this opcode,
                      // as we already have OPCODE_ROUND. round double to float (

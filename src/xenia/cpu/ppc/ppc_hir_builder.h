@@ -63,10 +63,17 @@ class PPCHIRBuilder : public hir::HIRBuilder {
   void StoreFPSCR(Value* value);
   // For instructions that cannot raise an exception.
   void ClearFPSCRExceptions(bool update_cr1);
-  // Derives VX from the operands and the result. Only the recording forms pay
-  // for it; Rc=0 clears the exception bits as ClearFPSCRExceptions does.
-  void UpdateFPSCR(Value* result, std::initializer_list<Value*> operands,
-                   bool update_cr1);
+  // Call before the arithmetic so the status the host reports afterwards
+  // belongs to that operation alone. Only the recording forms pay for it.
+  void BeginFPSCRUpdate(bool update_cr1);
+  // Derives the summary from what the host raised, plus the invalid a
+  // signalling NaN operand always means. Rc=0 clears the exception bits as
+  // ClearFPSCRExceptions does.
+  void UpdateFPSCR(std::initializer_list<Value*> operands, bool update_cr1);
+  // As UpdateFPSCR, plus the 0 x inf the host is allowed to leave unsignalled.
+  void UpdateFPSCRForMultiplyAdd(Value* a, Value* c, Value* b, bool update_cr1);
+  // For the estimates, whose host stand-ins raise nothing of their own.
+  void UpdateFPSCRForEstimate(Value* b, bool is_sqrt_estimate, bool update_cr1);
   void CopyFPSCRToCR1();
   Value* LoadXER();
   void StoreXER(Value* value);
@@ -92,7 +99,8 @@ class PPCHIRBuilder : public hir::HIRBuilder {
  private:
   void MaybeBreakOnInstruction(uint32_t address);
   void AnnotateLabel(uint32_t address, Label* label);
-  void StoreFPSCRSummary(Value* vx, bool update_cr1);
+  void StoreFPSCRSummary(Value* raised, bool update_cr1);
+  Value* FpInvalidFromOperands(std::initializer_list<Value*> operands);
 
   PPCFrontend* frontend_;
 
