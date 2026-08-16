@@ -81,6 +81,12 @@ class PPCHIRBuilder : public hir::HIRBuilder {
   Value* ApplySingleDenormalOperand(Value* quirk, Value* result);
   // For the estimates, whose host stand-ins raise nothing of their own.
   void UpdateFPSCRForEstimate(Value* b, bool is_sqrt_estimate, bool update_cr1);
+  // For the conversions to integer, whose out of range invalid the host does
+  // not report: x64 clamps the operand before converting.
+  void UpdateFPSCRForConvertToInteger(Value* b, hir::RoundMode round_mode,
+                                      bool to_int64, bool update_cr1);
+  // For the paths whose answer is invalid and nothing else.
+  void SetFPSCRInvalid(bool update_cr1);
   void CopyFPSCRToCR1();
   Value* LoadXER();
   void StoreXER(Value* value);

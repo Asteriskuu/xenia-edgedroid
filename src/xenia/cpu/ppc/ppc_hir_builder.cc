@@ -625,6 +625,35 @@ void PPCHIRBuilder::UpdateFPSCRForEstimate(Value* b, bool is_sqrt_estimate,
   StoreFPSCRSummary(raised, true);
 }
 
+void PPCHIRBuilder::UpdateFPSCRForConvertToInteger(Value* b,
+                                                   RoundMode round_mode,
+                                                   bool to_int64,
+                                                   bool update_cr1) {
+  if (!update_cr1) {
+    ClearFPSCRExceptions(false);
+    return;
+  }
+  // Invalid is what the target range cannot hold, measured on the rounded
+  // value: truncating 2^31 - 0.5 stays in range where rounding it up does
+  // not. The limit is the power of two just past the maximum, which leaves
+  // the minimum itself in range. The NaNs never reach here.
+  Value* rounded = Round(b, round_mode);
+  double limit = to_int64 ? 9223372036854775808.0 : 2147483648.0;
+  Value* out_of_range = Or(CompareSGE(rounded, LoadConstantFloat64(limit)),
+                           CompareSLT(rounded, LoadConstantFloat64(-limit)));
+  Value* raised = Or(LoadFpExceptions(),
+                     FpExceptionBit(*this, out_of_range, FP_EXCEPTION_INVALID));
+  StoreFPSCRSummary(raised, true);
+}
+
+void PPCHIRBuilder::SetFPSCRInvalid(bool update_cr1) {
+  if (!update_cr1) {
+    ClearFPSCRExceptions(false);
+    return;
+  }
+  StoreFPSCRSummary(LoadConstantUint32(FP_EXCEPTION_INVALID), true);
+}
+
 void PPCHIRBuilder::CopyFPSCRToCR1() {
   // Pull out of FPSCR.
   Value* fpscr = LoadFPSCR();

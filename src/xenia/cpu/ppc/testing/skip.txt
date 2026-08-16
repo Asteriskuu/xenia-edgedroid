@@ -1,30 +1,5 @@
-fctid_3_cr_GEN
-fctid_4_cr_GEN
-fctid_9_cr_GEN
-fctid_10_cr_GEN
-fctid_11_cr_GEN
-fctid_12_cr_GEN
-fctidz_3_cr_GEN
-fctidz_4_cr_GEN
-fctidz_9_cr_GEN
-fctidz_10_cr_GEN
-fctidz_11_cr_GEN
-fctidz_12_cr_GEN
-fctiw_3_cr_GEN
-fctiw_4_cr_GEN
-fctiw_9_cr_GEN
-fctiw_10_cr_GEN
-fctiw_11_GEN
-fctiw_11_cr_GEN
-fctiw_12_GEN
-fctiw_12_cr_GEN
-fctiwz_3_cr_GEN
-fctiwz_4_cr_GEN
-fctiwz_9_cr_GEN
-fctiwz_10_cr_GEN
-fctiwz_11_GEN
-fctiwz_11_cr_GEN
-fctiwz_12_GEN
+# The capture wants result 0 and cr 0 from an SNaN, where fctiw_12_cr and
+# both fctid forms want the most negative value and VX. Self-inconsistent.
 fctiwz_12_cr_GEN
 fdivs_28_GEN
 fdivs_28_cr_GEN
