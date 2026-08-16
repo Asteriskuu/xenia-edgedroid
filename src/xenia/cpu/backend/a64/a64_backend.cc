@@ -36,6 +36,7 @@
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/backend/a64/a64_tracers.h"
+#include "xenia/cpu/backend/vrsqrte_table.h"
 #include "xenia/cpu/breakpoint.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
@@ -512,7 +513,7 @@ void* A64HelperEmitter::EmitVRsqrtefpHelper(void** out_vector_entry) {
     size_t tail;
   } code_offsets = {};
 
-  Label interpolate, interpolate_setup, slow, exp_nonzero, check_negative;
+  Label interpolate_setup, slow, exp_nonzero, check_negative;
   Label signed_inf, quiet_nan, ret_qnan, oddball, table;
   Label lane;
 
@@ -521,22 +522,19 @@ void* A64HelperEmitter::EmitVRsqrtefpHelper(void** out_vector_entry) {
   code_offsets.body = getSize();
 
   L(lane);
-  // Positive normals need none of the classification below, so derive the
-  // interpolation's three inputs directly and rejoin at the table lookup.
+  // Positive normals are a straight lookup: the table holds the result for a
+  // canonical exponent, and the real exponent is a subtract on top of it.
   ubfx(w1, w0, 23, 9);  // sign:exponent
   sub(w1, w1, 1);
   cmp(w1, 253);
   b(HI, slow);
-  // coefficient index = ((exponent & 1) << 4) | (mantissa >> 19)
-  ubfx(w1, w0, 19, 4);
-  ubfx(w2, w0, 23, 1);
-  orr(w1, w1, w2, LSL, 4);
-  // interpolation factor
-  ubfx(w2, w0, 9, 10);
-  // result exponent term, (127 - exponent) >> 1
-  mov(w3, 63);
-  sub(w3, w3, w0, LSR, 24);
-  b(interpolate);
+  ubfx(w1, w0, 9, 15);
+  mov(x2, reinterpret_cast<uint64_t>(GetNormalVRsqrteTable()));
+  ldr(w2, ptr(x2, x1, LSL, 2));
+  lsr(w0, w0, 24);
+  sub(w0, w0, 63);
+  sub(w0, w2, w0, LSL, 23);
+  ret();
 
   L(slow);
   and_(w1, w0, 0x7FFFFF);  // mantissa
@@ -581,7 +579,6 @@ void* A64HelperEmitter::EmitVRsqrtefpHelper(void** out_vector_entry) {
   ubfx(w2, w1, 9, 10);
   orr(w1, w4, w5, LSL, 4);
 
-  L(interpolate);
   // w1 = coefficient index, w2 = interpolation factor, w3 = exponent term.
   adr(x4, table);
   ldr(w4, ptr(x4, x1, LSL, 2));
