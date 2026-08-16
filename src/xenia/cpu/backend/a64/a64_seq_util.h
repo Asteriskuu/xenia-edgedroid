@@ -393,16 +393,20 @@ inline void FlushDenormals_V128(A64Emitter& e, int vreg, int sa = 2,
 // ARM64 fmax/fmin do propagate a NaN, but by ARM's rules: an SNaN in either
 // operand outranks a QNaN in the other. PPC is strictly positional, so a NaN
 // lane takes src1 where src1 is NaN and src2 otherwise.
-// Does not quiet a signalling NaN, matching x64.
 // Expects: v0=flushed src1, v1=flushed src2, v2=hardware fmax/fmin result.
-// Modifies v2 in place. Clobbers v3.
+// Modifies v2 in place. Clobbers v1, v3.
 inline void FixupVmxMaxMinNan(A64Emitter& e) {
-  // Lanes where src2 is NaN take src2, the rest keep the arithmetic result.
-  e.fcmeq(VReg(3).s4, VReg(1).s4, VReg(1).s4);  // v3 = non-NaN mask for src2
-  e.bsl(VReg(3).b16, VReg(2).b16, VReg(1).b16);
-  // src1 wins over both of those wherever it is the NaN.
-  e.fcmeq(VReg(2).s4, VReg(0).s4, VReg(0).s4);  // v2 = non-NaN mask for src1
-  e.bsl(VReg(2).b16, VReg(3).b16, VReg(0).b16);
+  // The NaN to return: src1 where src1 is NaN, else src2.
+  e.fcmeq(VReg(3).s4, VReg(0).s4, VReg(0).s4);  // v3 = non-NaN mask for src1
+  e.bsl(VReg(3).b16, VReg(1).b16, VReg(0).b16);
+  // Quieted, which is what hardware returns.
+  e.movi(VReg(1).s4, 0x40, LSL, 16);  // v1 = quiet bit
+  e.orr(VReg(3).b16, VReg(3).b16, VReg(1).b16);
+  // fmax/fmin only produce a NaN out of a NaN operand, so the arithmetic
+  // result's own NaN lanes are exactly the ones to replace.
+  e.mov(VReg(1).b16, VReg(2).b16);
+  e.fcmeq(VReg(2).s4, VReg(1).s4, VReg(1).s4);
+  e.bsl(VReg(2).b16, VReg(1).b16, VReg(3).b16);
 }
 
 // Prepare two V128 operands for a VMX FP operation: copy to scratch v0/v1
