@@ -2180,9 +2180,17 @@ struct MUL_ADD_V128
       // todo: this is garbage
       // 132 rather than 213, for free: the host ranks NaN operands
       // multiplicand, multiplier, addend, so this form propagates A, C, B where
-      // 213 propagates C, A, B. PPC wants A, B, C, so this buys every case
-      // where A and C are both NaN. B can never outrank C on x64 - it is the
-      // addend, which the host always ranks last.
+      // 213 propagates C, A, B. PPC wants A, B, C.
+      if (!negate) {
+        // Which leaves B outranking C, and the host cannot express that: the
+        // addend is always ranked last. Zeroing the multiplier wherever the
+        // addend is a NaN makes the host fall through to it. Nothing else
+        // moves: a NaN addend means the result is a NaN from A or B whatever C
+        // held, and A still outranks both.
+        e.vcmpunordps(e.xmm3, src3, src3);
+        e.vandnps(e.xmm1, e.xmm3, src2);
+        src2 = e.xmm1;
+      }
       e.vmovaps(e.xmm3, src1);
       e.vfmadd132ps(e.xmm3, src3, src2);
       if (!negate) {
