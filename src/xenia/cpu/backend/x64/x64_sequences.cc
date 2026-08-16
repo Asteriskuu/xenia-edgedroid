@@ -2279,7 +2279,32 @@ struct SQRT_F32 : Sequence<SQRT_F32, I<OPCODE_SQRT, F32Op, F32Op>> {
 struct SQRT_F64 : Sequence<SQRT_F64, I<OPCODE_SQRT, F64Op, F64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     e.ChangeMxcsrMode(MXCSRMode::Fpu);
-    e.vsqrtsd(i.dest, GetInputRegOrConstant(e, i.src1, e.xmm0));
+    Xmm src = GetInputRegOrConstant(e, i.src1, e.xmm0);
+    // A negative operand is an invalid operation, and PPC answers it with the
+    // positive default QNaN where x86 answers with the negative one. Only a NaN
+    // result can need the fixup, so the test stays off the result's dependency
+    // chain. The sqrt lands in a scratch because dest may share a register with
+    // src, and the tail still needs the operand to tell the two NaNs apart.
+    Xbyak::Label& done = e.NewCachedLabel();
+    Xbyak::Label& invalid =
+        e.AddToTail([i, &done](X64Emitter& e, Xbyak::Label& tail) {
+          e.L(tail);
+          Xbyak::Label propagate;
+          Xmm src = GetInputRegOrConstant(e, i.src1, e.xmm0);
+          e.vucomisd(src, src);
+          e.jp(propagate);  // NaN operand: keep the one sqrtsd propagated
+          e.mov(e.rax, 0x7FF8000000000000ull);
+          e.vmovq(i.dest, e.rax);
+          e.jmp(done, X64Emitter::T_NEAR);
+          e.L(propagate);
+          e.vmovapd(i.dest, e.xmm1);
+          e.jmp(done, X64Emitter::T_NEAR);
+        });
+    e.vsqrtsd(e.xmm1, src);
+    e.vucomisd(e.xmm1, e.xmm1);
+    e.jp(invalid, X64Emitter::T_NEAR);
+    e.vmovapd(i.dest, e.xmm1);
+    e.L(done);
   }
 };
 struct SQRT_V128 : Sequence<SQRT_V128, I<OPCODE_SQRT, V128Op, V128Op>> {
