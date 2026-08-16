@@ -1236,14 +1236,14 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
   // Denormals flush to zero (preserve_denormal=false).
   // If round_to_even is true, applies round-to-nearest-even before truncation.
   // Result: 4 halfwords in the low 16 bits of each 32-bit lane in v1.
-  // Clobbers v0-v3, w0.  Sign is spilled to GUEST_SCRATCH.
-  static void EmitFloatToXenosHalf4(A64Emitter& e, bool round_to_even) {
+  // Clobbers v0-v3, w0 and `tmp`, which holds the sign across the conversion
+  // because v0-v3 are all in use. The caller's dest serves: it is written only
+  // once the conversion is done.
+  static void EmitFloatToXenosHalf4(A64Emitter& e, bool round_to_even,
+                                    int tmp) {
     // v0 = input float32 bits.  Extract sign, compute abs.
-    e.ushr(VReg(1).s4, VReg(0).s4, 31);
-    e.shl(VReg(1).s4, VReg(1).s4, 15);  // v1 = sign at bit 15
-    // Spill sign to stack (we need all 4 scratch regs).
-    e.str(QReg(1),
-          ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
+    e.ushr(VReg(tmp).s4, VReg(0).s4, 31);
+    e.shl(VReg(tmp).s4, VReg(tmp).s4, 15);  // tmp = sign at bit 15
 
     // v0 = abs (clear sign bit)
     e.shl(VReg(0).s4, VReg(0).s4, 1);
@@ -1280,10 +1280,8 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     e.cmhi(VReg(2).s4, VReg(2).s4, VReg(0).s4);    // v2 = small mask
     e.bic(VReg(1).b16, VReg(1).b16, VReg(2).b16);  // zero where small
 
-    // Restore sign from stack and combine.
-    e.ldr(QReg(0),
-          ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
-    e.orr(VReg(1).b16, VReg(1).b16, VReg(0).b16);
+    // Combine with the sign.
+    e.orr(VReg(1).b16, VReg(1).b16, VReg(tmp).b16);
     // v1 = 4 Xenos halfs in low 16 bits of each 32-bit lane.
   }
   static void EmitFLOAT16_2(A64Emitter& e, const EmitArgType& i) {
@@ -1299,7 +1297,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     int s = i.src1.reg().getIdx();
     int d = i.dest.reg().getIdx();
     e.mov(VReg(0).b16, VReg(s).b16);
-    EmitFloatToXenosHalf4(e, false);
+    EmitFloatToXenosHalf4(e, false, d);
     // v1 has halfs in s[0..3].  FLOAT16_2 uses only lanes 0,1.
     // Output: h[7]=half(f32[0]), h[6]=half(f32[1]), rest=0.
     // Narrow to halfwords, swap within word pairs, place at top of vector.
@@ -1322,7 +1320,7 @@ struct PACK : Sequence<PACK, I<OPCODE_PACK, V128Op, V128Op, V128Op>> {
     int s = i.src1.reg().getIdx();
     int d = i.dest.reg().getIdx();
     e.mov(VReg(0).b16, VReg(s).b16);
-    EmitFloatToXenosHalf4(e, true);
+    EmitFloatToXenosHalf4(e, true, d);
     // v1 has halfs in s[0..3].  Output mapping:
     //   idx0→h[5], idx1→h[4], idx2→h[7], idx3→h[6]
     // = upper 64 bits with within-word swap, lower 64 bits zero.
