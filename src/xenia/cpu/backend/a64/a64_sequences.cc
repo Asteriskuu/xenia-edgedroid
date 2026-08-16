@@ -682,8 +682,12 @@ static void EmitFpBinOpWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1,
 // (from 0*inf or inf-inf) becomes the PPC default QNaN.
 // ARM64's fmadd may propagate a different NaN than PPC's positional
 // rule, so NaN inputs are handled entirely in software.
+// The HIR operands are (A, C, B) but hardware returns the first NaN in
+// A, B, C order, so the walk below is s1, s3, s2 — measured off the captured
+// vectors, not the operand order. The NaN is returned un-negated even for
+// fnmadd/fnmsub, which is why the negation only reaches the arithmetic path.
 static void EmitFmaWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1, DReg s2,
-                                  DReg s3, bool is_sub) {
+                                  DReg s3, bool is_sub, bool negate) {
   e.ChangeFpcrMode(FPCRMode::Fpu);
   auto& nan_path = e.NewCachedLabel();
   auto& done = e.NewCachedLabel();
@@ -694,7 +698,10 @@ static void EmitFmaWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1, DReg s2,
   e.fccmp(s3, s3, 0b0001, VC);
   e.b_near(VS, nan_path);
 
-  // Fast path: no NaN input → hardware FMA.
+  // Fast path: no NaN input → hardware FMA, then negate the result. Not
+  // fnmadd: that negates the operands (-Ra - Rn*Rm), which differs from
+  // -(Ra + Rn*Rm) when the two addends are zeros of opposite sign.
+  auto& invalid = e.NewCachedLabel();
   if (is_sub) {
     e.fnmsub(dest, s1, s2, s3);
   } else {
@@ -702,33 +709,31 @@ static void EmitFmaWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1, DReg s2,
   }
   // If result is NaN (0*inf or inf-inf), canonicalize to PPC default.
   e.fcmp(dest, dest);
-  e.b_near(VC, done);
-  e.mov(e.x0, static_cast<uint64_t>(0xFFF8000000000000ull));
+  e.b_near(VS, invalid);
+  if (negate) {
+    e.fneg(dest, dest);
+  }
+  e.b(done);
+  e.L(invalid);
+  e.mov(e.x0, static_cast<uint64_t>(0x7FF8000000000000ull));
   e.fmov(dest, e.x0);
   e.b(done);
 
-  // Slow path: first NaN by position wins (quiet if SNaN).
+  // Slow path: first NaN in A, B, C order wins (quiet if SNaN).
   e.L(nan_path);
-  auto& s1_not_nan = e.NewCachedLabel();
-  e.fcmp(s1, s1);
-  e.b_near(VC, s1_not_nan);
-  e.fmov(e.x0, s1);
-  e.orr(e.x0, e.x0, static_cast<uint64_t>(1ull << 51));  // ensure quiet
-  e.fmov(dest, e.x0);
-  e.b(done);
-  e.L(s1_not_nan);
-
-  auto& s2_not_nan = e.NewCachedLabel();
-  e.fcmp(s2, s2);
-  e.b_near(VC, s2_not_nan);
-  e.fmov(e.x0, s2);
-  e.orr(e.x0, e.x0, static_cast<uint64_t>(1ull << 51));
-  e.fmov(dest, e.x0);
-  e.b(done);
-  e.L(s2_not_nan);
-
-  // Must be s3 (at least one NaN exists).
-  e.fmov(e.x0, s3);
+  DReg order[3] = {s1, s3, s2};
+  for (int step = 0; step < 2; ++step) {
+    auto& not_nan = e.NewCachedLabel();
+    e.fcmp(order[step], order[step]);
+    e.b_near(VC, not_nan);
+    e.fmov(e.x0, order[step]);
+    e.orr(e.x0, e.x0, static_cast<uint64_t>(1ull << 51));  // ensure quiet
+    e.fmov(dest, e.x0);
+    e.b(done);
+    e.L(not_nan);
+  }
+  // At least one operand is a NaN, so it must be this one.
+  e.fmov(e.x0, order[2]);
   e.orr(e.x0, e.x0, static_cast<uint64_t>(1ull << 51));
   e.fmov(dest, e.x0);
 
@@ -736,7 +741,7 @@ static void EmitFmaWithPpcNan_F64(A64Emitter& e, DReg dest, DReg s1, DReg s2,
 }
 
 static void EmitFmaWithPpcNan_F32(A64Emitter& e, SReg dest, SReg s1, SReg s2,
-                                  SReg s3, bool is_sub) {
+                                  SReg s3, bool is_sub, bool negate) {
   e.ChangeFpcrMode(FPCRMode::Fpu);
   auto& nan_path = e.NewCachedLabel();
   auto& done = e.NewCachedLabel();
@@ -746,37 +751,36 @@ static void EmitFmaWithPpcNan_F32(A64Emitter& e, SReg dest, SReg s1, SReg s2,
   e.fccmp(s3, s3, 0b0001, VC);
   e.b_near(VS, nan_path);
 
+  auto& invalid = e.NewCachedLabel();
   if (is_sub) {
     e.fnmsub(dest, s1, s2, s3);
   } else {
     e.fmadd(dest, s1, s2, s3);
   }
   e.fcmp(dest, dest);
-  e.b_near(VC, done);
-  e.mov(e.w0, static_cast<uint64_t>(0xFFC00000u));
+  e.b_near(VS, invalid);
+  if (negate) {
+    e.fneg(dest, dest);
+  }
+  e.b(done);
+  e.L(invalid);
+  e.mov(e.w0, static_cast<uint64_t>(0x7FC00000u));
   e.fmov(dest, e.w0);
   e.b(done);
 
   e.L(nan_path);
-  auto& s1_not_nan = e.NewCachedLabel();
-  e.fcmp(s1, s1);
-  e.b_near(VC, s1_not_nan);
-  e.fmov(e.w0, s1);
-  e.orr(e.w0, e.w0, static_cast<uint32_t>(1u << 22));
-  e.fmov(dest, e.w0);
-  e.b(done);
-  e.L(s1_not_nan);
-
-  auto& s2_not_nan = e.NewCachedLabel();
-  e.fcmp(s2, s2);
-  e.b_near(VC, s2_not_nan);
-  e.fmov(e.w0, s2);
-  e.orr(e.w0, e.w0, static_cast<uint32_t>(1u << 22));
-  e.fmov(dest, e.w0);
-  e.b(done);
-  e.L(s2_not_nan);
-
-  e.fmov(e.w0, s3);
+  SReg order[3] = {s1, s3, s2};
+  for (int step = 0; step < 2; ++step) {
+    auto& not_nan = e.NewCachedLabel();
+    e.fcmp(order[step], order[step]);
+    e.b_near(VC, not_nan);
+    e.fmov(e.w0, order[step]);
+    e.orr(e.w0, e.w0, static_cast<uint32_t>(1u << 22));
+    e.fmov(dest, e.w0);
+    e.b(done);
+    e.L(not_nan);
+  }
+  e.fmov(e.w0, order[2]);
   e.orr(e.w0, e.w0, static_cast<uint32_t>(1u << 22));
   e.fmov(dest, e.w0);
 
@@ -4111,7 +4115,8 @@ struct MUL_ADD_F32
       e.mov(e.w0, static_cast<uint64_t>(c.u));
       e.fmov(e.s2, e.w0);
     }
-    EmitFmaWithPpcNan_F32(e, i.dest, s1, s2, s3, /*is_sub=*/false);
+    EmitFmaWithPpcNan_F32(e, i.dest, s1, s2, s3, /*is_sub=*/false,
+                          i.instr->flags & ARITHMETIC_NEGATE_RESULT);
   }
 };
 struct MUL_ADD_F64
@@ -4147,7 +4152,8 @@ struct MUL_ADD_F64
       e.mov(e.x0, c.u);
       e.fmov(e.d2, e.x0);
     }
-    EmitFmaWithPpcNan_F64(e, i.dest, s1, s2, s3, /*is_sub=*/false);
+    EmitFmaWithPpcNan_F64(e, i.dest, s1, s2, s3, /*is_sub=*/false,
+                          i.instr->flags & ARITHMETIC_NEGATE_RESULT);
   }
 };
 struct MUL_ADD_V128
@@ -4188,6 +4194,12 @@ struct MUL_ADD_V128
             Xbyak_aarch64::ptr(
                 e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) + 32));
       e.fmla(VReg(2).s4, VReg(s1).s4, VReg(s2).s4);
+
+      // Negate before the fixup, never after: the fixup overwrites every NaN
+      // lane, and hardware leaves a NaN result's sign alone.
+      if (i.instr->flags & ARITHMETIC_NEGATE_RESULT) {
+        e.fneg(VReg(2).s4, VReg(2).s4);
+      }
 
       // PPC NaN fixup (sources on stack at offsets 0/16/32).
       FixupVmxNan_V128_Fma(e);
@@ -4240,7 +4252,8 @@ struct MUL_SUB_F64
       e.mov(e.x0, c.u);
       e.fmov(e.d2, e.x0);
     }
-    EmitFmaWithPpcNan_F64(e, i.dest, s1, s2, s3, /*is_sub=*/true);
+    EmitFmaWithPpcNan_F64(e, i.dest, s1, s2, s3, /*is_sub=*/true,
+                          i.instr->flags & ARITHMETIC_NEGATE_RESULT);
   }
 };
 struct MUL_SUB_V128
@@ -4279,6 +4292,12 @@ struct MUL_SUB_V128
                 e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) + 32));
       e.fneg(VReg(2).s4, VReg(2).s4);
       e.fmla(VReg(2).s4, VReg(s1).s4, VReg(s2).s4);
+
+      // Negate before the fixup, never after: the fixup overwrites every NaN
+      // lane, and hardware leaves a NaN result's sign alone.
+      if (i.instr->flags & ARITHMETIC_NEGATE_RESULT) {
+        e.fneg(VReg(2).s4, VReg(2).s4);
+      }
 
       // PPC NaN fixup (sources on stack at offsets 0/16/32).
       FixupVmxNan_V128_Fma(e);

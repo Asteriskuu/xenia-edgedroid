@@ -508,7 +508,9 @@ inline void FixupVmxNan_V128(A64Emitter& e) {
 //   GUEST_SCRATCH + 0  = src1 (16 bytes)
 //   GUEST_SCRATCH + 16 = src2 (16 bytes)
 //   GUEST_SCRATCH + 32 = src3 (16 bytes)
-// PPC rule: first NaN by operand position (src1 > src2 > src3) wins.
+// For MUL_ADD/MUL_SUB the HIR operands are (A, C, B), and hardware returns the
+// first NaN in A, B, C order — measured off the captured vectors, and NOT the
+// operand order, so the walk below is src1, src3, src2.
 // Clobbers v0, v1, v3, w0, w16, w17.
 inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
   using namespace Xbyak_aarch64;
@@ -524,10 +526,10 @@ inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
   // NaN threshold constant.
   e.mov(e.w16, 0xFF000000u);
 
+  static constexpr int32_t kOperandOrder[3] = {0, 32, 16};
+
   for (int lane = 0; lane < 4; lane++) {
     auto& lane_ok = e.NewCachedLabel();
-    auto& s1_not_nan = e.NewCachedLabel();
-    auto& s2_not_nan = e.NewCachedLabel();
     auto& use_default = e.NewCachedLabel();
 
     // Check if result[lane] is NaN.
@@ -536,39 +538,24 @@ inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
     e.cmp(e.w17, e.w16);
     e.b_near(LS, lane_ok);
 
-    // Result is NaN. Check src1[lane].
-    e.ldr(e.w0, ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                              lane * 4));
-    e.lsl(e.w17, e.w0, 1);
-    e.cmp(e.w17, e.w16);
-    e.b_near(LS, s1_not_nan);
-    e.orr(e.w0, e.w0, static_cast<uint64_t>(1u << 22));
-    e.ins(VReg(2).s4[lane], e.w0);
-    e.b(lane_ok);
-
-    e.L(s1_not_nan);
-    // Check src2[lane].
-    e.ldr(e.w0, ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                              16 + lane * 4));
-    e.lsl(e.w17, e.w0, 1);
-    e.cmp(e.w17, e.w16);
-    e.b_near(LS, s2_not_nan);
-    e.orr(e.w0, e.w0, static_cast<uint64_t>(1u << 22));
-    e.ins(VReg(2).s4[lane], e.w0);
-    e.b(lane_ok);
-
-    e.L(s2_not_nan);
-    // Check src3[lane].
-    e.ldr(e.w0, ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
-                              32 + lane * 4));
-    e.lsl(e.w17, e.w0, 1);
-    e.cmp(e.w17, e.w16);
-    e.b_near(LS, use_default);
-    e.orr(e.w0, e.w0, static_cast<uint64_t>(1u << 22));
-    e.ins(VReg(2).s4[lane], e.w0);
-    e.b(lane_ok);
+    for (int step = 0; step < 3; ++step) {
+      auto& next = step == 2 ? use_default : e.NewCachedLabel();
+      e.ldr(e.w0, ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH) +
+                                kOperandOrder[step] + lane * 4));
+      e.lsl(e.w17, e.w0, 1);
+      e.cmp(e.w17, e.w16);
+      e.b_near(LS, next);
+      e.orr(e.w0, e.w0, static_cast<uint64_t>(1u << 22));
+      e.ins(VReg(2).s4[lane], e.w0);
+      e.b(lane_ok);
+      if (step != 2) {
+        e.L(next);
+      }
+    }
 
     e.L(use_default);
+    // No NaN operand, so this is an invalid operation. No captured vector
+    // reaches here, so the sign is not something the tests pin down.
     e.mov(e.w0, 0xFFC00000u);
     e.ins(VReg(2).s4[lane], e.w0);
 
