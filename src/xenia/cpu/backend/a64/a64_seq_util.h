@@ -181,9 +181,8 @@ constexpr bool IsFmov64Imm(double f64) {
 }
 
 // Load a compile-time vec128_t constant into a NEON register.
-// May clobber the provided GPR scratch-register
-inline void LoadV128Const(A64Emitter& e, int vreg_idx, const vec128_t& val,
-                          int gpr_scratch_idx = 0) {
+// Values with no immediate form come from the literal pool, never a GPR.
+inline void LoadV128Const(A64Emitter& e, int vreg_idx, const vec128_t& val) {
   // Fast common cases
   if (!val.low && !val.high) {
     // 0000...
@@ -229,8 +228,7 @@ inline void LoadV128Const(A64Emitter& e, int vreg_idx, const vec128_t& val,
       e.mvni(VReg(vreg_idx).h8, ~static_cast<uint8_t>(splat_u16 >> 8) & 0xFF,
              LSL, 8);
     } else {
-      e.movz(WReg(gpr_scratch_idx), splat_u16, 0);
-      e.dup(VReg(vreg_idx).h8, WReg(gpr_scratch_idx));
+      e.ldr(QReg(vreg_idx), e.GetV128ConstLabel(val));
     }
     return;
   }
@@ -268,14 +266,12 @@ inline void LoadV128Const(A64Emitter& e, int vreg_idx, const vec128_t& val,
     } else if (IsFmov32Imm(splat_f32)) {
       e.fmov(VReg(vreg_idx).s4, splat_f32);
     } else {
-      e.mov(WReg(gpr_scratch_idx), splat_u32);
-      e.dup(VReg(vreg_idx).s4, WReg(gpr_scratch_idx));
+      e.ldr(QReg(vreg_idx), e.GetV128ConstLabel(val));
     }
     return;
   }
 
   const bool all_equal_u64 = val.low == val.high;
-  const uint64_t splat_u64 = val.u64[0];
   const double splat_f64 = val.f64[0];
   if (all_equal_u64) {
     if (IsMovi64Imm(val.low)) {
@@ -283,17 +279,12 @@ inline void LoadV128Const(A64Emitter& e, int vreg_idx, const vec128_t& val,
     } else if (IsFmov64Imm(splat_f64)) {
       e.fmov(VReg(vreg_idx).d2, splat_f64);
     } else {
-      e.mov(XReg(gpr_scratch_idx), splat_u64);
-      e.dup(VReg(vreg_idx).d2, XReg(gpr_scratch_idx));
+      e.ldr(QReg(vreg_idx), e.GetV128ConstLabel(val));
     }
     return;
   }
 
-  // Fallback
-  e.mov(XReg(gpr_scratch_idx), val.low);
-  e.fmov(DReg(vreg_idx), XReg(gpr_scratch_idx));
-  e.mov(XReg(gpr_scratch_idx), val.high);
-  e.ins(VReg(vreg_idx).d2[1], XReg(gpr_scratch_idx));
+  e.ldr(QReg(vreg_idx), e.GetV128ConstLabel(val));
 }
 
 // Resolve a V128 operand to a register index, loading constants into

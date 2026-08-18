@@ -259,6 +259,10 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
       instr = new_tail;
     }
 
+    if (!MaybeFlushV128ConstPool()) {
+      return false;
+    }
+
     block = block->next;
   }
 
@@ -301,8 +305,18 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
              current_guest_function_, e.what());
       return false;
     }
+    if (!MaybeFlushV128ConstPool()) {
+      return false;
+    }
   }
   code_offsets.tail = getSize();
+
+  // ========================================================================
+  // LITERAL POOL
+  // ========================================================================
+  if (!FlushV128ConstPool(false)) {
+    return false;
+  }
 
   // Fill in EmitFunctionInfo metrics.
   assert_zero(code_offsets.prolog);
@@ -356,6 +370,8 @@ void A64Emitter::ResetPerFunctionState() {
     delete cached_label;
   }
   label_cache_.clear();
+  v128_consts_.clear();
+  v128_consts_first_use_ = 0;
 
   // Clean up HIR->xbyak label map. HIR label ids restart at each function, so
   // stale entries would hand the next function this one's labels.
@@ -945,6 +961,68 @@ Label& A64Emitter::GetLabel(uint32_t label_id) {
   auto* label = new Label();
   label_map_[label_id] = label;
   return *label;
+}
+
+// Half of LDR (literal)'s +-1MB reach, leaving room for the item in flight.
+static constexpr size_t kV128ConstPoolReach = 512 * 1024;
+
+Label& A64Emitter::GetV128ConstLabel(const vec128_t& value) {
+  for (auto& entry : v128_consts_) {
+    if (entry.first == value) {
+      return *entry.second;
+    }
+  }
+  if (v128_consts_.empty()) {
+    v128_consts_first_use_ = getSize();
+  }
+  auto* label = new Label();
+  label_cache_.push_back(label);
+  v128_consts_.emplace_back(value, label);
+  return *label;
+}
+
+bool A64Emitter::FlushV128ConstPool(bool branch_over) {
+  if (v128_consts_.empty()) {
+    return true;
+  }
+  Label* skip = nullptr;
+  if (branch_over) {
+    skip = new Label();
+    label_cache_.push_back(skip);
+    b(*skip);
+  }
+  // Functions start 16-byte aligned in the code cache.
+  while (getSize() % 16) {
+    dd(0);
+  }
+  try {
+    for (auto& entry : v128_consts_) {
+      L(*entry.second);
+      for (int word = 0; word < 4; ++word) {
+        dd(entry.first.u32[word]);
+      }
+    }
+  } catch (const Xbyak_aarch64::Error& e) {
+    XELOGE(
+        "A64: v128 literal pool out of range in guest function {:08X} "
+        "({} constants, {} bytes since the first use): {}",
+        current_guest_function_, v128_consts_.size(),
+        getSize() - v128_consts_first_use_, e.what());
+    return false;
+  }
+  v128_consts_.clear();
+  if (skip) {
+    L(*skip);
+  }
+  return true;
+}
+
+bool A64Emitter::MaybeFlushV128ConstPool() {
+  if (v128_consts_.empty() ||
+      getSize() - v128_consts_first_use_ < kV128ConstPoolReach) {
+    return true;
+  }
+  return FlushV128ConstPool(true);
 }
 
 void A64Emitter::HandleStackpointOverflowError(ppc::PPCContext* context) {
