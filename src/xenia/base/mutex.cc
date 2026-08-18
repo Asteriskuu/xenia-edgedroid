@@ -126,9 +126,7 @@ void xe_global_mutex::lock_slow() {
 
   // Spin phase
   for (int i = 0; i < XE_LINUX_MUTEX_SPINCOUNT; ++i) {
-#if XE_ARCH_AMD64 == 1
-    _mm_pause();
-#endif
+    SpinPause();
     uint32_t expected = 0;
     if (state_.compare_exchange_strong(expected, 1, std::memory_order_acquire,
                                        std::memory_order_relaxed)) {
@@ -214,9 +212,7 @@ void xe_fast_mutex::lock() {
 void xe_fast_mutex::lock_slow() {
   // Spin phase
   for (int i = 0; i < XE_LINUX_MUTEX_SPINCOUNT; ++i) {
-#if XE_ARCH_AMD64 == 1
-    _mm_pause();
-#endif
+    SpinPause();
     uint32_t expected = 0;
     if (state_.compare_exchange_strong(expected, 1, std::memory_order_acquire,
                                        std::memory_order_relaxed)) {

@@ -1247,9 +1247,7 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
           scheduler->DispatchCpuOf(our_cpu)) {
         volatile uint32_t* owner_raw = &lock->prcb_of_owner.value;
         for (int i = 0; i < kRemoteHolderSpinTries && *owner_raw; ++i) {
-#if XE_ARCH_AMD64 == 1
-          _mm_pause();
-#endif
+          SpinPause();
         }
         if (!*owner_raw) {
           continue;
