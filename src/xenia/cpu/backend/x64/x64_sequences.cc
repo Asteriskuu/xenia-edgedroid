@@ -834,31 +834,81 @@ static bool IsVectorCompare(const Instr* i) {
   Opcode op = i->opcode->num;
   return op >= OPCODE_VECTOR_COMPARE_EQ && op <= OPCODE_VECTOR_COMPARE_UGE;
 }
+// vpblendvb only needs each byte to be 0x00 or 0xFF, but vblendvps picks a
+// whole 32-bit lane off that lane's high bit, so it additionally needs the
+// lane to be uniform.
+static PermittedBlend GetPermittedBlendForConstant(const vec128_t& c) {
+  for (int i = 0; i < 16; ++i) {
+    if (c.u8[i] != 0x00 && c.u8[i] != 0xFF) {
+      return PermittedBlend::NotPermitted;
+    }
+  }
+  for (int i = 0; i < 4; ++i) {
+    if (c.u32[i] != 0x00000000u && c.u32[i] != 0xFFFFFFFFu) {
+      return PermittedBlend::Int8;
+    }
+  }
+  return PermittedBlend::Ps;
+}
+
+// Bounds the walk below over selectors built from chained bitwise ops.
+static constexpr unsigned kMaxBlendSelectorDepth = 4;
+
 /*
     OPCODE_SELECT does a bit by bit selection, however, if the selector is the
    result of a comparison or if each element may only be 0xff or 0 we may use a
    blend instruction instead
 */
-static PermittedBlend GetPermittedBlendForSelectV128(const Value* src1v) {
+static PermittedBlend GetPermittedBlendForSelectV128(const Value* src1v,
+                                                     unsigned depth = 0) {
+  if (src1v->IsConstant()) {
+    return GetPermittedBlendForConstant(src1v->constant.v128);
+  }
   const Instr* df = src1v->def;
   if (!df) {
     return PermittedBlend::NotPermitted;
-  } else {
-    if (!IsVectorCompare(df)) {
-      return PermittedBlend::NotPermitted;  // todo: check ors, ands of
-                                            // condition
-    } else {
-      switch (df->flags) {  // check what datatype we compared as
-        case INT16_TYPE:
-        case INT32_TYPE:
-        case INT8_TYPE:
-          return PermittedBlend::Int8;  // use vpblendvb
-        case FLOAT32_TYPE:
-          return PermittedBlend::Ps;  // use vblendvps
-        default:                      // unknown type! just ignore
-          return PermittedBlend::NotPermitted;
-      }
+  }
+  if (IsVectorCompare(df)) {
+    switch (df->flags) {  // check what datatype we compared as
+      case INT16_TYPE:
+      case INT32_TYPE:
+      case INT8_TYPE:
+        return PermittedBlend::Int8;  // use vpblendvb
+      case FLOAT32_TYPE:
+        return PermittedBlend::Ps;  // use vblendvps
+      default:                      // unknown type! just ignore
+        return PermittedBlend::NotPermitted;
     }
+  }
+  if (depth >= kMaxBlendSelectorDepth) {
+    return PermittedBlend::NotPermitted;
+  }
+  // The bitwise ops map {0x00, 0xFF} onto itself bytewise, so a selector built
+  // by combining comparisons still blends.
+  switch (df->opcode->num) {
+    case OPCODE_NOT:
+      return GetPermittedBlendForSelectV128(df->src1.value, depth + 1);
+    case OPCODE_AND:
+    case OPCODE_AND_NOT:
+    case OPCODE_OR:
+    case OPCODE_XOR: {
+      PermittedBlend lhs =
+          GetPermittedBlendForSelectV128(df->src1.value, depth + 1);
+      if (lhs == PermittedBlend::NotPermitted) {
+        return PermittedBlend::NotPermitted;
+      }
+      PermittedBlend rhs =
+          GetPermittedBlendForSelectV128(df->src2.value, depth + 1);
+      if (rhs == PermittedBlend::NotPermitted) {
+        return PermittedBlend::NotPermitted;
+      }
+      // Lane uniformity only survives if both sides had it.
+      return (lhs == PermittedBlend::Ps && rhs == PermittedBlend::Ps)
+                 ? PermittedBlend::Ps
+                 : PermittedBlend::Int8;
+    }
+    default:
+      return PermittedBlend::NotPermitted;
   }
 }
 struct SELECT_V128_V128
@@ -867,8 +917,8 @@ struct SELECT_V128_V128
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     const Xmm src1 = i.src1.is_constant ? e.xmm0 : i.src1;
     PermittedBlend mayblend = GetPermittedBlendForSelectV128(i.src1.value);
-    // todo: detect whether src1 is only 0 or FFFF and use blends if so.
-    // currently we only detect cmps
+    // todo: prove src1 is only 0 or FFFF for the cases the walk above can't
+    // reach, e.g. a mask loaded from memory
     if (i.src1.is_constant) {
       e.LoadConstantXmm(src1, i.src1.constant());
     }
