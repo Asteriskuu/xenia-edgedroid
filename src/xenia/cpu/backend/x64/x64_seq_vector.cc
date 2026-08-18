@@ -642,6 +642,34 @@ struct VECTOR_COMPARE_UGE_V128
 EMITTER_OPCODE_TABLE(OPCODE_VECTOR_COMPARE_UGE, VECTOR_COMPARE_UGE_V128);
 
 // ============================================================================
+// OPCODE_VECTOR_ALL_SET
+// ============================================================================
+struct VECTOR_ALL_SET
+    : Sequence<VECTOR_ALL_SET, I<OPCODE_VECTOR_ALL_SET, I8Op, V128Op>> {
+  static void Emit(X64Emitter& e, const EmitArgType& i) {
+    const Xmm src = GetInputRegOrConstant(e, i.src1, e.xmm0);
+    // CF is set when ~src & all-ones is zero, i.e. every bit of src is set.
+    e.vptest(src, e.GetXmmConstPtr(XMMFFFF));
+    e.setc(i.dest);
+  }
+};
+EMITTER_OPCODE_TABLE(OPCODE_VECTOR_ALL_SET, VECTOR_ALL_SET);
+
+// ============================================================================
+// OPCODE_VECTOR_NONE_SET
+// ============================================================================
+struct VECTOR_NONE_SET
+    : Sequence<VECTOR_NONE_SET, I<OPCODE_VECTOR_NONE_SET, I8Op, V128Op>> {
+  static void Emit(X64Emitter& e, const EmitArgType& i) {
+    const Xmm src = GetInputRegOrConstant(e, i.src1, e.xmm0);
+    // ZF is set when src & src is zero, i.e. no bit of src is set.
+    e.vptest(src, src);
+    e.sete(i.dest);
+  }
+};
+EMITTER_OPCODE_TABLE(OPCODE_VECTOR_NONE_SET, VECTOR_NONE_SET);
+
+// ============================================================================
 // OPCODE_VECTOR_ADD
 // ============================================================================
 struct VECTOR_ADD

@@ -640,6 +640,38 @@ struct VECTOR_COMPARE_UGE_V128
 EMITTER_OPCODE_TABLE(OPCODE_VECTOR_COMPARE_UGE, VECTOR_COMPARE_UGE_V128);
 
 // ============================================================================
+// OPCODE_VECTOR_ALL_SET
+// ============================================================================
+struct VECTOR_ALL_SET
+    : Sequence<VECTOR_ALL_SET, I<OPCODE_VECTOR_ALL_SET, I8Op, V128Op>> {
+  static void Emit(A64Emitter& e, const EmitArgType& i) {
+    int s = SrcVReg(e, i.src1, 0);
+    // Every bit set iff the smallest lane is 0xFFFFFFFF.
+    e.uminv(SReg(0), VReg(s).s4);
+    e.umov(e.w0, VReg(0).s4[0]);
+    e.cmn(e.w0, 1);
+    e.cset(i.dest, Xbyak_aarch64::EQ);
+  }
+};
+EMITTER_OPCODE_TABLE(OPCODE_VECTOR_ALL_SET, VECTOR_ALL_SET);
+
+// ============================================================================
+// OPCODE_VECTOR_NONE_SET
+// ============================================================================
+struct VECTOR_NONE_SET
+    : Sequence<VECTOR_NONE_SET, I<OPCODE_VECTOR_NONE_SET, I8Op, V128Op>> {
+  static void Emit(A64Emitter& e, const EmitArgType& i) {
+    int s = SrcVReg(e, i.src1, 0);
+    // No bit set iff the largest lane is zero.
+    e.umaxv(SReg(0), VReg(s).s4);
+    e.umov(e.w0, VReg(0).s4[0]);
+    e.cmp(e.w0, 0);
+    e.cset(i.dest, Xbyak_aarch64::EQ);
+  }
+};
+EMITTER_OPCODE_TABLE(OPCODE_VECTOR_NONE_SET, VECTOR_NONE_SET);
+
+// ============================================================================
 // OPCODE_VECTOR_SHL
 // ============================================================================
 struct VECTOR_SHL_V128

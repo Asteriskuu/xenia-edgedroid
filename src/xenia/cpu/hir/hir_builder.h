@@ -228,6 +228,9 @@ class HIRBuilder {
   Value* Select(Value* cond, Value* value1, Value* value2);
   Value* IsTrue(Value* value);
   Value* IsFalse(Value* value);
+  // Reduce a whole V128 to a bool: every bit set / no bit set.
+  Value* VectorAllSet(Value* value);
+  Value* VectorNoneSet(Value* value);
   Value* IsNan(Value* value);
   Value* CompareEQ(Value* value1, Value* value2);
   Value* CompareNE(Value* value1, Value* value2);

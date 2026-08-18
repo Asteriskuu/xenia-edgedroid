@@ -426,7 +426,6 @@ void PPCHIRBuilder::UpdateCR(uint32_t n, Value* lhs, Value* rhs,
 void PPCHIRBuilder::UpdateCR6(Value* src_value) {
   // Testing for all 1's and all 0's.
   // if (Rc) CR6 = all_equal | 0 | none_equal | 0
-  // TODO(benvanik): efficient instruction?
 
   // chrispy: nothing seems to write cr6_1, figure out if no documented
   // instructions write anything other than 0 to it and remove these stores if
@@ -434,8 +433,9 @@ void PPCHIRBuilder::UpdateCR6(Value* src_value) {
   StoreContext(offsetof(PPCContext, cr6.cr6_1), LoadZeroInt8());
   StoreContext(offsetof(PPCContext, cr6.cr6_3), LoadZeroInt8());
   StoreContext(offsetof(PPCContext, cr6.cr6_all_equal),
-               IsFalse(Not(src_value)));
-  StoreContext(offsetof(PPCContext, cr6.cr6_none_equal), IsFalse(src_value));
+               VectorAllSet(src_value));
+  StoreContext(offsetof(PPCContext, cr6.cr6_none_equal),
+               VectorNoneSet(src_value));
 
   // TOOD(benvanik): trace CR.
 }

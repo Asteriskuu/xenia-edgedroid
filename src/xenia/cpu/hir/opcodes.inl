@@ -407,6 +407,17 @@ DEFINE_OPCODE(
     0)
 
 DEFINE_OPCODE(
+    OPCODE_VECTOR_ALL_SET,
+    "vector_all_set",
+    OPCODE_SIG_V_V,
+    0)
+DEFINE_OPCODE(
+    OPCODE_VECTOR_NONE_SET,
+    "vector_none_set",
+    OPCODE_SIG_V_V,
+    0)
+
+DEFINE_OPCODE(
     OPCODE_ADD,
     "add",
     OPCODE_SIG_V_V_V,
