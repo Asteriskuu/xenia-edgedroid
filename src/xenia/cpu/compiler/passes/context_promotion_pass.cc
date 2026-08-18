@@ -30,11 +30,11 @@ DEFINE_bool(
     context_promote_vec128, true,
     "Promote VMX (VEC128) context loads/stores to SSA values and strip dead "
     "VEC128 context stores, letting the backend keep vectors in host "
-    "registers. This restores upstream behavior from before 2026-01-25 "
-    "(upstream excluded VEC128 to work around undiagnosed instability in "
-    "some games; validity tracking is now range-keyed with overlap "
-    "invalidation, which removes the offset-aliasing hazard that plausibly "
-    "caused it). Disabling trades performance for current upstream's "
+    "registers. This restores upstream behavior from before 2026-01-25, when "
+    "upstream excluded VEC128 to work around undiagnosed instability in some "
+    "games. The range-keyed validity tracking here fixes a real offset "
+    "aliasing hazard, but whether that was upstream's problem was never "
+    "established. Disabling trades performance for current upstream's "
     "conservative behavior: every vector register access round-trips "
     "through guest context memory. Forced off by disable_context_promotion.",
     "CPU");
