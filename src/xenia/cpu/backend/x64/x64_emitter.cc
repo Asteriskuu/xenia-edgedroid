@@ -112,7 +112,15 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
   // Reset.
   debug_info_ = debug_info;
   debug_info_flags_ = debug_info_flags;
-  trace_data_ = &function->trace_data();
+  coverage_offset_ = function->coverage_offset();
+  coverage_start_address_ = function->address();
+  coverage_instruction_count_ =
+      function->has_end_address()
+          ? (function->end_address() - function->address()) / 4 + 1
+          : 0;
+  coverage_current_index_ = UINT32_MAX;
+  coverage_out_of_range_ = false;
+  sequence_samples_.clear();
   source_map_arena_.Reset();
 
   // Fill the generator with code.
@@ -127,6 +135,12 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
 
   // Stash source map.
   source_map_arena_.CloneContents(out_source_map);
+
+  if (!sequence_samples_.empty()) {
+    processor_->RecordSequenceSamples(function->address(),
+                                      std::move(sequence_samples_));
+    sequence_samples_.clear();
+  }
 
   return true;
 }
@@ -230,34 +244,6 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
         rdx);  // save time for end of function
   }
 #endif
-  // Safe now to do some tracing.
-  if (debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctions) {
-    // We require 32-bit addresses.
-    assert_true(uint64_t(trace_data_->header()) < UINT_MAX);
-    auto trace_header = trace_data_->header();
-
-    // Call count.
-    lock();
-    inc(qword[low_address(&trace_header->function_call_count)]);
-
-    // Get call history slot.
-    static_assert(FunctionTraceData::kFunctionCallerHistoryCount == 4,
-                  "bitmask depends on count");
-    mov(rax, qword[low_address(&trace_header->function_call_count)]);
-    and_(rax, 0b00000011);
-
-    // Record call history value into slot (guest addr in RDX).
-    mov(dword[Xbyak::RegExp(uint32_t(uint64_t(
-                  low_address(&trace_header->function_caller_history)))) +
-              rax * 4],
-        edx);
-
-    // Calling thread. Load ax with thread ID.
-    EmitGetCurrentThreadId();
-    lock();
-    bts(qword[low_address(&trace_header->function_thread_use)], rax);
-  }
-
   // FTrace: log guest function entry when the backend was built with
   // function tracing available (gated at runtime by the trace_func flag).
   if (IsTracingFunc()) {
@@ -390,18 +376,50 @@ void X64Emitter::MarkSourceOffset(const Instr* i) {
     nop(2);
   }
 
-  if (debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctionCoverage) {
+  if ((debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctionCoverage) &&
+      coverage_offset_ != GuestFunction::kInvalidCoverageOffset) {
+    // A source offset is not guaranteed to land inside the range the scanner
+    // reported, and counting outside the reserved slice writes through a wild
+    // displacement into whatever the arena holds next.
     uint32_t instruction_index =
-        (entry->guest_address - trace_data_->start_address()) / 4;
-    lock();
-    inc(qword[low_address(trace_data_->instruction_execute_counts() +
-                          instruction_index * 8)]);
+        (entry->guest_address - coverage_start_address_) / 4;
+    if (entry->guest_address < coverage_start_address_ ||
+        instruction_index >= coverage_instruction_count_) {
+      coverage_current_index_ = UINT32_MAX;
+      if (!coverage_out_of_range_) {
+        coverage_out_of_range_ = true;
+        XELOGW(
+            "Coverage: {:08X} is outside {:08X} and the {} instructions after "
+            "it, not counting it",
+            entry->guest_address, coverage_start_address_,
+            coverage_instruction_count_);
+      }
+      return;
+    }
+    // Everything emitted from here until the next source offset belongs to
+    // this guest instruction.
+    coverage_current_index_ = instruction_index;
+    size_t byte_offset = coverage_offset_ + size_t(instruction_index) * 8;
+    uint32_t disp = static_cast<uint32_t>(byte_offset);
+    // Counters are per thread, so this needs no lock. rax and rcx are outside
+    // gpr_reg_map_ and this sits on its own OPCODE_SOURCE_OFFSET instruction,
+    // so no HIR value is live in either.
+    //
+    // Incremented through lea because EFLAGS has to survive: a guest compare
+    // and the branch consuming it are separate guest instructions, so a source
+    // offset lands between them and inc would eat the result.
+    mov(rax, qword[GetContextReg() + offsetof(ppc::PPCContext, trace_counts)]);
+    mov(rcx, qword[rax + disp]);
+    lea(rcx, ptr[rcx + 1]);
+    mov(qword[rax + disp], rcx);
   }
 }
 
-void X64Emitter::EmitGetCurrentThreadId() {
-  // rsi must point to context. We could fetch from the stack if needed.
-  mov(ax, word[GetContextReg() + offsetof(ppc::PPCContext, thread_id)]);
+void X64Emitter::RecordSequenceSample(uint32_t key, uint32_t host_bytes) {
+  if (coverage_current_index_ == UINT32_MAX || !host_bytes) {
+    return;
+  }
+  sequence_samples_.push_back({key, coverage_current_index_, host_bytes});
 }
 
 void X64Emitter::EmitTraceUserCallReturn() {}

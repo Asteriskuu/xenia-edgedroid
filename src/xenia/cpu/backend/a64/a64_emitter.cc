@@ -83,7 +83,15 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
 
   debug_info_ = debug_info;
   debug_info_flags_ = debug_info_flags;
-  trace_data_ = &function->trace_data();
+  coverage_offset_ = function->coverage_offset();
+  coverage_start_address_ = function->address();
+  coverage_instruction_count_ =
+      function->has_end_address()
+          ? (function->end_address() - function->address()) / 4 + 1
+          : 0;
+  coverage_current_index_ = UINT32_MAX;
+  coverage_out_of_range_ = false;
+  sequence_samples_.clear();
 
   current_guest_function_ = function->address();
 
@@ -117,6 +125,12 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
 
   // Copy source map.
   source_map_arena_.CloneContents(out_source_map);
+
+  if (!sequence_samples_.empty()) {
+    processor_->RecordSequenceSamples(function->address(),
+                                      std::move(sequence_samples_));
+    sequence_samples_.clear();
+  }
 
   return *out_code_address != nullptr;
 }
@@ -356,6 +370,54 @@ void A64Emitter::MarkSourceOffset(const hir::Instr* i) {
   entry->guest_address = static_cast<uint32_t>(i->src1.offset);
   entry->hir_offset = uint32_t(i->block->ordinal << 16) | i->ordinal;
   entry->code_offset = static_cast<uint32_t>(getSize());
+
+  if ((debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctionCoverage) &&
+      coverage_offset_ != GuestFunction::kInvalidCoverageOffset) {
+    // A source offset is not guaranteed to land inside the range the scanner
+    // reported, and counting outside the reserved slice writes through a wild
+    // displacement into whatever the arena holds next.
+    uint32_t instruction_index =
+        (entry->guest_address - coverage_start_address_) / 4;
+    if (entry->guest_address < coverage_start_address_ ||
+        instruction_index >= coverage_instruction_count_) {
+      coverage_current_index_ = UINT32_MAX;
+      if (!coverage_out_of_range_) {
+        coverage_out_of_range_ = true;
+        XELOGW(
+            "Coverage: {:08X} is outside {:08X} and the {} instructions after "
+            "it, not counting it",
+            entry->guest_address, coverage_start_address_,
+            coverage_instruction_count_);
+      }
+      return;
+    }
+    // Everything emitted from here until the next source offset belongs to
+    // this guest instruction.
+    coverage_current_index_ = instruction_index;
+    const size_t byte_offset =
+        coverage_offset_ + static_cast<size_t>(instruction_index) * 8;
+    // Counters are per thread, so this needs no atomic. x0 and x1 are scratch
+    // and outside gpr_reg_map_ (x22-x28), and this sits on its own
+    // OPCODE_SOURCE_OFFSET instruction, so no HIR value is live in either.
+    //
+    // add rather than adds because NZCV has to survive: a guest compare and
+    // the branch consuming it are separate guest instructions, so a source
+    // offset lands between them.
+    ldr(x0, ptr(GetContextReg(),
+                static_cast<int32_t>(offsetof(ppc::PPCContext, trace_counts))));
+    mov(x1, static_cast<uint64_t>(byte_offset));
+    add(x0, x0, x1);
+    ldr(x1, ptr(x0));
+    add(x1, x1, 1);
+    str(x1, ptr(x0));
+  }
+}
+
+void A64Emitter::RecordSequenceSample(uint32_t key, uint32_t host_bytes) {
+  if (coverage_current_index_ == UINT32_MAX || !host_bytes) {
+    return;
+  }
+  sequence_samples_.push_back({key, coverage_current_index_, host_bytes});
 }
 
 void A64Emitter::DebugBreak() { brk(0xF000); }

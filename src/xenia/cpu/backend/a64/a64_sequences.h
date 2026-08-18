@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_BACKEND_A64_A64_SEQUENCES_H_
 #define XENIA_CPU_BACKEND_A64_A64_SEQUENCES_H_
 
+#include <string>
 #include <unordered_map>
 
 #include "xenia/cpu/hir/instr.h"
@@ -43,6 +44,10 @@ static bool Register() {
 
 bool SelectSequence(A64Emitter* e, const hir::Instr* i,
                     const hir::Instr** new_tail);
+
+// Renders a selection key as "OPCODE_NAME dest src1 src2 src3". Lives here
+// because the key layout belongs to this file's InstrKey.
+std::string FormatSequenceKey(uint32_t key);
 
 }  // namespace a64
 }  // namespace backend

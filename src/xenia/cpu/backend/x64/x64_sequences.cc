@@ -3565,6 +3565,51 @@ static int anchor_memory_dest = anchor_memory;
 extern volatile int anchor_vector;
 static int anchor_vector_dest = anchor_vector;
 
+static const char* KeyTypeName(uint32_t type) {
+  switch (type) {
+    case KEY_TYPE_X:
+      return "-";
+    case KEY_TYPE_L:
+      return "label";
+    case KEY_TYPE_O:
+      return "offset";
+    case KEY_TYPE_S:
+      return "symbol";
+    case KEY_TYPE_V_I8:
+      return "i8";
+    case KEY_TYPE_V_I16:
+      return "i16";
+    case KEY_TYPE_V_I32:
+      return "i32";
+    case KEY_TYPE_V_I64:
+      return "i64";
+    case KEY_TYPE_V_F32:
+      return "f32";
+    case KEY_TYPE_V_F64:
+      return "f64";
+    case KEY_TYPE_V_V128:
+      return "v128";
+    default:
+      return "?";
+  }
+}
+
+std::string FormatSequenceKey(uint32_t key) {
+  const InstrKey decoded(key);
+  std::string result = GetOpcodeName(static_cast<Opcode>(decoded.opcode));
+  result += ' ';
+  // Space separated so the rendered label stays free of commas and the CSV
+  // column can be split naively.
+  result += KeyTypeName(decoded.dest);
+  result += ' ';
+  result += KeyTypeName(decoded.src1);
+  result += ' ';
+  result += KeyTypeName(decoded.src2);
+  result += ' ';
+  result += KeyTypeName(decoded.src3);
+  return result;
+}
+
 bool SelectSequence(X64Emitter* e, const Instr* i, const Instr** new_tail) {
   if ((i->backend_flags & INSTR_X64_FLAGS_ELIMINATED) != 0) {
     // skip
@@ -3576,7 +3621,17 @@ bool SelectSequence(X64Emitter* e, const Instr* i, const Instr** new_tail) {
     auto& table = SequenceTable();
     auto it = table.find(key);
     if (it != table.end()) {
+      const size_t size_before = e->getSize();
       if (it->second(*e, i, InstrKey(i))) {
+        // Skip the bookkeeping opcodes: they carry no guest work, and
+        // SOURCE_OFFSET would otherwise charge the coverage counter's own
+        // code to the instruction it is counting.
+        const Opcode num = i->GetOpcodeNum();
+        if (num != OPCODE_SOURCE_OFFSET && num != OPCODE_COMMENT &&
+            num != OPCODE_NOP) {
+          e->RecordSequenceSample(
+              key.value, static_cast<uint32_t>(e->getSize() - size_before));
+        }
         *new_tail = i->next;
         return true;
       }

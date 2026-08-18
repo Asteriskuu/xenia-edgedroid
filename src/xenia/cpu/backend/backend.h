@@ -42,6 +42,15 @@ class CodeCache;
 using GuestTrampolineProc = void (*)(ppc::PPCContext* context, void* userarg1,
                                      void* userarg2);
 using SimpleGuestTrampolineProc = void (*)(ppc::PPCContext*);
+// One emitted HIR instruction: which sequence the backend selected for it, how
+// much host code that produced, and which guest instruction of the function it
+// belongs to, so the coverage counters can weight it.
+struct SequenceSample {
+  uint32_t key;
+  uint32_t guest_index;
+  uint32_t host_bytes;
+};
+
 class Backend {
  public:
   explicit Backend();
@@ -144,6 +153,10 @@ class Backend {
   virtual void set_trace_data_enabled(bool value) {}
   virtual bool trace_func_enabled() const { return false; }
   virtual void set_trace_func_enabled(bool value) {}
+
+  // Renders a sequence selection key as "OPCODE_NAME dest src1 src2 src3" for
+  // the profiler dump. The key layout is private to each backend.
+  virtual std::string FormatSequenceKey(uint32_t key) const { return ""; }
 
  protected:
   Processor* processor_ = nullptr;

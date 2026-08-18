@@ -15,9 +15,9 @@
 #include <vector>
 
 #include "xenia/base/arena.h"
+#include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/backend/code_cache_base.h"
 #include "xenia/cpu/function.h"
-#include "xenia/cpu/function_trace_data.h"
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/hir/instr.h"
 #include "xenia/cpu/hir/value.h"
@@ -115,6 +115,10 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   size_t stack_size() const { return stack_size_; }
 
   void MarkSourceOffset(const hir::Instr* i);
+
+  // Called from SelectSequence once a sequence has emitted. Cheap no-op unless
+  // this function is being counted.
+  void RecordSequenceSample(uint32_t key, uint32_t host_bytes);
 
   void DebugBreak();
   void Trap(uint16_t trap_type = 0);
@@ -259,7 +263,12 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   FunctionDebugInfo* debug_info_ = nullptr;
   uint32_t debug_info_flags_ = 0;
-  FunctionTraceData* trace_data_ = nullptr;
+  size_t coverage_offset_ = 0;
+  uint32_t coverage_start_address_ = 0;
+  uint32_t coverage_instruction_count_ = 0;
+  uint32_t coverage_current_index_ = UINT32_MAX;
+  bool coverage_out_of_range_ = false;
+  std::vector<SequenceSample> sequence_samples_;
   Arena source_map_arena_;
 
   size_t stack_size_ = 0;

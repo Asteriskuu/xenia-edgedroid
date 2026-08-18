@@ -1996,6 +1996,10 @@ bool X64Backend::trace_func_enabled() const { return GetTraceFuncEnabled(); }
 void X64Backend::set_trace_func_enabled(bool value) {
   SetTraceFuncEnabled(value);
 }
+
+std::string X64Backend::FormatSequenceKey(uint32_t key) const {
+  return x64::FormatSequenceKey(key);
+}
 }  // namespace x64
 }  // namespace backend
 }  // namespace cpu

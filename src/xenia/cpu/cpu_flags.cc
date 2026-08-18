@@ -27,15 +27,10 @@ DEFINE_bool(accurate_vmx_denormal_flush, false,
 DEFINE_bool(disassemble_functions, false,
             "Disassemble functions during generation.", "CPU");
 
-DEFINE_bool(trace_functions, false, "Generate tracing for function statistics.",
-            "CPU");
 DEFINE_bool(trace_function_coverage, false,
-            "Generate tracing for function instruction coverage statistics.",
+            "Count how many times each guest instruction executes and report "
+            "the totals in the guestcoverage section of the profiler dump.",
             "CPU");
-DEFINE_bool(trace_function_references, false,
-            "Generate tracing for function address references.", "CPU");
-DEFINE_bool(trace_function_data, false,
-            "Generate tracing for function result data.", "CPU");
 
 DEFINE_uint32(
     cpu_trace_mask, 0,

@@ -1967,6 +1967,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     return result;
   }
 
+  // Per-title config has been applied by now and no guest code has been
+  // translated yet, which is the only window where this can be picked up.
+  processor_->RefreshTraceCountsEnabled();
+
   // Expose the HDD content partition. Games that resolve saves/DLC to a raw
   // \Device\Harddisk0\Partition1\Content path via XamContentResolve open it
   // directly, not through the save:/dlc: symlinks. Without this the open lands

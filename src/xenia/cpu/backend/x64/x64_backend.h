@@ -206,6 +206,7 @@ class X64Backend : public Backend {
   void set_trace_data_enabled(bool value) override;
   bool trace_func_enabled() const override;
   void set_trace_func_enabled(bool value) override;
+  std::string FormatSequenceKey(uint32_t key) const override;
 
   void RecordMMIOExceptionForGuestInstruction(void* host_address);
 

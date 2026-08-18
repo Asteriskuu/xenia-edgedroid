@@ -2727,7 +2727,7 @@ void MicroProfileDumpCsv(MicroProfileWriteCallback CB, void* Handle, int nMaxFra
 	float fToMsGPU = MicroProfileTickToMsMultiplier(MicroProfileTicksPerSecondGpu());
 
 	MicroProfilePrintf(CB, Handle, "frames,%d\n", nAggregateFrames);
-	MicroProfilePrintf(CB, Handle, "group,name,average,max,callaverage\n");
+	MicroProfilePrintf(CB, Handle, "group,name,average,max,callaverage,exclusiveaverage,exclusivemax,min,total,count\n");
 
 	uint32_t nNumTimers = S.nTotalTimers;
 	uint32_t nBlockSize = 2 * nNumTimers;
@@ -2746,7 +2746,7 @@ void MicroProfileDumpCsv(MicroProfileWriteCallback CB, void* Handle, int nMaxFra
 	for(uint32_t i = 0; i < S.nTotalTimers; ++i)
 	{
 		uint32_t nIdx = i * 2;
-		MicroProfilePrintf(CB, Handle, "\"%s\",\"%s\",%f,%f,%f\n", S.TimerInfo[i].pName, S.GroupInfo[S.TimerInfo[i].nGroupIndex].pName, pAverage[nIdx], pMax[nIdx], pCallAverage[nIdx]);
+		MicroProfilePrintf(CB, Handle, "\"%s\",\"%s\",%f,%f,%f,%f,%f,%f,%f,%u\n", S.TimerInfo[i].pName, S.GroupInfo[S.TimerInfo[i].nGroupIndex].pName, pAverage[nIdx], pMax[nIdx], pCallAverage[nIdx], pAverageExclusive[nIdx], pMaxExclusive[nIdx], pMin[nIdx], pTotal[nIdx], S.Aggregate[i].nCount);
 	}
 
 	MicroProfilePrintf(CB, Handle, "\n\n");

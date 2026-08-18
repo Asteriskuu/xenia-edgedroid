@@ -12,6 +12,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <functional>
 #include <memory>
 
 #include "xenia/base/platform.h"
@@ -30,7 +32,20 @@
 
 #if XE_OPTION_PROFILING
 // Pollutes the global namespace. Yuck.
+// These three change the layout of the profiler state, so profiling.cc repeats
+// them verbatim before it includes microprofile for the implementation. Keep
+// the two lists in sync.
 #define MICROPROFILE_MAX_THREADS 256
+// Do not raise. One token is taken per guest function and the table saturating
+// is what stops FTRACE logging every guest call: past the cap GetToken hands
+// back MICROPROFILE_INVALID_TOKEN, which MicroProfileEnter drops on the floor.
+// With more tokens the command processor thread overruns its log ring within a
+// frame and microprofile's asserts, which are live in release builds, fire.
+// Per function execution counts come from the coverage counters instead.
+#define MICROPROFILE_MAX_TIMERS 1024
+// Nothing here uses meta counters, and they cost 5 arrays per slot sized by
+// the timer count.
+#define MICROPROFILE_META_MAX 1
 #include <microprofile/microprofile.h>
 #endif  // XE_OPTION_PROFILING
 
@@ -173,6 +188,18 @@ class Profiler {
   static void Initialize();
   // Dumps data to stdout.
   static void Dump();
+  // Clears the aggregate and accumulates from here on rather than tumbling
+  // every N frames, so the timers cover the same window as anything else
+  // gathered alongside them.
+  static void ResetAggregation();
+
+  // Appends an extra section to the CSV dump. Layers that base cannot reach
+  // register their own tables this way. Writers run in registration order
+  // after the profiler's own sections, and must unregister before they die.
+  using DumpSectionWriter = std::function<void(FILE*)>;
+  static uintptr_t RegisterDumpSection(DumpSectionWriter writer);
+  static void UnregisterDumpSection(uintptr_t id);
+
   // Cleans up profiling, releasing all memory.
   static void Shutdown();
 

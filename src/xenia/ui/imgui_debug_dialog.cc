@@ -21,6 +21,7 @@
 #include "third_party/imgui/imgui.h"
 #include "xenia/app/emulator_window.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/profiling.h"
 #include "xenia/config.h"
 #include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/processor.h"
@@ -1258,6 +1259,30 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
               cpu_backend->set_trace_func_enabled(enabled);
               ShowNotification("trace_functions",
                                enabled ? "Enabled" : "Disabled");
+            }
+            ImGui::EndDisabled();
+          }
+          if (MatchesFilter("reset_capture_window")) {
+            // Coverage counters only exist when they were emitted into the
+            // generated code, which is settled by the time a title starts.
+            bool coverage_live =
+                cpu_processor && cpu_processor->trace_counts_enabled();
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::BeginDisabled(!coverage_live);
+            DrawLabelCell("reset_capture_window",
+                          coverage_live
+                              ? "Discard what has been gathered and start the "
+                                "window here"
+                              : "[requires --trace_function_coverage]");
+            ImGui::TableSetColumnIndex(1);
+            if (ImGui::Button("Reset##reset_capture_window", ImVec2(-1, 0)) &&
+                coverage_live) {
+              // Both halves restart together, otherwise the dump would cover
+              // two different windows.
+              Profiler::ResetAggregation();
+              cpu_processor->ResetTraceCounts();
+              ShowNotification("reset_capture_window", "Window restarted");
             }
             ImGui::EndDisabled();
           }

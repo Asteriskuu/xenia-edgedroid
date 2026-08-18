@@ -36,7 +36,12 @@
   } while (false);
 #define MICROPROFILE_WEBSERVER 0
 #define MICROPROFILE_DEBUG 0
+// These three change the layout of the profiler state, so they must match
+// profiling.h exactly. This translation unit reaches microprofile first and
+// would otherwise bake in the stock defaults.
 #define MICROPROFILE_MAX_THREADS 256
+#define MICROPROFILE_MAX_TIMERS 1024
+#define MICROPROFILE_META_MAX 1
 #include "third_party/microprofile/microprofile.h"
 
 #include "xenia/base/assert.h"
@@ -50,6 +55,8 @@
 #include <cstdio>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 #endif
 
 #if XE_OPTION_PROFILING
@@ -155,6 +162,34 @@ void Profiler::Initialize() {
 #endif  // XE_OPTION_PROFILING_UI
 }
 
+namespace {
+std::mutex dump_sections_mutex;
+std::vector<std::pair<uintptr_t, Profiler::DumpSectionWriter>> dump_sections;
+uintptr_t next_dump_section_id = 1;
+}  // namespace
+
+uintptr_t Profiler::RegisterDumpSection(DumpSectionWriter writer) {
+  std::lock_guard<std::mutex> lock(dump_sections_mutex);
+  uintptr_t id = next_dump_section_id++;
+  dump_sections.emplace_back(id, std::move(writer));
+  return id;
+}
+
+void Profiler::UnregisterDumpSection(uintptr_t id) {
+  std::lock_guard<std::mutex> lock(dump_sections_mutex);
+  for (auto it = dump_sections.begin(); it != dump_sections.end(); ++it) {
+    if (it->first == id) {
+      dump_sections.erase(it);
+      return;
+    }
+  }
+}
+
+void Profiler::ResetAggregation() {
+  // Zero also asks microprofile to clear the accumulators at the next flip.
+  MicroProfileSetAggregateFrames(0);
+}
+
 void Profiler::Dump() {
 #if XE_OPTION_PROFILING_UI
   MicroProfileDumpTimers();
@@ -171,6 +206,12 @@ void Profiler::Dump() {
     MicroProfileDumpHtml(MicroProfileWriteFile, f, max_frames, nullptr);
   } else {
     MicroProfileDumpCsv(MicroProfileWriteFile, f, max_frames);
+    // Extra tables only make sense in the CSV, appending them to the HTML
+    // would corrupt the document.
+    std::lock_guard<std::mutex> lock(dump_sections_mutex);
+    for (auto& section : dump_sections) {
+      section.second(f);
+    }
   }
   fclose(f);
   XELOGI("Profiler dump written to {}", path);
@@ -428,6 +469,9 @@ bool Profiler::is_enabled() { return false; }
 bool Profiler::is_visible() { return false; }
 void Profiler::Initialize() {}
 void Profiler::Dump() {}
+void Profiler::ResetAggregation() {}
+uintptr_t Profiler::RegisterDumpSection(DumpSectionWriter writer) { return 0; }
+void Profiler::UnregisterDumpSection(uintptr_t id) {}
 void Profiler::Shutdown() {}
 uint32_t Profiler::GetColor(const char* str) { return 0; }
 void Profiler::ThreadEnter(const char* name) {}

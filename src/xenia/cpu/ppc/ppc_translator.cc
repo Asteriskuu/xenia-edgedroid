@@ -203,17 +203,13 @@ bool PPCTranslator::Translate(GuestFunction* function,
   if (cvars::disassemble_functions) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoAllDisasm;
   }
-  if (cvars::trace_functions) {
-    debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctions;
-  }
-  if (cvars::trace_function_coverage) {
+  // Sourced from the processor's latched value, not the cvar. Every thread is
+  // handed an arena at creation on the strength of that latch, so coverage
+  // must not appear here through any other route.
+  if (frontend_->processor()->trace_counts_enabled()) {
     debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctionCoverage;
-  }
-  if (cvars::trace_function_references) {
-    debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctionReferences;
-  }
-  if (cvars::trace_function_data) {
-    debug_info_flags |= DebugInfoFlags::kDebugInfoTraceFunctionData;
+  } else {
+    debug_info_flags &= ~DebugInfoFlags::kDebugInfoTraceFunctionCoverage;
   }
   std::unique_ptr<FunctionDebugInfo> debug_info;
   if (debug_info_flags) {
@@ -225,24 +221,21 @@ bool PPCTranslator::Translate(GuestFunction* function,
     return false;
   }
 
-  // Setup trace data, if needed.
-  if (debug_info_flags & DebugInfoFlags::kDebugInfoTraceFunctions) {
-    // Base trace data.
-    size_t trace_data_size = FunctionTraceData::SizeOfHeader();
-    if (debug_info_flags & DebugInfoFlags::kDebugInfoTraceFunctionCoverage) {
-      // Additional space for instruction coverage counts.
-      trace_data_size += FunctionTraceData::SizeOfInstructionCounts(
-          function->address(), function->end_address());
-    }
-    uint8_t* trace_data =
-        frontend_->processor()->AllocateFunctionTraceData(trace_data_size);
-    if (trace_data) {
-      function->trace_data().Reset(trace_data, trace_data_size,
-                                   function->address(),
-                                   function->end_address());
-    } else {
-      debug_info_flags &= ~(DebugInfoFlags::kDebugInfoTraceFunctions |
-                            DebugInfoFlags::kDebugInfoTraceFunctionCoverage);
+  // Reserve this function's slice of the per-thread coverage arenas. The
+  // arena is finite, so a title large enough to exhaust it just stops being
+  // counted from that point on.
+  if (debug_info_flags & DebugInfoFlags::kDebugInfoTraceFunctionCoverage) {
+    // Must match what the emitter uses to index the slice.
+    uint32_t instruction_count =
+        function->has_end_address()
+            ? (function->end_address() - function->address()) / 4 + 1
+            : 0;
+    function->set_coverage_offset(
+        instruction_count ? frontend_->processor()->AllocateTraceCountsOffset(
+                                function->address(), instruction_count)
+                          : GuestFunction::kInvalidCoverageOffset);
+    if (function->coverage_offset() == GuestFunction::kInvalidCoverageOffset) {
+      debug_info_flags &= ~DebugInfoFlags::kDebugInfoTraceFunctionCoverage;
     }
   }
 

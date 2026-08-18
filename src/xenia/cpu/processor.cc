@@ -9,6 +9,11 @@
 
 #include "xenia/cpu/processor.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/byte_order.h"
@@ -18,6 +23,7 @@
 #include "xenia/base/exception_handler.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
@@ -48,8 +54,6 @@
 
 DEFINE_bool(debug, DEFAULT_DEBUG_FLAG,
             "Allow debugging and retain debug information.", "General");
-DEFINE_path(trace_function_data_path, "", "File to write trace data to.",
-            "CPU");
 DEFINE_bool(break_on_start, false, "Break into the debugger on startup.",
             "CPU");
 
@@ -98,9 +102,23 @@ Processor::~Processor() {
   frontend_.reset();
   backend_.reset();
 
-  if (functions_trace_file_) {
-    functions_trace_file_->Flush();
-    functions_trace_file_.reset();
+  if (trace_counts_dump_section_) {
+    Profiler::UnregisterDumpSection(trace_counts_dump_section_);
+    trace_counts_dump_section_ = 0;
+  }
+
+  // Backend teardown above took the generated code with it, so nothing can
+  // still be counting.
+  {
+    std::lock_guard<std::mutex> lock(trace_counts_mutex_);
+    for (auto& arena : trace_counts_arenas_) {
+      xe::memory::DeallocFixed(arena.base, 0,
+                               xe::memory::DeallocationType::kRelease);
+    }
+    trace_counts_arenas_.clear();
+    trace_counts_free_.clear();
+    trace_counts_regions_.clear();
+    trace_counts_fallback_ = nullptr;
   }
 }
 
@@ -151,14 +169,177 @@ bool Processor::Setup(std::unique_ptr<backend::Backend> backend) {
     }
   }
 
-  // Open the trace data path, if requested.
-  functions_trace_path_ = cvars::trace_function_data_path;
-  if (!functions_trace_path_.empty()) {
-    functions_trace_file_ =
-        ChunkedMappedMemoryWriter::Open(functions_trace_path_, 32_MiB, true);
-  }
+  RefreshTraceCountsEnabled();
 
   return true;
+}
+
+// Re-read at every title launch, because per-title config is applied after
+// this processor was built and a first launch never re-runs Setup. Turning
+// coverage off again is ignored, counting code already generated keeps
+// writing to its arena and dropping it would only lose counts.
+void Processor::RefreshTraceCountsEnabled() {
+  if (!cvars::trace_function_coverage || trace_counts_enabled_) {
+    return;
+  }
+  trace_counts_enabled_ = true;
+  if (!trace_counts_dump_section_) {
+    trace_counts_dump_section_ =
+        Profiler::RegisterDumpSection([this](FILE* f) { DumpTraceCounts(f); });
+  }
+  // Counters accumulate until reset, so the timers have to as well or the two
+  // halves of the dump would describe different windows.
+  Profiler::ResetAggregation();
+}
+
+// Reads the shared retired totals plus every live arena without disturbing
+// them. Racing increments are benign, an in-flight count lands next dump.
+void Processor::DumpTraceCounts(FILE* f) {
+  std::lock_guard<std::mutex> lock(trace_counts_mutex_);
+
+  struct Row {
+    uint32_t address;
+    uint32_t instruction_count;
+    uint64_t executed;
+    uint32_t hottest_address;
+    uint64_t hottest;
+    size_t region;
+  };
+  std::vector<Row> rows;
+  rows.reserve(trace_counts_regions_.size());
+  uint64_t grand_total = 0;
+  for (size_t r = 0; r < trace_counts_regions_.size(); ++r) {
+    auto& region = trace_counts_regions_[r];
+    Row row = {};
+    row.address = region.start_address;
+    row.instruction_count = static_cast<uint32_t>(region.count);
+    row.region = r;
+    for (size_t i = 0; i < region.count; ++i) {
+      uint64_t total = region.retired[i];
+      for (auto& arena : trace_counts_arenas_) {
+        total +=
+            reinterpret_cast<const uint64_t*>(arena.base + region.offset)[i];
+      }
+      row.executed += total;
+      if (total > row.hottest) {
+        row.hottest = total;
+        row.hottest_address =
+            region.start_address + static_cast<uint32_t>(i * 4);
+      }
+    }
+    if (row.executed) {
+      grand_total += row.executed;
+      rows.push_back(row);
+    }
+  }
+  if (rows.empty()) {
+    return;
+  }
+  std::sort(rows.begin(), rows.end(),
+            [](const Row& a, const Row& b) { return a.executed > b.executed; });
+
+  std::fprintf(f, "\n\nguestcoverage,%llu\n",
+               static_cast<unsigned long long>(grand_total));
+  std::fprintf(f, "address,instructions,executed,share,hottest,hottestcount\n");
+  for (auto& row : rows) {
+    std::fprintf(
+        f, "\"%08X\",%u,%llu,%.6f,\"%08X\",%llu\n", row.address,
+        row.instruction_count, static_cast<unsigned long long>(row.executed),
+        double(row.executed) / double(grand_total), row.hottest_address,
+        static_cast<unsigned long long>(row.hottest));
+  }
+
+  // Long format so the column count does not depend on how many guest threads
+  // happen to be live. Threads that already exited share the retired row.
+  std::fprintf(f, "\n\nguestcoveragethreads\n");
+  std::fprintf(f, "address,thread,executed\n");
+  for (auto& row : rows) {
+    auto& region = trace_counts_regions_[row.region];
+    uint64_t retired = 0;
+    for (size_t i = 0; i < region.count; ++i) {
+      retired += region.retired[i];
+    }
+    if (retired) {
+      std::fprintf(f, "\"%08X\",\"retired\",%llu\n", row.address,
+                   static_cast<unsigned long long>(retired));
+    }
+    for (auto& arena : trace_counts_arenas_) {
+      auto counts =
+          reinterpret_cast<const uint64_t*>(arena.base + region.offset);
+      uint64_t executed = 0;
+      for (size_t i = 0; i < region.count; ++i) {
+        executed += counts[i];
+      }
+      if (executed) {
+        std::fprintf(f, "\"%08X\",\"%08X\",%llu\n", row.address,
+                     arena.thread_id,
+                     static_cast<unsigned long long>(executed));
+      }
+    }
+  }
+
+  DumpSequences(f);
+}
+
+// Which backend sequence the emitted code actually spends its executions in.
+// Every key maps to exactly one selection in the backend's sequence table, so
+// the top rows name the emitters worth optimizing for this title.
+void Processor::DumpSequences(FILE* f) {
+  struct SequenceRow {
+    uint64_t executed = 0;
+    uint64_t occurrences = 0;
+    uint64_t host_bytes = 0;
+  };
+  std::map<uint32_t, SequenceRow> sequences;
+  std::vector<uint64_t> totals;
+  uint64_t grand_total = 0;
+  for (auto& region : trace_counts_regions_) {
+    if (region.samples.empty()) {
+      continue;
+    }
+    totals.assign(region.count, 0);
+    for (size_t i = 0; i < region.count; ++i) {
+      uint64_t total = region.retired[i];
+      for (auto& arena : trace_counts_arenas_) {
+        total +=
+            reinterpret_cast<const uint64_t*>(arena.base + region.offset)[i];
+      }
+      totals[i] = total;
+    }
+    for (auto& sample : region.samples) {
+      if (sample.guest_index >= region.count) {
+        continue;
+      }
+      auto& row = sequences[sample.key];
+      row.executed += totals[sample.guest_index];
+      row.occurrences += 1;
+      row.host_bytes += sample.host_bytes;
+      grand_total += totals[sample.guest_index];
+    }
+  }
+  if (!grand_total) {
+    return;
+  }
+
+  std::vector<std::pair<uint32_t, SequenceRow>> rows(sequences.begin(),
+                                                     sequences.end());
+  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+    return a.second.executed > b.second.executed;
+  });
+
+  std::fprintf(f, "\n\nguestsequences,%llu\n",
+               static_cast<unsigned long long>(grand_total));
+  std::fprintf(f, "key,sequence,executed,share,occurrences,avgbytes\n");
+  for (auto& row : rows) {
+    std::string label =
+        backend_ ? backend_->FormatSequenceKey(row.first) : std::string();
+    std::fprintf(
+        f, "\"%08X\",\"%s\",%llu,%.6f,%llu,%.2f\n", row.first, label.c_str(),
+        static_cast<unsigned long long>(row.second.executed),
+        double(row.second.executed) / double(grand_total),
+        static_cast<unsigned long long>(row.second.occurrences),
+        double(row.second.host_bytes) / double(row.second.occurrences));
+  }
 }
 
 void Processor::PreLaunch() {
@@ -464,11 +645,172 @@ bool Processor::Restore(ByteStream* stream) {
   return true;
 }
 
-uint8_t* Processor::AllocateFunctionTraceData(size_t size) {
-  if (!functions_trace_file_) {
+// Address space only, committed as functions reserve offsets. 8 bytes per
+// guest instruction, so this covers 32M translated instructions.
+static constexpr size_t kTraceCountsArenaSize = 256_MiB;
+
+bool Processor::CommitTraceCountsLocked(size_t required) {
+  size_t target = xe::round_up(required, xe::memory::allocation_granularity());
+  if (target <= trace_counts_committed_) {
+    return true;
+  }
+  size_t length = target - trace_counts_committed_;
+  for (auto& arena : trace_counts_arenas_) {
+    if (!xe::memory::AllocFixed(arena.base + trace_counts_committed_, length,
+                                xe::memory::AllocationType::kCommit,
+                                xe::memory::PageAccess::kReadWrite)) {
+      return false;
+    }
+  }
+  trace_counts_committed_ = target;
+  return true;
+}
+
+void Processor::FoldTraceCountsLocked(uint8_t* arena) {
+  for (auto& region : trace_counts_regions_) {
+    auto counts = reinterpret_cast<uint64_t*>(arena + region.offset);
+    for (size_t i = 0; i < region.count; ++i) {
+      if (counts[i]) {
+        region.retired[i] += counts[i];
+        counts[i] = 0;
+      }
+    }
+  }
+}
+
+uint8_t* Processor::ReserveTraceCountsArenaLocked(uint32_t thread_id) {
+  auto base = reinterpret_cast<uint8_t*>(xe::memory::AllocFixed(
+      nullptr, kTraceCountsArenaSize, xe::memory::AllocationType::kReserve,
+      xe::memory::PageAccess::kNoAccess));
+  if (!base) {
     return nullptr;
   }
-  return functions_trace_file_->Allocate(size);
+  // Catch up to what the existing arenas already have committed.
+  if (trace_counts_committed_ &&
+      !xe::memory::AllocFixed(base, trace_counts_committed_,
+                              xe::memory::AllocationType::kCommit,
+                              xe::memory::PageAccess::kReadWrite)) {
+    xe::memory::DeallocFixed(base, 0, xe::memory::DeallocationType::kRelease);
+    return nullptr;
+  }
+  trace_counts_arenas_.push_back({base, thread_id});
+  return base;
+}
+
+void Processor::SetTraceCountsArenaThreadLocked(uint8_t* arena,
+                                                uint32_t thread_id) {
+  for (auto& entry : trace_counts_arenas_) {
+    if (entry.base == arena) {
+      entry.thread_id = thread_id;
+      return;
+    }
+  }
+}
+
+// Threads that cannot get a private arena share the fallback. The emitted
+// counters do not null check, so no counting code may be generated until the
+// fallback exists, and if it cannot be had coverage stays off for good.
+bool Processor::EnsureTraceCountsFallbackLocked() {
+  if (trace_counts_fallback_) {
+    return true;
+  }
+  if (trace_counts_failed_) {
+    return false;
+  }
+  trace_counts_fallback_ = ReserveTraceCountsArenaLocked(0);
+  if (!trace_counts_fallback_) {
+    trace_counts_failed_ = true;
+    XELOGW("Unable to reserve an instruction coverage arena, coverage is off");
+    return false;
+  }
+  return true;
+}
+
+size_t Processor::AllocateTraceCountsOffset(uint32_t start_address,
+                                            uint32_t instruction_count) {
+  size_t byte_count = size_t(instruction_count) * 8;
+  std::lock_guard<std::mutex> lock(trace_counts_mutex_);
+  if (!EnsureTraceCountsFallbackLocked()) {
+    return GuestFunction::kInvalidCoverageOffset;
+  }
+  size_t offset = trace_counts_next_offset_;
+  if (byte_count > kTraceCountsArenaSize - offset) {
+    return GuestFunction::kInvalidCoverageOffset;
+  }
+  if (!CommitTraceCountsLocked(offset + byte_count)) {
+    return GuestFunction::kInvalidCoverageOffset;
+  }
+  trace_counts_next_offset_ = offset + byte_count;
+  TraceCountsRegion region;
+  region.start_address = start_address;
+  region.offset = offset;
+  region.count = instruction_count;
+  region.retired = std::make_unique<uint64_t[]>(instruction_count);
+  trace_counts_regions_.push_back(std::move(region));
+  return offset;
+}
+
+uint8_t* Processor::AcquireTraceCounts(uint32_t thread_id) {
+  std::lock_guard<std::mutex> lock(trace_counts_mutex_);
+  // Every thread gets an arena even with coverage off, because it can come on
+  // at a later title launch and the emitted counters do not null check. Until
+  // then the shared one will do, nothing is counting into it.
+  if (!EnsureTraceCountsFallbackLocked()) {
+    return nullptr;
+  }
+  if (!trace_counts_enabled_) {
+    return trace_counts_fallback_;
+  }
+  if (!trace_counts_free_.empty()) {
+    uint8_t* arena = trace_counts_free_.back();
+    trace_counts_free_.pop_back();
+    SetTraceCountsArenaThreadLocked(arena, thread_id);
+    return arena;
+  }
+  uint8_t* arena = ReserveTraceCountsArenaLocked(thread_id);
+  if (!arena) {
+    XELOGW("Sharing the fallback instruction coverage arena, counts will race");
+    return trace_counts_fallback_;
+  }
+  return arena;
+}
+
+void Processor::RecordSequenceSamples(
+    uint32_t start_address, std::vector<backend::SequenceSample> samples) {
+  std::lock_guard<std::mutex> lock(trace_counts_mutex_);
+  // Searched from the back: the translator reserves a function's region
+  // immediately before handing it to the backend, so it is normally the last.
+  for (auto it = trace_counts_regions_.rbegin();
+       it != trace_counts_regions_.rend(); ++it) {
+    if (it->start_address == start_address) {
+      it->samples = std::move(samples);
+      return;
+    }
+  }
+}
+
+void Processor::ResetTraceCounts() {
+  std::lock_guard<std::mutex> lock(trace_counts_mutex_);
+  for (auto& arena : trace_counts_arenas_) {
+    std::memset(arena.base, 0, trace_counts_committed_);
+  }
+  for (auto& region : trace_counts_regions_) {
+    std::memset(region.retired.get(), 0, region.count * sizeof(uint64_t));
+  }
+}
+
+void Processor::ReleaseTraceCounts(uint8_t* arena) {
+  if (!arena) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(trace_counts_mutex_);
+  if (arena == trace_counts_fallback_) {
+    // Still shared with other threads, folded at teardown instead.
+    return;
+  }
+  FoldTraceCountsLocked(arena);
+  SetTraceCountsArenaThreadLocked(arena, 0);
+  trace_counts_free_.push_back(arena);
 }
 
 void Processor::OnFunctionDefined(Function* function) {

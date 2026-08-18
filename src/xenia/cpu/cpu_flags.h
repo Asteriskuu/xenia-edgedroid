@@ -19,10 +19,7 @@ DECLARE_bool(accurate_vmx_denormal_flush);
 
 DECLARE_bool(disassemble_functions);
 
-DECLARE_bool(trace_functions);
 DECLARE_bool(trace_function_coverage);
-DECLARE_bool(trace_function_references);
-DECLARE_bool(trace_function_data);
 
 DECLARE_uint32(cpu_trace_mask);
 

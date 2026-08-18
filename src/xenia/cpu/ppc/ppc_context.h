@@ -429,6 +429,12 @@ typedef struct alignas(64) PPCContext_s {
   ThreadState* thread_state;
   uint8_t* virtual_membase;
 
+  // Base of this thread's instruction coverage counter arena. The JIT
+  // increments these without synchronization so each thread owns its own.
+  // Every thread gets one, shared with others only if a private arena could
+  // not be reserved, so emitted counters never have to null check.
+  uint8_t* trace_counts;
+
   // Nonzero asks the running fiber to yield at its next JIT safepoint. Other
   // host threads write it as a single byte store, raced reads are benign. Not
   // std::atomic because this struct lives in raw memory no constructor runs

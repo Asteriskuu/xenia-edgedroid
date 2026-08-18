@@ -1325,6 +1325,10 @@ void A64Backend::set_trace_func_enabled(bool value) {
   SetTraceFuncEnabled(value);
 }
 
+std::string A64Backend::FormatSequenceKey(uint32_t key) const {
+  return a64::FormatSequenceKey(key);
+}
+
 // PPC rounding mode (3-bit) to ARM64 FPCR value.
 // Same table as in a64_sequences.cc SET_ROUNDING_MODE.
 static constexpr uint32_t fpcr_table[8] = {
