@@ -170,8 +170,6 @@ enum XmmConst {
   XMMXOPByteShiftMask,
   XMMXOPWordShiftMask,
   XMMXOPDwordShiftMask,
-  XMMLVLShuffle,
-  XMMLVRCmp16,
   XMMVSRShlByteshuf,
   XMMVSRMask,
   // vexptefp/vlogefp. The guest ops are 11-bit estimates, so the results get
@@ -190,6 +188,9 @@ enum XmmConst {
       XMMVRsqrteTableStart +
       (32 /
        4),  // 32 4-byte elements in table, 4 4-byte elements fit in each xmm
+  // lvlx/lvrx pshufb controls, 16 each, picked by the address low nibble
+  XMMLVLTable,
+  XMMLVRTable = XMMLVLTable + 16,
 
 };
 using amdfx::xopcompare_e;

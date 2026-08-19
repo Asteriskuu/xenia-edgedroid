@@ -297,27 +297,15 @@ RegExp ComputeMemoryAddressOffset(X64Emitter& e, const T& guest,
 
 struct LVL_V128 : Sequence<LVL_V128, I<OPCODE_LVL, V128Op, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.mov(e.edx, 0xf);
-
     e.lea(e.rcx, e.ptr[ComputeMemoryAddress(e, i.src1)]);
-    e.mov(e.eax, 0xf);
-
-    e.and_(e.eax, e.ecx);
-    e.or_(e.rcx, e.rdx);
-    e.vmovd(e.xmm0, e.eax);
-
-    e.xor_(e.rcx, e.rdx);
-    e.vpxor(e.xmm1, e.xmm1);
-    e.vmovdqa(e.xmm3, e.ptr[e.rcx]);
-    e.vmovdqa(e.xmm2, e.GetXmmConstPtr(XMMLVLShuffle));
-    e.vmovdqa(i.dest, e.GetXmmConstPtr(XMMPermuteControl15));
-    e.vpshufb(e.xmm0, e.xmm0, e.xmm1);
-
-    e.vpaddb(e.xmm2, e.xmm0);
-
-    e.vpcmpgtb(e.xmm1, e.xmm2, i.dest);
-    e.vpor(e.xmm0, e.xmm1, e.xmm2);
-    e.vpshufb(i.dest, e.xmm3, e.xmm0);
+    e.mov(e.eax, e.ecx);
+    e.and_(e.eax, 0xf);
+    e.and_(e.rcx, -16);
+    e.shl(e.eax, 4);
+    e.vmovdqa(i.dest, e.ptr[e.rcx]);
+    e.vpshufb(
+        i.dest, i.dest,
+        e.ptr[e.backend()->LookupXMMConstantAddress32(XMMLVLTable) + e.rax]);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_LVL, LVL_V128);
@@ -325,30 +313,18 @@ EMITTER_OPCODE_TABLE(OPCODE_LVL, LVL_V128);
 struct LVR_V128 : Sequence<LVR_V128, I<OPCODE_LVR, V128Op, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     Xbyak::Label endpoint{};
-    // todo: bailout instead? dont know how frequently the zero skip happens
+    // An aligned address reads nothing, and it can sit one past a valid page.
     e.vpxor(i.dest, i.dest);
-    e.mov(e.edx, 0xf);
-
     e.lea(e.rcx, e.ptr[ComputeMemoryAddress(e, i.src1)]);
-    e.mov(e.eax, 0xf);
-
-    e.and_(e.eax, e.ecx);
+    e.mov(e.eax, e.ecx);
+    e.and_(e.eax, 0xf);
     e.jz(endpoint);
-    e.or_(e.rcx, e.rdx);
-    e.vmovd(e.xmm0, e.eax);
-
-    e.xor_(e.rcx, e.rdx);
-    e.vpxor(e.xmm1, e.xmm1);
-    e.vmovdqa(e.xmm3, e.ptr[e.rcx]);
-    e.vmovdqa(e.xmm2, e.GetXmmConstPtr(XMMLVLShuffle));
-    e.vmovdqa(i.dest, e.GetXmmConstPtr(XMMLVRCmp16));
-    e.vpshufb(e.xmm0, e.xmm0, e.xmm1);
-
-    e.vpaddb(e.xmm2, e.xmm0);
-
-    e.vpcmpgtb(e.xmm1, i.dest, e.xmm2);
-    e.vpor(e.xmm0, e.xmm1, e.xmm2);
-    e.vpshufb(i.dest, e.xmm3, e.xmm0);
+    e.and_(e.rcx, -16);
+    e.shl(e.eax, 4);
+    e.vmovdqa(i.dest, e.ptr[e.rcx]);
+    e.vpshufb(
+        i.dest, i.dest,
+        e.ptr[e.backend()->LookupXMMConstantAddress32(XMMLVRTable) + e.rax]);
     e.L(endpoint);
   }
 };
