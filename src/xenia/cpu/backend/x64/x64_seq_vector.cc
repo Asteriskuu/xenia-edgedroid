@@ -2704,7 +2704,10 @@ static void emit_fast_f16_unpack(X64Emitter& e, const Inst& i,
   e.vpshufb(i.dest, src1, e.GetXmmConstPtr(initial_shuffle));
   e.vpmovsxwd(e.xmm1, i.dest);
 
-  e.vpsrld(e.xmm2, e.xmm1, 10);
+  // Zero-extend for the exponent, or a negative half's sign extension leaks
+  // past the mask and no denormal ever compares equal to zero below.
+  e.vpmovzxwd(e.xmm2, i.dest);
+  e.vpsrld(e.xmm2, e.xmm2, 10);
   e.vpmovsxwd(e.xmm0, i.dest);
   e.vpand(e.xmm0, e.xmm0, e.GetXmmConstPtr(XMMSignMaskPS));
   e.vpand(e.xmm2, e.xmm2, e.GetXmmConstPtr(XMMPermuteByteMask));
@@ -3298,45 +3301,21 @@ struct UNPACK : Sequence<UNPACK, I<OPCODE_UNPACK, V128Op, V128Op>> {
     e.vpor(i.dest, e.GetXmmConstPtr(XMMOne));
     // To convert to 0 to 1, games multiply by 0x47008081 and add 0xC7008081.
   }
-  static __m128 EmulateFLOAT16_2(void*, __m128i src1) {
-    alignas(16) uint16_t a[8];
-    alignas(16) float b[4];
-    _mm_store_si128(reinterpret_cast<__m128i*>(a), src1);
-
-    for (int i = 0; i < 2; i++) {
-      b[i] = xenos_half_to_float(a[VEC128_W(6 + i)]);
-    }
-
-    // Constants, or something
-    b[2] = 0.f;
-    b[3] = 1.f;
-
-    return _mm_load_ps(b);
-  }
   static void EmitFLOAT16_2(X64Emitter& e, const EmitArgType& i) {
-    // 1 bit sign, 5 bit exponent, 10 bit mantissa
-    // D3D10 half float format
-    // TODO(benvanik):
-    // http://blogs.msdn.com/b/chuckw/archive/2012/09/11/directxmath-f16c-and-fma.aspx
-    // Use _mm_cvtph_ps -- requires very modern processors (SSE5+)
-    // Unpacking half floats:
-    // http://fgiesen.wordpress.com/2012/03/28/half-to-float-done-quic/
-    // Packing half floats: https://gist.github.com/rygorous/2156668
-    // Load source, move from tight pack of X16Y16.... to X16...Y16...
-    // Also zero out the high end.
-    // TODO(benvanik): special case constant unpacks that just get 0/1/etc.
-
-    auto src1 = GetInputRegOrConstant(e, i.src1, e.xmm3);
-
-#if XE_PLATFORM_WIN32
-    // Windows x64 ABI: __m128i is passed by implicit pointer
-    e.lea(e.GetNativeParam(0), e.StashXmm(0, src1));
-#else
-    // Linux/Mac System V ABI: __m128i passed in xmm0, return in xmm0
-    e.vmovaps(e.xmm0, src1);
-#endif
-    e.CallNativeSafe(reinterpret_cast<void*>(EmulateFLOAT16_2));
-    e.vmovaps(i.dest, e.xmm0);
+    // 1 bit sign, 5 bit exponent, 10 bit mantissa, D3D10 half float format.
+    if (i.src1.is_constant) {
+      vec128_t result{};
+      for (int idx = 0; idx < 2; ++idx) {
+        result.f32[idx] =
+            xenos_half_to_float(i.src1.constant().u16[VEC128_W(6 + idx)]);
+      }
+      result.f32[3] = 1.0f;
+      e.LoadConstantXmm(i.dest, result);
+      return;
+    }
+    emit_fast_f16_unpack(e, i, XMMUnpackFLOAT16_2);
+    // The helper leaves the unused lanes at zero, w has to read 1.0f.
+    e.vblendps(i.dest, i.dest, e.GetXmmConstPtr(XMMOne), 0b1000);
   }
 
   static void EmitFLOAT16_4(X64Emitter& e, const EmitArgType& i) {
