@@ -290,7 +290,7 @@ void Processor::DumpSequences(FILE* f) {
     uint64_t occurrences = 0;
     uint64_t host_bytes = 0;
   };
-  std::map<uint32_t, SequenceRow> sequences;
+  std::map<uint64_t, SequenceRow> sequences;
   std::vector<uint64_t> totals;
   uint64_t grand_total = 0;
   for (auto& region : trace_counts_regions_) {
@@ -321,7 +321,7 @@ void Processor::DumpSequences(FILE* f) {
     return;
   }
 
-  std::vector<std::pair<uint32_t, SequenceRow>> rows(sequences.begin(),
+  std::vector<std::pair<uint64_t, SequenceRow>> rows(sequences.begin(),
                                                      sequences.end());
   std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
     return a.second.executed > b.second.executed;
@@ -334,7 +334,8 @@ void Processor::DumpSequences(FILE* f) {
     std::string label =
         backend_ ? backend_->FormatSequenceKey(row.first) : std::string();
     std::fprintf(
-        f, "\"%08X\",\"%s\",%llu,%.6f,%llu,%.2f\n", row.first, label.c_str(),
+        f, "\"%016llX\",\"%s\",%llu,%.6f,%llu,%.2f\n",
+        static_cast<unsigned long long>(row.first), label.c_str(),
         static_cast<unsigned long long>(row.second.executed),
         double(row.second.executed) / double(grand_total),
         static_cast<unsigned long long>(row.second.occurrences),

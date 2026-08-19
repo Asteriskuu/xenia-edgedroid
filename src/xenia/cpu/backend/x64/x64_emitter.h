@@ -270,7 +270,8 @@ class X64Emitter : public Xbyak::CodeGenerator {
 
   // Called from SelectSequence once a sequence has emitted. Cheap no-op unless
   // this function is being counted.
-  void RecordSequenceSample(uint32_t key, uint32_t host_bytes);
+  void RecordSequenceSample(const hir::Instr* i, uint32_t backend_key,
+                            uint32_t host_bytes);
 
   void DebugBreak();
   void Trap(uint16_t trap_type = 0);

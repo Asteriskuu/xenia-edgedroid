@@ -429,11 +429,13 @@ void A64Emitter::MarkSourceOffset(const hir::Instr* i) {
   }
 }
 
-void A64Emitter::RecordSequenceSample(uint32_t key, uint32_t host_bytes) {
+void A64Emitter::RecordSequenceSample(const hir::Instr* i, uint32_t backend_key,
+                                      uint32_t host_bytes) {
   if (coverage_current_index_ == UINT32_MAX || !host_bytes) {
     return;
   }
-  sequence_samples_.push_back({key, coverage_current_index_, host_bytes});
+  sequence_samples_.push_back({hir::MakeSequenceSampleKey(i, backend_key),
+                               coverage_current_index_, host_bytes});
 }
 
 void A64Emitter::DebugBreak() { brk(0xF000); }

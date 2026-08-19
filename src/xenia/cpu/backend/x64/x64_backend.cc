@@ -1997,7 +1997,7 @@ void X64Backend::set_trace_func_enabled(bool value) {
   SetTraceFuncEnabled(value);
 }
 
-std::string X64Backend::FormatSequenceKey(uint32_t key) const {
+std::string X64Backend::FormatSequenceKey(uint64_t key) const {
   return x64::FormatSequenceKey(key);
 }
 }  // namespace x64

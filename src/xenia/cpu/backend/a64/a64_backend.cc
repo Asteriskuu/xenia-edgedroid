@@ -1325,7 +1325,7 @@ void A64Backend::set_trace_func_enabled(bool value) {
   SetTraceFuncEnabled(value);
 }
 
-std::string A64Backend::FormatSequenceKey(uint32_t key) const {
+std::string A64Backend::FormatSequenceKey(uint64_t key) const {
   return a64::FormatSequenceKey(key);
 }
 

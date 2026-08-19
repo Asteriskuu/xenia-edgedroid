@@ -24,6 +24,7 @@
 
 #include "xenia/cpu/backend/x64/x64_sequences.h"
 
+#include <cstdio>
 #include <cstring>
 
 #include "xenia/base/assert.h"
@@ -3644,19 +3645,28 @@ static const char* KeyTypeName(uint32_t type) {
   }
 }
 
-std::string FormatSequenceKey(uint32_t key) {
-  const InstrKey decoded(key);
+std::string FormatSequenceKey(uint64_t key) {
+  const InstrKey decoded(hir::SequenceSampleBackendKey(key));
   std::string result = GetOpcodeName(static_cast<Opcode>(decoded.opcode));
-  result += ' ';
   // Space separated so the rendered label stays free of commas and the CSV
   // column can be split naively.
+  result += ' ';
   result += KeyTypeName(decoded.dest);
-  result += ' ';
-  result += KeyTypeName(decoded.src1);
-  result += ' ';
-  result += KeyTypeName(decoded.src2);
-  result += ' ';
-  result += KeyTypeName(decoded.src3);
+  const uint32_t srcs[3] = {decoded.src1, decoded.src2, decoded.src3};
+  for (uint32_t n = 0; n < 3; ++n) {
+    result += ' ';
+    if (hir::SequenceSampleSrcIsConstant(key, n)) {
+      result += 'c';
+    }
+    result += KeyTypeName(srcs[n]);
+  }
+  const uint16_t flags = hir::SequenceSampleFlags(key);
+  if (flags) {
+    char buffer[16];
+    std::snprintf(buffer, sizeof(buffer), " f%X",
+                  static_cast<unsigned int>(flags));
+    result += buffer;
+  }
   return result;
 }
 
@@ -3680,7 +3690,7 @@ bool SelectSequence(X64Emitter* e, const Instr* i, const Instr** new_tail) {
         if (num != OPCODE_SOURCE_OFFSET && num != OPCODE_COMMENT &&
             num != OPCODE_NOP) {
           e->RecordSequenceSample(
-              key.value, static_cast<uint32_t>(e->getSize() - size_before));
+              i, key.value, static_cast<uint32_t>(e->getSize() - size_before));
         }
         *new_tail = i->next;
         return true;

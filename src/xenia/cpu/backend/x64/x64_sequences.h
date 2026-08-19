@@ -50,7 +50,7 @@ bool SelectSequence(X64Emitter* e, const hir::Instr* i,
 
 // Renders a selection key as "OPCODE_NAME dest,src1,src2,src3". Lives here
 // because the key layout belongs to this file's InstrKey.
-std::string FormatSequenceKey(uint32_t key);
+std::string FormatSequenceKey(uint64_t key);
 
 }  // namespace x64
 }  // namespace backend
