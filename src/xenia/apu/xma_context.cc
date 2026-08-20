@@ -39,9 +39,7 @@ extern "C" {
 namespace xe {
 namespace apu {
 
-XmaContext::XmaContext()
-    : work_completion_event_(
-          xe::threading::Event::CreateAutoResetEvent(false)) {}
+XmaContext::XmaContext() = default;
 
 XmaContext::~XmaContext() {}
 
