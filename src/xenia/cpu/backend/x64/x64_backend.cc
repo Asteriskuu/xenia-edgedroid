@@ -1090,7 +1090,7 @@ void* X64HelperEmitter::EmitGuestAndHostSynchronizeStackSizeLoadThunk(
 void* X64HelperEmitter::EmitScalarVRsqrteHelper() {
   _code_offsets code_offsets = {};
 
-  Xbyak::Label L18, L2, L35, L4, L9, L8, L10, L11, L12, L13, L1;
+  Xbyak::Label L18, L2, L35, L4, L9, L8, L10, L11, L1;
   Xbyak::Label LC1, _LCPI3_1;
   Xbyak::Label handle_denormal_input;
   Xbyak::Label handle_non_positive_normal;
@@ -1232,46 +1232,35 @@ void* X64HelperEmitter::EmitScalarVRsqrteHelper() {
   sal(eax, 10);
   and_(eax, 0x3fffc00);
   sub(eax, edx);
-  bt(eax, 25);
-  jc(L12);
-  mov(edx, eax);
-  add(ecx, 6);
-  and_(edx, 0x1ffffff);
-
-  if (IsFeatureEnabled(kX64EmitLZCNT)) {
-    lzcnt(edx, edx);
-  } else {
-    emulate_lzcnt_helper_unary_reg(edx, r9d);
-  }
-
-  lea(r9d, ptr[rdx - 6]);
+  // The interpolated estimate is always within [2^24, 2^26), so normalizing it
+  // is a one-bit shift and needs no leading zero count.
+  lea(r9d, ptr[rax + rax]);
+  xor_(edx, edx);
+  test(eax, 0x2000000);
+  setz(dl);
+  cmovz(eax, r9d);
   sub(ecx, edx);
-  if (IsFeatureEnabled(kX64EmitBMI2)) {
-    shlx(eax, eax, r9d);
-  } else {
-    xchg(ecx, r9d);
-    shl(eax, cl);
-    xchg(ecx, r9d);
-  }
 
-  L(L12);
-  test(al, 5);
-  je(L13);
-  test(al, 2);
-  je(L13);
-  add(eax, 4);
+  // Round up by 4 when bit 1 and either bit 0 or bit 2 is set.
+  mov(edx, eax);
+  shr(edx, 2);
+  or_(edx, eax);
+  mov(r9d, eax);
+  shr(r9d, 1);
+  and_(edx, r9d);
+  and_(edx, 1);
+  lea(eax, ptr[rax + rdx * 4]);
 
-  L(L13);
+  // Only positive denormals reach here, and they yield a biased exponent of
+  // 189..201, so the output can never be denormal and needs no flush.
   sal(ecx, 23);
   and_(r8d, 0x80000000);
   shr(eax, 2);
   add(ecx, 0x3f800000);
   and_(eax, 0x7fffff);
-  vxorps(xmm1, xmm1);
   or_(ecx, r8d);
   or_(ecx, eax);
   vmovd(xmm0, ecx);
-  vaddss(xmm0, xmm1);  // apply DAZ behavior to output
 
   L(L1);
   ret();
