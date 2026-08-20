@@ -785,6 +785,24 @@ struct SELECT_F64
     e.ChangeMxcsrMode(MXCSRMode::Fpu);
     // dest = src1 != 0 ? src2 : src3
 
+    // A constant arm starts free in a GPR rather than needing an xmm of its
+    // own, so the choice itself runs on the integer ports and only the other
+    // arm and the result cross domains.
+    if (i.src2.is_constant != i.src3.is_constant) {
+      const bool constant_is_true_arm = i.src2.is_constant;
+      e.mov(e.rax, constant_is_true_arm ? i.src2.value->constant.u64
+                                        : i.src3.value->constant.u64);
+      e.vmovq(e.rcx, constant_is_true_arm ? i.src3.reg() : i.src2.reg());
+      e.test(i.src1, i.src1);
+      if (constant_is_true_arm) {
+        e.cmovz(e.rax, e.rcx);
+      } else {
+        e.cmovnz(e.rax, e.rcx);
+      }
+      e.vmovq(i.dest, e.rax);
+      return;
+    }
+
     if (e.IsFeatureEnabled(kX64EmitAVX512Ortho)) {
       e.movzx(e.rax, i.src1);
       e.vmovq(e.xmm0, e.rax);
@@ -804,23 +822,23 @@ struct SELECT_F64
       return;
     }
 
+    // Negating the 0/1 condition fills the sign bit the blend selects on.
     e.movzx(e.eax, i.src1);
-    e.vmovd(e.xmm1, e.eax);
-    e.vpxor(e.xmm0, e.xmm0);
-    e.vpcmpeqq(e.xmm0, e.xmm1);
+    e.neg(e.rax);
+    e.vmovq(e.xmm0, e.rax);
 
-    Xmm src2 = i.src2.is_constant ? e.xmm2 : i.src2;
+    // Distinct scratch per arm: a blend reads both at once.
+    Xmm src2 = i.src2.is_constant ? e.xmm1 : i.src2;
     if (i.src2.is_constant) {
       e.LoadConstantXmm(src2, i.src2.constant());
     }
-    e.vpandn(e.xmm1, e.xmm0, src2);
 
     Xmm src3 = i.src3.is_constant ? e.xmm2 : i.src3;
     if (i.src3.is_constant) {
       e.LoadConstantXmm(src3, i.src3.constant());
     }
-    e.vpand(i.dest, e.xmm0, src3);
-    e.vpor(i.dest, e.xmm1);
+
+    e.vblendvpd(i.dest, src3, src2, e.xmm0);
   }
 };
 struct SELECT_V128_I8
