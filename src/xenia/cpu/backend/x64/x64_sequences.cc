@@ -3700,7 +3700,7 @@ bool SelectSequence(X64Emitter* e, const Instr* i, const Instr** new_tail) {
     auto it = table.find(key);
     if (it != table.end()) {
       const size_t size_before = e->getSize();
-      if (it->second(*e, i, InstrKey(i))) {
+      if (it->second(*e, i, key)) {
         // Skip the bookkeeping opcodes: they carry no guest work, and
         // SOURCE_OFFSET would otherwise charge the coverage counter's own
         // code to the instruction it is counting.

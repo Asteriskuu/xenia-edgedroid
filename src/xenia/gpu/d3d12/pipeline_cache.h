@@ -268,6 +268,8 @@ class PipelineCache : public GuestSpirvShaderCache::Host {
     kBlendFactor,
     kInvBlendFactor,
     kSrcAlphaSat,
+    kAlphaFactor,
+    kInvAlphaFactor,
   };
 
   // Update PipelineDescription::kVersion if anything is changed!
@@ -328,9 +330,10 @@ class PipelineCache : public GuestSpirvShaderCache::Host {
     PipelineRenderTarget render_targets[xenos::kMaxColorRenderTargets];
 
     inline bool operator==(const PipelineDescription& other) const;
-    // Bumped to invalidate caches: vertex/pixel_shader_modification are now the
-    // canonical SPIR-V (spirv_to_dxil) modifications, not DXBC.
-    static constexpr uint32_t kVersion = 0x20260726;
+    // Bumped to invalidate caches: vertex/pixel_shader_modification are now
+    // the canonical SPIR-V (spirv_to_dxil) modifications, not DXBC; then
+    // again for the constant-alpha blend state.
+    static constexpr uint32_t kVersion = 0x20260822;
   });
 
   XEPACKEDSTRUCT(PipelineStoredDescription, {
