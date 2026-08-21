@@ -257,12 +257,9 @@ void SpirvShaderTranslator::Reset() {
   // Barycentric interpolation inputs.
   input_barycentric_coord_ = spv::NoResult;
   input_barycentric_coord_no_persp_ = spv::NoResult;
-  std::fill(input_interpolators_per_vertex_.begin(),
-            input_interpolators_per_vertex_.end(), spv::NoResult);
-  std::fill(input_output_interpolators_.begin(),
-            input_output_interpolators_.end(), spv::NoResult);
-  std::fill(var_main_rect_list_guest_interpolators_.begin(),
-            var_main_rect_list_guest_interpolators_.end(), spv::NoResult);
+  std::ranges::fill(input_interpolators_per_vertex_, spv::NoResult);
+  std::ranges::fill(input_output_interpolators_, spv::NoResult);
+  std::ranges::fill(var_main_rect_list_guest_interpolators_, spv::NoResult);
   output_point_coordinates_ = spv::NoResult;
   output_point_size_ = spv::NoResult;
 
@@ -288,8 +285,7 @@ void SpirvShaderTranslator::Reset() {
   main_rect_list_loop_vertex_index_next_ = spv::NoResult;
   var_main_kill_pixel_ = spv::NoResult;
   var_main_fsi_color_written_ = spv::NoResult;
-  std::fill(output_fragment_data_.begin(), output_fragment_data_.end(),
-            spv::NoResult);
+  std::ranges::fill(output_fragment_data_, spv::NoResult);
   output_or_var_fragment_depth_ = spv::NoResult;
   output_fragment_depth_ = spv::NoResult;
   main_fbo_depth_unbiased_ = spv::NoResult;
@@ -3275,8 +3271,7 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
     // throughout the shader (so we can read them for alpha test), and copied
     // to the Output variables at the end.
     if (!edram_fragment_shader_interlock_) {
-      std::fill(output_fragment_data_.begin(), output_fragment_data_.end(),
-                spv::NoResult);
+      std::ranges::fill(output_fragment_data_, spv::NoResult);
       static const char* const kFragmentDataOutputNames[] = {
           "xe_out_fragment_data_0",
           "xe_out_fragment_data_1",
@@ -3370,8 +3365,7 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
   // For FBO, this allows reading the color values back (e.g., for alpha test),
   // which isn't possible with Output storage class. The values are copied to
   // the actual Output variables at the end of the shader for FBO.
-  std::fill(output_or_var_fragment_data_.begin(),
-            output_or_var_fragment_data_.end(), spv::NoResult);
+  std::ranges::fill(output_or_var_fragment_data_, spv::NoResult);
   var_main_fsi_color_written_ = spv::NoResult;
   uint32_t color_targets_written = current_shader().writes_color_targets();
   if (color_targets_written && !is_depth_only_fragment_shader_) {

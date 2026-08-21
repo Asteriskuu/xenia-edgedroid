@@ -515,8 +515,7 @@ void CloseFileMappingHandle(FileMappingHandle handle,
   // Remove from tracking
   {
     std::lock_guard guard(g_shm_file_names_mutex);
-    auto it =
-        std::find(g_shm_file_names.begin(), g_shm_file_names.end(), shm_name);
+    auto it = std::ranges::find(g_shm_file_names, shm_name);
     if (it != g_shm_file_names.end()) {
       g_shm_file_names.erase(it);
     }
@@ -528,8 +527,7 @@ void CloseFileMappingHandle(FileMappingHandle handle,
   bool tracked = false;
   {
     std::lock_guard guard(g_shm_file_names_mutex);
-    auto it = std::find(g_shm_file_names.begin(), g_shm_file_names.end(),
-                        full_path.string());
+    auto it = std::ranges::find(g_shm_file_names, full_path.string());
     if (it != g_shm_file_names.end()) {
       g_shm_file_names.erase(it);
       tracked = true;

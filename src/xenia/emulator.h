@@ -212,7 +212,7 @@ class Emulator {
     XEX0,
     XEXQ,
     XEXH,
-    XEXP,
+    XEX25,
     XEX1,
     XEX2,
     ELF,

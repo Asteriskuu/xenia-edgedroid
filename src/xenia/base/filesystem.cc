@@ -11,6 +11,7 @@
 
 #include <fstream>
 #include <ios>
+#include <utility>
 
 #include "xenia/base/string_util.h"
 
@@ -78,10 +79,10 @@ std::vector<FileInfo> ListDirectories(const std::filesystem::path& path) {
   std::vector<FileInfo> files = ListFiles(path);
   std::vector<FileInfo> directories = {};
 
-  std::copy_if(files.cbegin(), files.cend(), std::back_inserter(directories),
-               [](const FileInfo& file) {
-                 return file.type == FileInfo::Type::kDirectory;
-               });
+  std::ranges::copy_if(std::as_const(files), std::back_inserter(directories),
+                       [](const FileInfo& file) {
+                         return file.type == FileInfo::Type::kDirectory;
+                       });
 
   return directories;
 }
@@ -90,11 +91,11 @@ std::vector<FileInfo> FilterByName(const std::vector<FileInfo>& files,
                                    const std::regex pattern) {
   std::vector<FileInfo> filtered_entries = {};
 
-  std::copy_if(
-      files.cbegin(), files.cend(), std::back_inserter(filtered_entries),
-      [pattern](const FileInfo& file) {
-        return std::regex_match(file.name.filename().string(), pattern);
-      });
+  std::ranges::copy_if(files, std::back_inserter(filtered_entries),
+                       [pattern](const FileInfo& file) {
+                         return std::regex_match(file.name.filename().string(),
+                                                 pattern);
+                       });
   return filtered_entries;
 }
 
