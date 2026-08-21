@@ -764,7 +764,8 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             ImGui::TableSetColumnIndex(1);
             if (RightAlignedCheckbox("##half_pixel_offset",
                                      &half_pixel_offset_)) {
-              ApplyBoolSetting("GPU", "half_pixel_offset", half_pixel_offset_);
+              ApplyBoolSetting("GPU.Debug", "half_pixel_offset",
+                               half_pixel_offset_);
             }
           }
 
@@ -958,7 +959,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             DrawLabelCell("dxbc_switch", "[D3D12]");
             ImGui::TableSetColumnIndex(1);
             if (RightAlignedCheckbox("##dxbc_switch", &dxbc_switch_)) {
-              ApplyBoolSetting("GPU", "dxbc_switch", dxbc_switch_, true);
+              ApplyBoolSetting("GPU.Debug", "dxbc_switch", dxbc_switch_, true);
             }
             ImGui::EndDisabled();
           }
@@ -977,7 +978,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             ImGui::TableSetColumnIndex(1);
             if (RightAlignedCheckbox("##execute_unclipped_draw_vs_on_cpu",
                                      &execute_unclipped_draw_vs_on_cpu_)) {
-              ApplyBoolSetting("GPU", "execute_unclipped_draw_vs_on_cpu",
+              ApplyBoolSetting("GPU.Debug", "execute_unclipped_draw_vs_on_cpu",
                                execute_unclipped_draw_vs_on_cpu_);
             }
           }
@@ -993,7 +994,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
                     "##execute_unclipped_draw_vs_on_cpu_for_psi_render_backend",
                     &execute_unclipped_draw_vs_on_cpu_for_psi_render_backend_)) {
               ApplyBoolSetting(
-                  "GPU",
+                  "GPU.Debug",
                   "execute_unclipped_draw_vs_on_cpu_for_psi_render_backend",
                   execute_unclipped_draw_vs_on_cpu_for_psi_render_backend_);
             }
@@ -1007,7 +1008,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             if (RightAlignedCheckbox(
                     "##execute_unclipped_draw_vs_on_cpu_with_scissor",
                     &execute_unclipped_draw_vs_on_cpu_with_scissor_)) {
-              ApplyBoolSetting("GPU",
+              ApplyBoolSetting("GPU.Debug",
                                "execute_unclipped_draw_vs_on_cpu_with_scissor",
                                execute_unclipped_draw_vs_on_cpu_with_scissor_);
             }
@@ -1020,7 +1021,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             ImGui::TableSetColumnIndex(1);
             if (RightAlignedCheckbox("##mrt_edram_used_range_clamp_to_min",
                                      &mrt_edram_used_range_clamp_to_min_)) {
-              ApplyBoolSetting("GPU", "mrt_edram_used_range_clamp_to_min",
+              ApplyBoolSetting("GPU.Debug", "mrt_edram_used_range_clamp_to_min",
                                mrt_edram_used_range_clamp_to_min_);
             }
           }
@@ -1134,7 +1135,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             ImGui::TableSetColumnIndex(1);
             if (RightAlignedCheckbox("##depth_transfer_not_equal_test",
                                      &depth_transfer_not_equal_test_)) {
-              ApplyBoolSetting("GPU", "depth_transfer_not_equal_test",
+              ApplyBoolSetting("GPU.Debug", "depth_transfer_not_equal_test",
                                depth_transfer_not_equal_test_, true);
             }
           }
@@ -1166,7 +1167,8 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             ImGui::TableSetColumnIndex(1);
             if (RightAlignedCheckbox("##force_convert_triangle_fans_to_lists",
                                      &force_convert_triangle_fans_to_lists_)) {
-              ApplyBoolSetting("GPU", "force_convert_triangle_fans_to_lists",
+              ApplyBoolSetting("GPU.Debug",
+                               "force_convert_triangle_fans_to_lists",
                                force_convert_triangle_fans_to_lists_);
             }
           }
@@ -1179,7 +1181,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             if (RightAlignedCheckbox(
                     "##force_convert_quad_lists_to_triangle_lists",
                     &force_convert_quad_lists_to_triangle_lists_)) {
-              ApplyBoolSetting("GPU",
+              ApplyBoolSetting("GPU.Debug",
                                "force_convert_quad_lists_to_triangle_lists",
                                force_convert_quad_lists_to_triangle_lists_);
             }
@@ -1192,7 +1194,8 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             ImGui::TableSetColumnIndex(1);
             if (RightAlignedCheckbox("##force_convert_line_loops_to_strips",
                                      &force_convert_line_loops_to_strips_)) {
-              ApplyBoolSetting("GPU", "force_convert_line_loops_to_strips",
+              ApplyBoolSetting("GPU.Debug",
+                               "force_convert_line_loops_to_strips",
                                force_convert_line_loops_to_strips_);
             }
           }
@@ -1367,7 +1370,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             DrawLabelCell("disassemble_pm4", "[Debug build only]");
             ImGui::TableSetColumnIndex(1);
             if (RightAlignedCheckbox("##disassemble_pm4", &disassemble_pm4_)) {
-              ApplyBoolSetting("GPU", "disassemble_pm4", disassemble_pm4_);
+              ApplyBoolSetting("Logging", "disassemble_pm4", disassemble_pm4_);
             }
             ImGui::EndDisabled();
           }
@@ -1382,7 +1385,7 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             if (RightAlignedCheckbox(
                     "##log_guest_driven_gpu_register_written_values",
                     &log_guest_driven_gpu_register_written_values_)) {
-              ApplyBoolSetting("GPU",
+              ApplyBoolSetting("Logging",
                                "log_guest_driven_gpu_register_written_values",
                                log_guest_driven_gpu_register_written_values_);
             }
@@ -1398,7 +1401,8 @@ void ImGuiDebugDialog::OnDraw(ImGuiIO& io) {
             ImGui::TableSetColumnIndex(1);
             if (RightAlignedCheckbox("##log_ringbuffer_kickoff_initiator_bts",
                                      &log_ringbuffer_kickoff_initiator_bts_)) {
-              ApplyBoolSetting("GPU", "log_ringbuffer_kickoff_initiator_bts",
+              ApplyBoolSetting("Logging",
+                               "log_ringbuffer_kickoff_initiator_bts",
                                log_ringbuffer_kickoff_initiator_bts_);
             }
             ImGui::EndDisabled();

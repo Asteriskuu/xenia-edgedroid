@@ -438,7 +438,11 @@ void GameConfigDialog::SaveOverrides() {
                      xe::ui::DisplayNameToIntCvarValue(row->name, value));
   }
   for (auto& [cat, tbl] : by_category) {
-    out.insert_or_assign(cat, tbl);
+    if (auto* dest = config::ResolveSectionTable(out, cat)) {
+      for (auto&& [key, value] : tbl) {
+        dest->insert_or_assign(key, value);
+      }
+    }
   }
   try {
     config::SaveGameConfig(title_id_, out);

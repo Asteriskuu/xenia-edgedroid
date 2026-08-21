@@ -37,7 +37,7 @@ DEFINE_bool(
     native_stencil_value_output_d3d12_intel, false,
     "Allow stencil reference output usage on Direct3D 12 on Intel GPUs - not "
     "working on UHD Graphics 630 as of March 2021 (driver 27.20.0100.8336).",
-    "GPU");
+    "GPU.Debug");
 
 namespace xe {
 namespace gpu {
@@ -470,7 +470,7 @@ bool D3D12RenderTargetCache::Initialize() {
 
     // Check if 2x MSAA is supported or needs to be emulated with 4x MSAA
     // instead.
-    if (cvars::native_2x_msaa) {
+    if (!cvars::debug_msaa_4x_as_2x) {
       msaa_2x_supported_ = true;
       static constexpr DXGI_FORMAT kRenderTargetDXGIFormats[] = {
           DXGI_FORMAT_R16G16B16A16_FLOAT,

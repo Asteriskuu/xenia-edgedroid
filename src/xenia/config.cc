@@ -368,6 +368,30 @@ void SaveGameConfig(uint32_t title_id, const toml::table& config_table) {
   }
 }
 
+// Resolves a possibly dotted category ("GPU.Debug") to a nested table, creating
+// intermediates. toml::path splits on '.', so a table stored under the literal
+// key "GPU.Debug" would never be found on load.
+toml::table* ResolveSectionTable(toml::table& root, std::string_view section) {
+  toml::table* table = &root;
+  size_t start = 0;
+  while (true) {
+    size_t dot = section.find('.', start);
+    std::string key(section.substr(
+        start, dot == std::string_view::npos ? dot : dot - start));
+    if (key.empty()) {
+      return nullptr;
+    }
+    if (!table->contains(key)) {
+      table->insert(key, toml::table{});
+    }
+    table = (*table)[key].as_table();
+    if (!table || dot == std::string_view::npos) {
+      return table;
+    }
+    start = dot + 1;
+  }
+}
+
 void SaveGameConfigSetting(xe::Emulator* emulator, const char* section,
                            const char* cvar_name, const std::string& value) {
   if (!emulator || !emulator->is_title_open()) {
@@ -377,11 +401,7 @@ void SaveGameConfigSetting(xe::Emulator* emulator, const char* section,
   uint32_t title_id = emulator->title_id();
   toml::table config_table = LoadGameConfig(title_id);
 
-  if (!config_table.contains(section)) {
-    config_table.insert(section, toml::table{});
-  }
-
-  auto* section_table = config_table[section].as_table();
+  auto* section_table = ResolveSectionTable(config_table, section);
   if (section_table) {
     section_table->insert_or_assign(cvar_name, value);
   }
@@ -398,11 +418,7 @@ void SaveGameConfigSetting(xe::Emulator* emulator, const char* section,
   uint32_t title_id = emulator->title_id();
   toml::table config_table = LoadGameConfig(title_id);
 
-  if (!config_table.contains(section)) {
-    config_table.insert(section, toml::table{});
-  }
-
-  auto* section_table = config_table[section].as_table();
+  auto* section_table = ResolveSectionTable(config_table, section);
   if (section_table) {
     section_table->insert_or_assign(cvar_name, value);
   }
@@ -419,11 +435,7 @@ void SaveGameConfigSetting(xe::Emulator* emulator, const char* section,
   uint32_t title_id = emulator->title_id();
   toml::table config_table = LoadGameConfig(title_id);
 
-  if (!config_table.contains(section)) {
-    config_table.insert(section, toml::table{});
-  }
-
-  auto* section_table = config_table[section].as_table();
+  auto* section_table = ResolveSectionTable(config_table, section);
   if (section_table) {
     section_table->insert_or_assign(cvar_name, value);
   }
@@ -440,11 +452,7 @@ void SaveGameConfigSetting(xe::Emulator* emulator, const char* section,
   uint32_t title_id = emulator->title_id();
   toml::table config_table = LoadGameConfig(title_id);
 
-  if (!config_table.contains(section)) {
-    config_table.insert(section, toml::table{});
-  }
-
-  auto* section_table = config_table[section].as_table();
+  auto* section_table = ResolveSectionTable(config_table, section);
   if (section_table) {
     section_table->insert_or_assign(cvar_name, value);
   }
@@ -461,11 +469,7 @@ void SaveGameConfigSetting(xe::Emulator* emulator, const char* section,
   uint32_t title_id = emulator->title_id();
   toml::table config_table = LoadGameConfig(title_id);
 
-  if (!config_table.contains(section)) {
-    config_table.insert(section, toml::table{});
-  }
-
-  auto* section_table = config_table[section].as_table();
+  auto* section_table = ResolveSectionTable(config_table, section);
   if (section_table) {
     section_table->insert_or_assign(cvar_name, value);
   }
