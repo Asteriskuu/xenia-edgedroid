@@ -276,9 +276,9 @@ static std::condition_variable g_multi_wait_cv;
 static std::atomic<uint64_t> g_multi_wait_gen{0};
 static std::atomic<uint32_t> g_multi_waiters{0};
 static void PokeMultiWaiters() {
-  // Bump the generation before reading the waiter count: a waiter that has
-  // just registered re-checks the generation under the mutex before sleeping,
-  // so it cannot miss this.
+  // Bump before reading the count so a waiter that re-checks gen after
+  // registering sees it. Not a guarantee: neither this nor the notify below is
+  // ordered against a waiter mid-park. The waiter's 1ms cap is the real bound.
   g_multi_wait_gen.fetch_add(1, std::memory_order_release);
   if (g_multi_waiters.load(std::memory_order_acquire) == 0) {
     // Nobody is parked, so skip the process-global mutex entirely. This path
@@ -291,6 +291,16 @@ static void PokeMultiWaiters() {
   // cap the waiter already applies.
   g_multi_wait_cv.notify_all();
 }
+
+// Scopes the parked-waiter count; a cancelled wait must not leak it.
+struct ScopedMultiWaiter {
+  ScopedMultiWaiter() {
+    g_multi_waiters.fetch_add(1, std::memory_order_release);
+  }
+  ~ScopedMultiWaiter() {
+    g_multi_waiters.fetch_sub(1, std::memory_order_release);
+  }
+};
 
 class PosixConditionBase {
  public:
@@ -502,14 +512,13 @@ class PosixConditionBase {
       auto remaining =
           std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
       auto park = std::min(remaining, std::chrono::milliseconds(1));
-      g_multi_waiters.fetch_add(1, std::memory_order_release);
       {
+        ScopedMultiWaiter parked;
         std::unique_lock<std::mutex> mw_lock(g_multi_wait_mutex);
         g_multi_wait_cv.wait_for(mw_lock, park, [&] {
           return g_multi_wait_gen.load(std::memory_order_acquire) != wait_gen;
         });
       }
-      g_multi_waiters.fetch_sub(1, std::memory_order_release);
     }
   }
 
@@ -1653,7 +1662,8 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   std::unique_lock lock(thread->handle_.mutex_);
   thread->handle_.exit_code_ = 0;
   thread->handle_.signaled_ = true;
-  thread->handle_.cond_.notify_all();
+  // Not cond_ directly: a WaitMultiple on this thread handle needs the poke.
+  thread->handle_.NotifyAll();
 
   current_thread_ = nullptr;
   return nullptr;
