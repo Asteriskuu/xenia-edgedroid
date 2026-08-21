@@ -70,10 +70,11 @@ DEFINE_int32(
     "Higher reduces ring churn but uses more memory.",
     "Metal");
 DEFINE_bool(
-    metal_use_dxil, false,
+    metal_use_dxil, true,
     "Translate guest shaders through SPIR-V -> DXIL -> AIR with Apple's Metal "
     "Shader Converter instead of SPIRV-Cross.",
     "Metal");
+UPDATE_from_bool(metal_use_dxil, 2026, 8, 21, 12, false);
 DEFINE_int32(
     metal_pipeline_creation_threads, -1,
     "Number of threads used for SPIRV-Cross shader and render pipeline "
