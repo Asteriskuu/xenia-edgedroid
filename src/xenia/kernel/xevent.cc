@@ -31,8 +31,8 @@ void XEvent::Initialize(bool manual_reset, bool initial_state) {
   auto* kevent = memory()->TranslateVirtual<X_KEVENT*>(guest_object());
   // Don't touch header.wait_list: SetNativePointer stashes the handle there.
   kevent->header.type = manual_reset
-                            ? X_DISPATCHER_FLAGS::DISPATCHER_MANUAL_RESET_EVENT
-                            : X_DISPATCHER_FLAGS::DISPATCHER_AUTO_RESET_EVENT;
+                            ? X_OBJECT_TYPES::EventNotificationObject
+                            : X_OBJECT_TYPES::EventSynchronizationObject;
   kevent->header.signal_state = initial_state ? 1 : 0;
 
   if (manual_reset) {
@@ -48,10 +48,10 @@ void XEvent::InitializeNative(void* native_ptr,
   assert_false(event_);
 
   switch (header->type) {
-    case X_DISPATCHER_FLAGS::DISPATCHER_MANUAL_RESET_EVENT:
+    case X_OBJECT_TYPES::EventNotificationObject:
       manual_reset_ = true;
       break;
-    case X_DISPATCHER_FLAGS::DISPATCHER_AUTO_RESET_EVENT:
+    case X_OBJECT_TYPES::EventSynchronizationObject:
       manual_reset_ = false;
       break;
     default:

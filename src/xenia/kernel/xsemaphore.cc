@@ -29,7 +29,7 @@ bool XSemaphore::Initialize(int32_t initial_count, int32_t maximum_count) {
   CreateNative(sizeof(X_KSEMAPHORE));
   auto* ksem = memory()->TranslateVirtual<X_KSEMAPHORE*>(guest_object());
   // Don't touch header.wait_list: SetNativePointer stashes the handle there.
-  ksem->header.type = X_DISPATCHER_FLAGS::DISPATCHER_SEMAPHORE;
+  ksem->header.type = X_OBJECT_TYPES::SemaphoreObject;
   ksem->header.signal_state = initial_count;
   ksem->limit = maximum_count;
 
