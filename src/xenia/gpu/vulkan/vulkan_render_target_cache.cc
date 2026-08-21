@@ -1150,12 +1150,13 @@ bool VulkanRenderTargetCache::Resolve(
         // maxStorageBufferRange.
         // Bind the whole shared memory buffer persistently when possible
         // (passing the destination byte offset via dest_base) instead of
-        // allocating and writing a per-resolve descriptor. Scaled resolves
-        // write to separate scaled buffers, so they use transient descriptors.
+        // allocating and writing a per-resolve descriptor. Only a scaled
+        // destination uses a separate buffer - native copies write to shared
+        // memory even with resolution scaling on.
         const bool use_persistent_dest =
             texture_cache.shared_memory_persistent_descriptor_set() !=
                 VK_NULL_HANDLE &&
-            !draw_resolution_scaled;
+            !copy_dest_scaled;
         VkDescriptorSet descriptor_set_dest =
             use_persistent_dest
                 ? texture_cache.shared_memory_persistent_descriptor_set()
