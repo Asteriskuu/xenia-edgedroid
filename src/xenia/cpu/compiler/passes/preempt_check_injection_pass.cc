@@ -16,6 +16,16 @@
 
 DECLARE_bool(guest_scheduler);
 
+// Defined here rather than in a backend: the backends are mutually exclusive by
+// target arch, and both emitters read this.
+DEFINE_bool(
+    log_safepoint_pc, false,
+    "Record the guest address of every JIT safepoint a fiber passes, so the "
+    "cooperative scheduler's no-progress report can name where a wedged "
+    "fiber last checked in rather than only its link register. Costs a "
+    "store on every loop back-edge; diagnostic only.",
+    "CPU");
+
 namespace xe {
 namespace cpu {
 namespace compiler {

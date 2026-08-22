@@ -329,7 +329,9 @@ class X64Emitter : public Xbyak::CodeGenerator {
 
   // Emits a cooperative-scheduler preemption safepoint: yields the fiber once
   // the context's preempt_requested flag is raised. Only valid at a block head.
-  void EmitPreemptCheck();
+  // guest_address is stamped into the context for wedge diagnosis when
+  // log_safepoint_pc is on. 0 means unknown.
+  void EmitPreemptCheck(uint32_t guest_address = 0);
 
   void PushStackpoint();
   void PopStackpoint();

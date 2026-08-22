@@ -64,6 +64,9 @@ DEFINE_bool(instrument_call_times, false,
             "Compute time taken for functions, for profiling guest code",
             "x64");
 #endif
+
+DECLARE_bool(log_safepoint_pc);
+
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -1900,7 +1903,7 @@ Xbyak::Label& X64Emitter::NewCachedLabel() {
   return *tmp;
 }
 
-void X64Emitter::EmitPreemptCheck() {
+void X64Emitter::EmitPreemptCheck(uint32_t guest_address) {
   // Only safe at a block head, where the per-block register allocator leaves no
   // guest value live and ForgetMxcsrMode has already run, so the unannounced
   // guest->host call cannot lose a register or desync the mode tracking.
@@ -1909,6 +1912,13 @@ void X64Emitter::EmitPreemptCheck() {
   // deferred yield re-sets it.
   Xbyak::Label& after = NewCachedLabel();
   Xbyak::Label& restore = NewCachedLabel();
+  if (cvars::log_safepoint_pc && guest_address) {
+    // Diagnostic only: one store on every loop back-edge, so it stays off
+    // unless a wedge is being chased. Immediate-to-memory needs no scratch
+    // register and leaves the flags the cmp below sets untouched.
+    mov(dword[GetContextReg() + offsetof(ppc::PPCContext, last_safepoint_pc)],
+        guest_address);
+  }
   cmp(byte[GetContextReg() + offsetof(ppc::PPCContext, preempt_requested)], 0);
   Xbyak::Label& do_yield =
       AddToTail([&restore, &after](X64Emitter& e, Xbyak::Label& tail) {

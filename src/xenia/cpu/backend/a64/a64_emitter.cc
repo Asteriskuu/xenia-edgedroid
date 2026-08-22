@@ -30,13 +30,7 @@
 DECLARE_int64(a64_max_stackpoints);
 DECLARE_bool(a64_enable_host_guest_stack_synchronization);
 
-DEFINE_bool(
-    log_safepoint_pc, false,
-    "Record the guest address of every JIT safepoint a fiber passes, so the "
-    "cooperative scheduler's no-progress report can name where a wedged "
-    "fiber last checked in rather than only its link register. Costs a "
-    "materialize and a store on every loop back-edge; diagnostic only.",
-    "CPU");
+DECLARE_bool(log_safepoint_pc);
 
 namespace xe {
 namespace cpu {
