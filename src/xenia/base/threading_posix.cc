@@ -50,6 +50,22 @@
 #include "xenia/base/string_util.h"
 #endif
 
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+
+#include "xenia/base/cvar.h"
+#ifndef HWCAP_EVTSTRM
+#define HWCAP_EVTSTRM (1 << 2)
+#endif
+
+DEFINE_bool(wfe_precise_sleep, false,
+            "ARM64: busy-wait PreciseSleep's sub-millisecond tail on the "
+            "generic-timer event stream (WFE) for exact deadlines. Off by "
+            "default: the spin holds threads on-CPU (~18% in profiling) for "
+            "frame-pacing precision that plain nanosleep matches in practice.",
+            "CPU");
+#endif
+
 #if XE_PLATFORM_LINUX
 // SIGEV_THREAD_ID in timer_create(...) is a Linux extension
 #define XE_HAS_SIGEV_THREAD_ID 1
@@ -211,6 +227,47 @@ void Sleep(std::chrono::microseconds duration) {
 }
 
 void NanoSleep(int64_t duration) { Sleep(std::chrono::nanoseconds(duration)); }
+
+void PreciseSleep(std::chrono::nanoseconds duration) {
+  if (duration.count() <= 0) {
+    return;
+  }
+#if defined(__aarch64__) && defined(__linux__)
+  static const bool use_wfe =
+      cvars::wfe_precise_sleep && (getauxval(AT_HWCAP) & HWCAP_EVTSTRM) != 0;
+  if (use_wfe) {
+    uint64_t freq, now;
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(freq));
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(now));
+    // 128-bit intermediate: at a 1GHz counter the 64-bit product wraps for
+    // durations beyond ~18s, which would silently drop the precise tail.
+    const uint64_t deadline =
+        now +
+        static_cast<uint64_t>(static_cast<unsigned __int128>(duration.count()) *
+                              freq / 1000000000u);
+    // Sleep the bulk conventionally and absorb the scheduler's wakeup error
+    // in the event-stream tail. The tail must exceed the worst wakeup
+    // latency being corrected for; 1.5ms covers CFS + timer slack here.
+    constexpr int64_t kTailNs = 1500000;
+    if (duration.count() > 2 * kTailNs) {
+      Sleep(std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::nanoseconds(duration.count() - kTailNs)));
+    }
+    for (;;) {
+      __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(now));
+      if (now >= deadline) {
+        break;
+      }
+      __asm__ __volatile__("wfe" ::: "memory");
+    }
+    // The old path always crossed a syscall (a de-facto full barrier); keep
+    // that visible-ordering parity on the pure-WFE return.
+    __sync_synchronize();
+    return;
+  }
+#endif
+  Sleep(std::chrono::duration_cast<std::chrono::microseconds>(duration));
+}
 
 void NanoSleepPrecise(int64_t ns) {
 #if XE_PLATFORM_MAC

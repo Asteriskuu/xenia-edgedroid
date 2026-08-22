@@ -169,6 +169,12 @@ void Sleep(std::chrono::microseconds duration) {
   }
 }
 
+void PreciseSleep(std::chrono::nanoseconds duration) {
+  // NtDelayExecution already has 100ns resolution; the overshoot this exists
+  // to correct is an ARM64-Linux scheduler problem.
+  NanoSleep(duration.count());
+}
+
 void NanoSleepPrecise(int64_t ns) { NanoSleep(ns); }
 
 SleepResult AlertableSleep(std::chrono::microseconds duration) {

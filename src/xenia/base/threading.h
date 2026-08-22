@@ -129,6 +129,10 @@ void SyncMemory();
 // Sleeps the current thread for at least as long as the given duration.
 void Sleep(std::chrono::microseconds duration);
 void NanoSleep(int64_t ns);
+// Sleeps on the ARM64 generic-timer event stream (<=100us quantization, core
+// parked) where available, a plain sleep otherwise. For guest-visible delays on
+// a latency-critical path, where wakeup overshoot extends guest frame time.
+void PreciseSleep(std::chrono::nanoseconds duration);
 // Like NanoSleep but trades a brief busy-wait tail for sub-millisecond
 // precision. Use only where wake-up jitter would miss a frame budget; the
 // spin costs CPU.
