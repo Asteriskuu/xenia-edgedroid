@@ -45,7 +45,6 @@ class XSemaphore : public XObject {
   void CooperativeWaitBegin(XThread* thread) override;
   void CooperativeWaitEnd(XThread* thread) override;
   bool CooperativeMayAcquire(XThread* thread) override;
-  XThread* CooperativeWakeTarget() override { return waiters_.Front(); }
 
  private:
   std::unique_ptr<xe::threading::Semaphore> semaphore_;

@@ -78,10 +78,9 @@ class GuestScheduler {
   void WakeAll();
 
   // Targeted WakeAll: pokes only the CPUs hosting a blocked waiter of
-  // |object|. With |sole_waiter| (a permit-gated object's FIFO front), only
-  // that thread's CPU. Untracked waits (9+ object sets) poll on the backoff
-  // cadence, which remains the backstop throughout.
-  void WakeForSignal(const XObject* object, XThread* sole_waiter);
+  // |object|. Untracked waits (9+ object sets) poll on the backoff cadence,
+  // which remains the backstop throughout.
+  void WakeForSignal(const XObject* object);
 
   // Runs |fn|, a blocking host call such as a disc read, without stalling the
   // dispatch thread. On a fiber it hands |fn| to the I/O worker and parks until

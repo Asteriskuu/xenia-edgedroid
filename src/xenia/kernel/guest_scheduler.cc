@@ -971,8 +971,7 @@ void GuestScheduler::WakeAll() {
   }
 }
 
-void GuestScheduler::WakeForSignal(const XObject* object,
-                                   XThread* sole_waiter) {
+void GuestScheduler::WakeForSignal(const XObject* object) {
   if (!started_.load()) {
     return;
   }
@@ -989,64 +988,44 @@ void GuestScheduler::WakeForSignal(const XObject* object,
   bool wake[kMaxCpus] = {};
   {
     std::lock_guard<std::mutex> lock(lock_);
-    if (sole_waiter) {
-      // Only the permit FIFO's front can take the permit; every other waiter
-      // of this object would wake, poll, fail MayAcquire and re-park.
-      auto& links = sole_waiter->scheduler_links();
-      if (!links.blocked || links.cpu < 0) {
-        // Not parked yet: it re-checks the (already bumped) signal epoch on
-        // its own dispatch pass before it parks, so there is nothing to wake.
-        return;
+    // Wake the CPUs hosting a waiter whose wait includes this object. The
+    // walk is bounded by the blocked population, which the empty-yield fast
+    // path keeps small.
+    for (int i = 0; i < kMaxCpus; ++i) {
+      Cpu& cpu = cpus_[i];
+      if (!cpu.blocked_head) {
+        continue;
       }
-      Cpu& cpu = cpus_[links.cpu];
+      bool any_watcher = false;
+      int watcher_prio = 0;
+      for (XThread* t = cpu.blocked_head; t;
+           t = t->scheduler_links().ready_next) {
+        auto& links = t->scheduler_links();
+        bool watches = t->cooperative_wait_object() == object;
+        if (!watches) {
+          for (uint8_t j = 0; j < links.wait_gate_count; ++j) {
+            if (links.wait_gate_objects[j] == object) {
+              watches = true;
+              break;
+            }
+          }
+        }
+        if (watches) {
+          int prio = ClampPriority(t->priority());
+          watcher_prio = any_watcher ? std::max(watcher_prio, prio) : prio;
+          any_watcher = true;
+        }
+      }
+      if (!any_watcher) {
+        continue;
+      }
       cpu.repoll_now.store(true, std::memory_order_relaxed);
       XThread* running = cpu.current_thread;
-      if (running && ClampPriority(sole_waiter->priority()) >
-                         ClampPriority(running->priority())) {
+      if (running && watcher_prio > ClampPriority(running->priority())) {
         running->scheduler_links().preempted = true;
         running->thread_state()->context()->preempt_requested = 1;
       }
-      wake[links.cpu] = true;
-    } else {
-      // Wake the CPUs hosting a waiter whose wait includes this object. The
-      // walk is bounded by the blocked population, which the empty-yield fast
-      // path keeps small.
-      for (int i = 0; i < kMaxCpus; ++i) {
-        Cpu& cpu = cpus_[i];
-        if (!cpu.blocked_head) {
-          continue;
-        }
-        bool any_watcher = false;
-        int watcher_prio = 0;
-        for (XThread* t = cpu.blocked_head; t;
-             t = t->scheduler_links().ready_next) {
-          auto& links = t->scheduler_links();
-          bool watches = t->cooperative_wait_object() == object;
-          if (!watches) {
-            for (uint8_t j = 0; j < links.wait_gate_count; ++j) {
-              if (links.wait_gate_objects[j] == object) {
-                watches = true;
-                break;
-              }
-            }
-          }
-          if (watches) {
-            int prio = ClampPriority(t->priority());
-            watcher_prio = any_watcher ? std::max(watcher_prio, prio) : prio;
-            any_watcher = true;
-          }
-        }
-        if (!any_watcher) {
-          continue;
-        }
-        cpu.repoll_now.store(true, std::memory_order_relaxed);
-        XThread* running = cpu.current_thread;
-        if (running && watcher_prio > ClampPriority(running->priority())) {
-          running->scheduler_links().preempted = true;
-          running->thread_state()->context()->preempt_requested = 1;
-        }
-        wake[i] = true;
-      }
+      wake[i] = true;
     }
   }
   for (int i = 0; i < kMaxCpus; ++i) {
@@ -1204,7 +1183,8 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
           may_have_resolved =
               obj->cooperative_signal_epoch() != links.wait_epoch;
         } else if (links.wait_gate_count) {
-          may_have_resolved = t->cooperative_wait_set_epoch() != links.wait_epoch;
+          may_have_resolved =
+              t->cooperative_wait_set_epoch() != links.wait_epoch;
         }
         if (!may_have_resolved &&
             !(links.wait_deadline_ms && now_ms >= links.wait_deadline_ms) &&
@@ -1482,8 +1462,8 @@ void GuestScheduler::ReportNoProgress() {
           "irql={} preempt_requested={} ready_summary={:#x}",
           i, running->thread_id(), running->thread_name(),
           uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
-          uint32_t(kpcr->current_irql),
-          uint32_t(context->preempt_requested), cpu.ready_summary);
+          uint32_t(kpcr->current_irql), uint32_t(context->preempt_requested),
+          cpu.ready_summary);
     } else {
       XELOGW("  CPU {} idle, ready_summary={:#x}", i, cpu.ready_summary);
     }
@@ -1495,10 +1475,9 @@ void GuestScheduler::ReportNoProgress() {
       auto& links = t->scheduler_links();
       XObject* obj = t->cooperative_wait_object();
       auto* context = t->thread_state()->context();
-      int64_t due_in =
-          links.wait_deadline_ms
-              ? int64_t(links.wait_deadline_ms) - int64_t(now_ms)
-              : -1;
+      int64_t due_in = links.wait_deadline_ms
+                           ? int64_t(links.wait_deadline_ms) - int64_t(now_ms)
+                           : -1;
       XELOGW(
           "    blocked tid={:08X} '{}' last_safepoint={:08X} lr={:08X} on {} "
           "obj={} wait={} gated={} alertable={} epoch={} deadline_in_ms={}",
@@ -1514,11 +1493,11 @@ void GuestScheduler::ReportNoProgress() {
       for (XThread* t = cpu.ready_head[prio]; t;
            t = t->scheduler_links().ready_next) {
         auto* context = t->thread_state()->context();
-        XELOGW("    ready   tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
-               "prio={}",
-               t->thread_id(), t->thread_name(),
-               uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
-               prio);
+        XELOGW(
+            "    ready   tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
+            "prio={}",
+            t->thread_id(), t->thread_name(),
+            uint32_t(context->last_safepoint_pc), uint32_t(context->lr), prio);
       }
     }
   }
@@ -1533,10 +1512,9 @@ void GuestScheduler::ReportNoProgress() {
   }
   XELOGW("  last {} cooperative signals (oldest first):", signals.size());
   for (const auto& rec : signals) {
-    XELOGW(
-        "    #{} handle={:08X} type={} by_tid={:08X} lr={:08X} uptime_ms={}",
-        rec.seq, rec.handle, uint32_t(rec.type), rec.signaler_thread,
-        rec.signaler_lr, rec.uptime_ms);
+    XELOGW("    #{} handle={:08X} type={} by_tid={:08X} lr={:08X} uptime_ms={}",
+           rec.seq, rec.handle, uint32_t(rec.type), rec.signaler_thread,
+           rec.signaler_lr, rec.uptime_ms);
   }
 }
 
@@ -1608,8 +1586,7 @@ void GuestScheduler::WatchdogLoop() {
           "ready_summary={:#x}",
           i, stall_ticks_[i], running->thread_id(), running->thread_name(),
           uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
-          uint32_t(kpcr->current_irql),
-          uint32_t(context->preempt_requested),
+          uint32_t(kpcr->current_irql), uint32_t(context->preempt_requested),
           running->scheduler_links().preempt_defers_irql,
           running->scheduler_links().preempt_defers_lock,
           cpus_[i].ready_summary);
