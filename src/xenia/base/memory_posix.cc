@@ -449,7 +449,7 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   return ret;
 #else
   auto full_path = "/" / path;
-#if XE_PLATFORM_LINUX
+#if XE_PLATFORM_GNU_LINUX
   // Prefer memfd: unlike /dev/shm it is unaffected by noexec mounts, LSM
   // policy or a container's --shm-size, and the kernel reclaims it on exit so
   // it needs no crash cleanup.
@@ -474,7 +474,7 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
     XELOGW("memfd_create({}) failed: {} ({}), falling back to shm_open",
            path.string(), strerror(errno), errno);
   }
-#endif  // XE_PLATFORM_LINUX
+#endif  // XE_PLATFORM_GNU_LINUX
   int ret = shm_open(full_path.c_str(), oflag, 0777);
   if (ret < 0) {
     XELOGE("shm_open({}) failed: {} ({})", full_path.string(), strerror(errno),
