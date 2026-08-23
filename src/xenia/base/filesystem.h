@@ -138,6 +138,12 @@ struct FileInfo {
 };
 
 std::optional<FileInfo> GetInfo(const std::filesystem::path& path);
+namespace internal {
+// Lists a directory in whatever order the host hands it back, which differs
+// between platforms. Callers want ListFiles.
+std::vector<FileInfo> ListFilesUnsorted(const std::filesystem::path& path);
+}  // namespace internal
+
 std::vector<FileInfo> ListFiles(const std::filesystem::path& path);
 std::vector<FileInfo> ListDirectories(const std::filesystem::path& path);
 std::vector<FileInfo> FilterByName(const std::vector<FileInfo>& files,

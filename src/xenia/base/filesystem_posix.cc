@@ -238,7 +238,9 @@ std::optional<FileInfo> GetInfo(const std::filesystem::path& path) {
   return {};
 }
 
-std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
+namespace internal {
+
+std::vector<FileInfo> ListFilesUnsorted(const std::filesystem::path& path) {
   std::vector<FileInfo> result;
 
   DIR* dir = opendir(path.c_str());
@@ -272,6 +274,8 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
   closedir(dir);
   return std::move(result);
 }
+
+}  // namespace internal
 
 bool SetAttributes(const std::filesystem::path& path, uint64_t attributes) {
   struct stat st;

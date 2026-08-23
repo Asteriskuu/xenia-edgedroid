@@ -9,11 +9,13 @@
 
 #include "xenia/base/filesystem.h"
 
+#include <algorithm>
 #include <fstream>
 #include <ios>
 #include <utility>
 
 #include "xenia/base/string_util.h"
+#include "xenia/base/utf8.h"
 
 namespace xe {
 namespace filesystem {
@@ -73,6 +75,23 @@ std::error_code CreateFolder(const std::filesystem::path& path) {
   }
 
   return ec;
+}
+
+// Host listing order is not portable, ntfs collates while ext4 hands back
+// hash order, so a directory would enumerate differently per platform. Collate
+// on the uppercased name to match ntfs, keeping windows behavior untouched.
+// Not console accurate, an stfs package enumerates in slot order, i.e. creation
+// order, which host filesystems cannot reproduce since creation time does not
+// survive copies on windows and moves on write on posix.
+static bool CollatesBefore(const FileInfo& left, const FileInfo& right) {
+  return xe::utf8::upper_ascii(xe::path_to_utf8(left.name)) <
+         xe::utf8::upper_ascii(xe::path_to_utf8(right.name));
+}
+
+std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
+  std::vector<FileInfo> files = internal::ListFilesUnsorted(path);
+  std::ranges::sort(files, CollatesBefore);
+  return files;
 }
 
 std::vector<FileInfo> ListDirectories(const std::filesystem::path& path) {
