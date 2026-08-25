@@ -273,6 +273,8 @@ std::vector<FileInfo> ListFilesUnsorted(const std::filesystem::path& path) {
   }
   closedir(dir);
   return std::move(result);
+}
+
 }  // namespace internal
 }  // namespace filesystem
 
