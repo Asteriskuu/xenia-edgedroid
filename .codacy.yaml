@@ -6,3 +6,8 @@ exclude_paths:
   - 'android/**'
   - '**.md'
   - 'src/xenia/gpu/shaders/**'
+
+
+
+
+ 
