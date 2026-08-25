@@ -153,6 +153,10 @@ class A64Backend : public Backend {
     return guest_return_trampoline_;
   }
 
+  void* frsqrte_helper() const { return frsqrte_helper_; }
+  void* vrsqrtefp_scalar_helper() const { return vrsqrtefp_scalar_helper_; }
+  void* vrsqrtefp_vector_helper() const { return vrsqrtefp_vector_helper_; }
+
   bool Initialize(Processor* processor) override;
 
   void CommitExecutableRange(uint32_t guest_low, uint32_t guest_high) override;
@@ -218,9 +222,13 @@ class A64Backend : public Backend {
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
   uint32_t guest_return_trampoline_ = 0;
 
-  void* try_acquire_reservation_helper_;
-  void* reserved_store_32_helper;
-  void* reserved_store_64_helper;
+  void* try_acquire_reservation_helper_ = nullptr;
+  void* reserved_store_32_helper = nullptr;
+  void* reserved_store_64_helper = nullptr;
+
+  void* frsqrte_helper_ = nullptr;
+  void* vrsqrtefp_scalar_helper_ = nullptr;
+  void* vrsqrtefp_vector_helper_ = nullptr;
 
   alignas(64) ReserveHelper reserve_helper_;
   BitMap guest_trampoline_address_bitmap_;
