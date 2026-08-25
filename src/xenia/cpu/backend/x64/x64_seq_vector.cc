@@ -777,7 +777,9 @@ struct VECTOR_ADD
               assert_false(is_unsigned);
               assert_false(saturate);
               e.ChangeMxcsrMode(MXCSRMode::Vmx);
-              e.vaddps(dest, src1, src2);
+              EmitVmxFloatBinOp(e, dest, src1, src2,
+                                [](X64Emitter& e, const Xmm& d, const Xmm& a,
+                                   const Xmm& b) { e.vaddps(d, a, b); });
               break;
             default:
               assert_unhandled_case(part_type);
@@ -897,7 +899,9 @@ struct VECTOR_SUB
               break;
             case FLOAT32_TYPE:
               e.ChangeMxcsrMode(MXCSRMode::Vmx);
-              e.vsubps(dest, src1, src2);
+              EmitVmxFloatBinOp(e, dest, src1, src2,
+                                [](X64Emitter& e, const Xmm& d, const Xmm& a,
+                                   const Xmm& b) { e.vsubps(d, a, b); });
               break;
             default:
               assert_unhandled_case(part_type);

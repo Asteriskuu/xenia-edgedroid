@@ -1799,7 +1799,9 @@ struct MUL_V128 : Sequence<MUL_V128, I<OPCODE_MUL, V128Op, V128Op, V128Op>> {
     e.ChangeMxcsrMode(MXCSRMode::Vmx);
     Xmm src1 = GetInputRegOrConstant(e, i.src1, e.xmm0);
     Xmm src2 = GetInputRegOrConstant(e, i.src2, e.xmm1);
-    e.vmulps(i.dest, src1, src2);
+    EmitVmxFloatBinOp(e, i.dest, src1, src2,
+                      [](X64Emitter& e, const Xmm& d, const Xmm& a,
+                         const Xmm& b) { e.vmulps(d, a, b); });
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_MUL, MUL_I8, MUL_I16, MUL_I32, MUL_I64, MUL_F32,
