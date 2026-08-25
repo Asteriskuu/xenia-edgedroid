@@ -165,7 +165,7 @@ template <>
 inline void CommandVar<std::filesystem::path>::LoadFromLaunchOptions(
     cxxopts::ParseResult* result) {
   std::string value = (*result)[name_].template as<std::string>();
-  SetCommandLineValue(value);
+  SetCommandLineValue(xe::to_path(value));
 }
 template <class T>
 void ConfigVar<T>::LoadConfigValue(const toml::node* result) {
