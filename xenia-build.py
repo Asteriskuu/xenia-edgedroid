@@ -1099,6 +1099,22 @@ class SlangCommand(Command):
         print("\nSuccess!")
         return 0
 
+class MetalShaderConverterCommand(Command):
+    """'msc' command.
+    """
+
+    def __init__(self, subparsers, *args, **kwargs):
+        super(MetalShaderConverterCommand, self).__init__(
+            subparsers,
+            name="msc",
+            help_short="Downloads the Metal Shader Converter (macOS build dependency).",
+            *args, **kwargs)
+
+    def execute(self, args, pass_args, cwd):
+        print("Downloading the Metal Shader Converter...\n")
+        download_metal_shader_converter()
+        print("\nSuccess!")
+        return 0
 
 class GenerateVersionCommand(Command):
     """'generate-version' command.
