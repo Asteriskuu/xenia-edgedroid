@@ -25,6 +25,7 @@
 #include "xenia/gpu/d3d12/d3d12_shared_memory.h"
 #include "xenia/gpu/d3d12/d3d12_texture_cache.h"
 #include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/edram_dump_shader.h"
 #include "xenia/gpu/render_target_cache.h"
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/gpu/xenos.h"
@@ -546,106 +547,39 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
     kHostDepthStoreRootParameterCount,
   };
 
-  union DumpPipelineKey {
-    uint32_t key;
-    struct {
-      xenos::MsaaSamples msaa_samples : 2;
-      uint32_t resource_format : 4;
-      // Last bit because this affects the root signature - after sorting, only
-      // change it at most once. Depth buffers have an additional stencil SRV.
-      uint32_t is_depth : 1;
-      // Dumping to the scaled EDRAM layout duplicates this native render
-      // target's guest pixels.
-      uint32_t source_scale_native : 1;
-      // source_scale_native only.
-      // Address the EDRAM buffer with the plain 1x1 tile layout.
-      uint32_t native_layout : 1;
-    };
-
-    DumpPipelineKey() : key(0) { static_assert_size(*this, sizeof(key)); }
-
-    struct Hasher {
-      size_t operator()(const DumpPipelineKey& key) const {
-        return std::hash<uint32_t>{}(key.key);
-      }
-    };
-    bool operator==(const DumpPipelineKey& other_key) const {
-      return key == other_key.key;
-    }
-    bool operator!=(const DumpPipelineKey& other_key) const {
-      return !(*this == other_key);
-    }
-    bool operator<(const DumpPipelineKey& other_key) const {
-      return key < other_key.key;
-    }
-
-    xenos::ColorRenderTargetFormat GetColorFormat() const {
-      assert_false(is_depth);
-      return xenos::ColorRenderTargetFormat(resource_format);
-    }
-    xenos::DepthRenderTargetFormat GetDepthFormat() const {
-      assert_true(is_depth);
-      return xenos::DepthRenderTargetFormat(resource_format);
-    }
+  // Descriptor sets of the dump shaders, which Mesa's spirv_to_dxil turns into
+  // the register spaces of the same number.
+  enum DumpDescriptorSet : uint32_t {
+    kDumpDescriptorSetEdram,
+    kDumpDescriptorSetSource,
   };
 
-  union DumpOffsets {
-    uint32_t offsets;
-    struct {
-      // May be beyond the EDRAM tile count in case of EDRAM addressing
-      // wrapping, thus + 1 bit.
-      uint32_t dispatch_first_tile : xenos::kEdramBaseTilesBits + 1;
-      uint32_t source_base_tiles : xenos::kEdramBaseTilesBits;
-    };
-    DumpOffsets() : offsets(0) { static_assert_size(*this, sizeof(offsets)); }
-    bool operator==(const DumpOffsets& other_offsets) const {
-      return offsets == other_offsets.offsets;
-    }
-    bool operator!=(const DumpOffsets& other_offsets) const {
-      return !(*this == other_offsets);
-    }
-  };
+  // Mesa sizes the push constant CBV from the dwords the shader actually
+  // loads, rounded up to a 16-byte row, so the root constants must cover a
+  // whole row even though only the pitches and the offsets are written.
+  static constexpr uint32_t kDumpRootPushConstantDwords = 4;
 
-  union DumpPitches {
-    uint32_t pitches;
-    struct {
-      // Both in tiles.
-      uint32_t dest_pitch : xenos::kEdramPitchTilesBits;
-      uint32_t source_pitch : xenos::kEdramPitchTilesBits;
-    };
-    DumpPitches() : pitches(0) { static_assert_size(*this, sizeof(pitches)); }
-    bool operator==(const DumpPitches& other_pitches) const {
-      return pitches == other_pitches.pitches;
-    }
-    bool operator!=(const DumpPitches& other_pitches) const {
-      return !(*this == other_pitches);
-    }
-  };
-
-  enum DumpCbuffer : uint32_t {
-    kDumpCbufferOffsets,
-    kDumpCbufferPitches,
-    kDumpCbufferCount,
-  };
-
+  // Root parameters of the dump compute shaders, in the register layout Mesa
+  // emits for the emitter's descriptor sets: the EDRAM buffer is set 0
+  // binding 0, so UAV u0 space0; the source and its stencil are set 1 bindings
+  // 0 and 1, so SRV t0 and t1 of space1; the push constants land in Mesa's
+  // push constant CBV at b1 space31.
   enum DumpRootParameter : uint32_t {
-    // May be changed multiple times for the same source.
-    kDumpRootParameterOffsets,
+    // Pitches and offsets in one root constants parameter - the offsets may be
+    // changed multiple times for the same source.
+    kDumpRootParameterPushConstants,
     // One resolve may need multiple sources.
     kDumpRootParameterSource,
 
-    // May be different for different sources.
-    kDumpRootParameterColorPitches = kDumpRootParameterSource + 1,
     // Not changed.
-    kDumpRootParameterColorEdram,
+    kDumpRootParameterColorEdram = kDumpRootParameterSource + 1,
 
     kDumpRootParameterColorCount,
 
-    // Same change frequency than the source (though currently the command
-    // processor can't contiguously allocate multiple descriptors with bindless,
-    // when such functionality is added, switch to one root signature).
+    // Same change frequency than the source (t1 of the same space, but in a
+    // table of its own because the command processor can't contiguously
+    // allocate multiple descriptors with bindless).
     kDumpRootParameterDepthStencil = kDumpRootParameterSource + 1,
-    kDumpRootParameterDepthPitches,
     kDumpRootParameterDepthEdram,
 
     kDumpRootParameterDepthCount,
@@ -653,9 +587,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   struct DumpInvocation {
     ResolveCopyDumpRectangle rectangle;
-    DumpPipelineKey pipeline_key;
+    EdramDumpShaderKey pipeline_key;
     DumpInvocation(const ResolveCopyDumpRectangle& rectangle,
-                   const DumpPipelineKey& pipeline_key)
+                   const EdramDumpShaderKey& pipeline_key)
         : rectangle(rectangle), pipeline_key(pipeline_key) {}
     bool operator<(const DumpInvocation& other_invocation) const {
       // Sort by the pipeline key primarily to reduce pipeline state (context)
@@ -728,7 +662,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   void SetCommandListRenderTargets(
       RenderTarget* const* depth_and_color_render_targets);
 
-  ID3D12PipelineState* GetOrCreateDumpPipeline(DumpPipelineKey key);
+  ID3D12PipelineState* GetOrCreateDumpPipeline(EdramDumpShaderKey key);
 
   // Writes contents of host render targets within rectangles from
   // ResolveInfo::GetCopyEdramTileSpan to edram_buffer_ - with the plain 1x1
@@ -814,8 +748,8 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   ID3D12RootSignature* dump_root_signature_depth_ = nullptr;
   // Compute pipelines for copying host render target contents to the EDRAM
   // buffer. May be null if failed to create.
-  std::unordered_map<DumpPipelineKey, ID3D12PipelineState*,
-                     DumpPipelineKey::Hasher>
+  std::unordered_map<EdramDumpShaderKey, ID3D12PipelineState*,
+                     EdramDumpShaderKey::Hasher>
       dump_pipelines_;
 
   // Parameter 0 - 2 root constants (red, green).
