@@ -7,6 +7,8 @@
 #include <filesystem>
 
 #include "xenia/emulator.h"
+#include "xenia/gpu/vulkan/vulkan_graphics_system.h"
+#include "xenia/apu/nop/nop_audio_system.h"
 
 static std::unique_ptr<xe::Emulator> g_emulator;
 static std::thread g_emulator_thread;
@@ -45,7 +47,20 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 storage_root / "cache"
             );
 
-            if (XFAILED(g_emulator->Setup(nullptr, nullptr, false, nullptr, nullptr, nullptr))) {
+            auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
+                return std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
+            };
+            
+            auto audio_factory = [](xe::cpu::Processor* proc) -> std::unique_ptr<xe::apu::AudioSystem> {
+                return std::make_unique<xe::apu::nop::NopAudioSystem>(proc);
+            };
+
+            if (XFAILED(g_emulator->Setup(nullptr, nullptr, false, audio_factory, graphics_factory, nullptr))) {
+                g_emulator_running = false;
+                return;
+            }
+            
+            if (XFAILED(g_emulator->SetupSubsystems())) {
                 g_emulator_running = false;
                 return;
             }
