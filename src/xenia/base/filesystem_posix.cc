@@ -238,7 +238,9 @@ std::optional<FileInfo> GetInfo(const std::filesystem::path& path) {
   return {};
 }
 
-std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
+namespace internal {
+
+std::vector<FileInfo> ListFilesUnsorted(const std::filesystem::path& path) {
   std::vector<FileInfo> result;
 
   DIR* dir = opendir(path.c_str());

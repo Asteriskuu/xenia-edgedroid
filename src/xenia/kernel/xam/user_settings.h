@@ -532,14 +532,14 @@ class UserSetting : public UserData {
   }
 
   static bool is_setting_valid(uint32_t setting_id) {
-    const auto setting = static_cast<AttributeKey>(setting_id);
+    const auto setting = get_attribute_key(setting_id);
 
     if (setting.id < kMaxUserSettingId) {
       return true;
     }
 
-    return std::find(known_settings.cbegin(), known_settings.cend(),
-                     static_cast<UserSettingId>(setting_id)) !=
+    return std::ranges::find(known_settings,
+                             static_cast<UserSettingId>(setting_id)) !=
            known_settings.cend();
   }
 

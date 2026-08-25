@@ -11,6 +11,8 @@
 
 set -euo pipefail
 
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
 arm64_app=${1:-build/bin/macOS/Release/Xenia-edge.app}
 x86_64_app=${2:-build-x64/bin/macOS/Release/Xenia-edge.app}
 
@@ -76,8 +78,16 @@ if ! grep -q arm64 <<<"$info" || ! grep -q x86_64 <<<"$info"; then
   exit 1
 fi
 
+# codesign seals everything under MacOS/ as nested code, so a xenia.log left
+# by a previous launch makes the signing below fail outright.
+rm -f "$arm64_app/Contents/MacOS/xenia.log" \
+      "$x86_64_app/Contents/MacOS/xenia.log"
+
 # lipo invalidates the linker-applied ad-hoc signature; arm64 refuses to
-# launch unsigned, so re-sign ad-hoc.
-codesign --force --sign - "$arm64_app"
+# launch unsigned, so re-sign ad-hoc. Re-signing replaces entitlements rather
+# than preserving them, so pass them again or the universal bundle loses the
+# JIT ones the per-arch builds got.
+codesign --force --sign - \
+  --entitlements "$repo_root/xenia.entitlements" "$arm64_app"
 
 echo "universal bundle: $arm64_app"

@@ -50,7 +50,6 @@ if(XENIA_BUILD_MISC)
     xenia-ui-window-vulkan-demo
     ${CMAKE_CURRENT_SOURCE_DIR}/../window_demo.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_window_demo.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_qt.cc
   )
 
   if(WIN32)

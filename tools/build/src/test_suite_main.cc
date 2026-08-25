@@ -15,18 +15,7 @@
 #include <vector>
 
 #include "xenia/base/console_app_main.h"
-#include "xenia/base/cvar.h"
 #include "xenia/base/platform.h"
-
-DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
-DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
-DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
-            "Storage");
-
-// xenia-core's Emulator::SetupSubsystems references these cvars; provide
-// stubs so test suites that pull in xenia-core link without xenia_main.cc.
-DEFINE_string(apu, "nop", "Audio system stub for tests.", "APU");
-DEFINE_string(gpu, "null", "Graphics system stub for tests.", "GPU");
 
 #define CATCH_CONFIG_RUNNER
 #include "third_party/catch/single_include/catch2/catch.hpp"

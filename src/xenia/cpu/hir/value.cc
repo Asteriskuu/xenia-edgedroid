@@ -890,12 +890,13 @@ void Value::Permute(Value* src1, Value* src2, TypeName type) {
       }
     }
 
-    // Blend: select from shuf1 where mask bit is set, shuf2 otherwise
+    // Blend the same way the backends do: vpblendw takes its *second* source
+    // where the mask bit is set, so a set bit selects shuf2.
     for (int i = 0; i < 8; i++) {
       if (mask & (1 << i)) {
-        constant.v128.u16[i] = shuf1.u16[i];
-      } else {
         constant.v128.u16[i] = shuf2.u16[i];
+      } else {
+        constant.v128.u16[i] = shuf1.u16[i];
       }
     }
 
@@ -1005,17 +1006,29 @@ void Value::VectorCompareEQ(Value* other, TypeName type) {
       }
       break;
     case INT32_TYPE:
-    case FLOAT32_TYPE:
       for (int i = 0; i < 4; i++) {
         constant.v128.u32[i] =
             constant.v128.u32[i] == other->constant.v128.u32[i] ? -1 : 0;
       }
       break;
     case INT64_TYPE:
-    case FLOAT64_TYPE:
       for (int i = 0; i < 2; i++) {
         constant.v128.u64[i] =
             constant.v128.u64[i] == other->constant.v128.u64[i] ? -1 : 0;
+      }
+      break;
+    // Float compares are unordered and treat the two zeroes as equal, which
+    // a bitwise compare gets wrong both ways.
+    case FLOAT32_TYPE:
+      for (int i = 0; i < 4; i++) {
+        constant.v128.u32[i] =
+            constant.v128.f32[i] == other->constant.v128.f32[i] ? -1 : 0;
+      }
+      break;
+    case FLOAT64_TYPE:
+      for (int i = 0; i < 2; i++) {
+        constant.v128.u64[i] =
+            constant.v128.f64[i] == other->constant.v128.f64[i] ? -1 : 0;
       }
       break;
     default:

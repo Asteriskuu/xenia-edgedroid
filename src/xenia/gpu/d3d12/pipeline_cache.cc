@@ -29,7 +29,6 @@
 #include "xenia/base/xxhash.h"
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/gpu/d3d12/d3d12_render_target_cache.h"
-#include "xenia/gpu/d3d12/spirv_to_dxil_compiler.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/pipeline_util.h"
@@ -37,6 +36,7 @@
 #include "xenia/gpu/spirv_builtin_geometry_shader.h"
 #include "xenia/gpu/spirv_shader.h"
 #include "xenia/gpu/spirv_shader_translator.h"
+#include "xenia/gpu/spirv_to_dxil_compiler.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
 
@@ -1774,7 +1774,15 @@ bool PipelineCache::GetCurrentStateDescription(
   if (tessellated && cvars::d3d12_tessellation_wireframe) {
     description_out.fill_mode_wireframe = 1;
   }
-  description_out.depth_clip = !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
+
+  // With force_depth_clamp, use the host viewport clamp instead of near and far
+  // Z plane clipping. X/Y/W clipping is unchanged. Both 494707EE and 41560881
+  // have passes that rely on alpha inputs that currently gets dropped by
+  // near-plane clipping.
+  // TODO(boma): Investigate whether the difference is in shader arithmetic or
+  // the clipper itself.
+  description_out.depth_clip = !regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable &&
+                               !cvars::force_depth_clamp;
   bool depth_stencil_bound_and_used = false;
   if (!edram_rov_used) {
     // Depth/stencil. No stencil, always passing depth test and no depth writing
@@ -1861,9 +1869,9 @@ bool PipelineCache::GetCurrentStateDescription(
         // ONE_MINUS_CONSTANT_COLOR
         /* 13 */ PipelineBlendFactor::kInvBlendFactor,
         // CONSTANT_ALPHA
-        /* 14 */ PipelineBlendFactor::kBlendFactor,
+        /* 14 */ PipelineBlendFactor::kAlphaFactor,
         // ONE_MINUS_CONSTANT_ALPHA
-        /* 15 */ PipelineBlendFactor::kInvBlendFactor,
+        /* 15 */ PipelineBlendFactor::kInvAlphaFactor,
         /* 16 */ PipelineBlendFactor::kSrcAlphaSat,
     };
     // Like kBlendFactorMap, but with color modes changed to alpha. Some
@@ -2340,14 +2348,26 @@ ID3D12PipelineState* PipelineCache::CreateD3D12Pipeline(
 
     // Render targets and blending.
     state_desc.BlendState.IndependentBlendEnable = true;
-    static constexpr D3D12_BLEND kBlendFactorMap[] = {
-        D3D12_BLEND_ZERO,          D3D12_BLEND_ONE,
-        D3D12_BLEND_SRC_COLOR,     D3D12_BLEND_INV_SRC_COLOR,
-        D3D12_BLEND_SRC_ALPHA,     D3D12_BLEND_INV_SRC_ALPHA,
-        D3D12_BLEND_DEST_COLOR,    D3D12_BLEND_INV_DEST_COLOR,
-        D3D12_BLEND_DEST_ALPHA,    D3D12_BLEND_INV_DEST_ALPHA,
-        D3D12_BLEND_BLEND_FACTOR,  D3D12_BLEND_INV_BLEND_FACTOR,
+    const bool alpha_blend_factor_supported =
+        command_processor_.GetD3D12Provider().IsAlphaBlendFactorSupported();
+    const D3D12_BLEND kBlendFactorMap[] = {
+        D3D12_BLEND_ZERO,
+        D3D12_BLEND_ONE,
+        D3D12_BLEND_SRC_COLOR,
+        D3D12_BLEND_INV_SRC_COLOR,
+        D3D12_BLEND_SRC_ALPHA,
+        D3D12_BLEND_INV_SRC_ALPHA,
+        D3D12_BLEND_DEST_COLOR,
+        D3D12_BLEND_INV_DEST_COLOR,
+        D3D12_BLEND_DEST_ALPHA,
+        D3D12_BLEND_INV_DEST_ALPHA,
+        D3D12_BLEND_BLEND_FACTOR,
+        D3D12_BLEND_INV_BLEND_FACTOR,
         D3D12_BLEND_SRC_ALPHA_SAT,
+        alpha_blend_factor_supported ? D3D12_BLEND_ALPHA_FACTOR
+                                     : D3D12_BLEND_BLEND_FACTOR,
+        alpha_blend_factor_supported ? D3D12_BLEND_INV_ALPHA_FACTOR
+                                     : D3D12_BLEND_INV_BLEND_FACTOR,
     };
     // 8 entries for safety since 3 bits from the guest are passed directly.
     static constexpr D3D12_BLEND_OP kBlendOpMap[] = {

@@ -64,6 +64,9 @@ DEFINE_bool(instrument_call_times, false,
             "Compute time taken for functions, for profiling guest code",
             "x64");
 #endif
+
+DECLARE_bool(log_safepoint_pc);
+
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -93,20 +96,6 @@ X64Emitter::X64Emitter(X64Backend* backend, XbyakAllocator* allocator)
       backend_(backend),
       code_cache_(backend->code_cache()),
       allocator_(allocator) {
-#if XE_PLATFORM_MAC
-  if (!cpu_.has(Xbyak::util::Cpu::tAVX)) {
-    XELOGW(
-        "This CPU does not support AVX. Continuing anyway (performance and "
-        "compatibility may be reduced).");
-  }
-#else
-  if (!cpu_.has(Xbyak::util::Cpu::tAVX)) {
-    XELOGW(
-        "Your CPU does not support AVX, which is required by Xenia. See the "
-        "FAQ for system requirements at https://xenia.jp");
-  }
-#endif
-
   feature_flags_ = amd64::GetFeatureFlags();
 
   may_use_membase32_as_zero_reg_ =
@@ -126,7 +115,15 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
   // Reset.
   debug_info_ = debug_info;
   debug_info_flags_ = debug_info_flags;
-  trace_data_ = &function->trace_data();
+  coverage_offset_ = function->coverage_offset();
+  coverage_start_address_ = function->address();
+  coverage_instruction_count_ =
+      function->has_end_address()
+          ? (function->end_address() - function->address()) / 4 + 1
+          : 0;
+  coverage_current_index_ = UINT32_MAX;
+  coverage_out_of_range_ = false;
+  sequence_samples_.clear();
   source_map_arena_.Reset();
 
   // Fill the generator with code.
@@ -141,6 +138,12 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
 
   // Stash source map.
   source_map_arena_.CloneContents(out_source_map);
+
+  if (!sequence_samples_.empty()) {
+    processor_->RecordSequenceSamples(function->address(),
+                                      std::move(sequence_samples_));
+    sequence_samples_.clear();
+  }
 
   return true;
 }
@@ -244,34 +247,6 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
         rdx);  // save time for end of function
   }
 #endif
-  // Safe now to do some tracing.
-  if (debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctions) {
-    // We require 32-bit addresses.
-    assert_true(uint64_t(trace_data_->header()) < UINT_MAX);
-    auto trace_header = trace_data_->header();
-
-    // Call count.
-    lock();
-    inc(qword[low_address(&trace_header->function_call_count)]);
-
-    // Get call history slot.
-    static_assert(FunctionTraceData::kFunctionCallerHistoryCount == 4,
-                  "bitmask depends on count");
-    mov(rax, qword[low_address(&trace_header->function_call_count)]);
-    and_(rax, 0b00000011);
-
-    // Record call history value into slot (guest addr in RDX).
-    mov(dword[Xbyak::RegExp(uint32_t(uint64_t(
-                  low_address(&trace_header->function_caller_history)))) +
-              rax * 4],
-        edx);
-
-    // Calling thread. Load ax with thread ID.
-    EmitGetCurrentThreadId();
-    lock();
-    bts(qword[low_address(&trace_header->function_thread_use)], rax);
-  }
-
   // FTrace: log guest function entry when the backend was built with
   // function tracing available (gated at runtime by the trace_func flag).
   if (IsTracingFunc()) {
@@ -404,18 +379,52 @@ void X64Emitter::MarkSourceOffset(const Instr* i) {
     nop(2);
   }
 
-  if (debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctionCoverage) {
+  if ((debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctionCoverage) &&
+      coverage_offset_ != GuestFunction::kInvalidCoverageOffset) {
+    // A source offset is not guaranteed to land inside the range the scanner
+    // reported, and counting outside the reserved slice writes through a wild
+    // displacement into whatever the arena holds next.
     uint32_t instruction_index =
-        (entry->guest_address - trace_data_->start_address()) / 4;
-    lock();
-    inc(qword[low_address(trace_data_->instruction_execute_counts() +
-                          instruction_index * 8)]);
+        (entry->guest_address - coverage_start_address_) / 4;
+    if (entry->guest_address < coverage_start_address_ ||
+        instruction_index >= coverage_instruction_count_) {
+      coverage_current_index_ = UINT32_MAX;
+      if (!coverage_out_of_range_) {
+        coverage_out_of_range_ = true;
+        XELOGW(
+            "Coverage: {:08X} is outside {:08X} and the {} instructions after "
+            "it, not counting it",
+            entry->guest_address, coverage_start_address_,
+            coverage_instruction_count_);
+      }
+      return;
+    }
+    // Everything emitted from here until the next source offset belongs to
+    // this guest instruction.
+    coverage_current_index_ = instruction_index;
+    size_t byte_offset = coverage_offset_ + size_t(instruction_index) * 8;
+    uint32_t disp = static_cast<uint32_t>(byte_offset);
+    // Counters are per thread, so this needs no lock. rax and rcx are outside
+    // gpr_reg_map_ and this sits on its own OPCODE_SOURCE_OFFSET instruction,
+    // so no HIR value is live in either.
+    //
+    // Incremented through lea because EFLAGS has to survive: a guest compare
+    // and the branch consuming it are separate guest instructions, so a source
+    // offset lands between them and inc would eat the result.
+    mov(rax, qword[GetContextReg() + offsetof(ppc::PPCContext, trace_counts)]);
+    mov(rcx, qword[rax + disp]);
+    lea(rcx, ptr[rcx + 1]);
+    mov(qword[rax + disp], rcx);
   }
 }
 
-void X64Emitter::EmitGetCurrentThreadId() {
-  // rsi must point to context. We could fetch from the stack if needed.
-  mov(ax, word[GetContextReg() + offsetof(ppc::PPCContext, thread_id)]);
+void X64Emitter::RecordSequenceSample(const hir::Instr* i, uint32_t backend_key,
+                                      uint32_t host_bytes) {
+  if (coverage_current_index_ == UINT32_MAX || !host_bytes) {
+    return;
+  }
+  sequence_samples_.push_back({hir::MakeSequenceSampleKey(i, backend_key),
+                               coverage_current_index_, host_bytes});
 }
 
 void X64Emitter::EmitTraceUserCallReturn() {}
@@ -701,9 +710,104 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   return addr;
 }
 
+bool X64Emitter::TryInlinePPCGprLrSaveRestore(const hir::Instr* instr,
+                                              const GuestFunction* function) {
+  if (!function->IsSaverest() ||
+      function->SaverestType() != SaveRestoreType::GPR) {
+    return false;
+  }
+
+  const unsigned first_gpr = function->SaverestIndex();
+  if (first_gpr < 14 || first_gpr > 31) {
+    return false;
+  }
+
+  const bool is_tail_call = (instr->flags & hir::CALL_TAIL) != 0;
+  if ((function->IsSave() && is_tail_call) ||
+      (function->IsRestore() && !is_tail_call)) {
+    return false;
+  }
+
+  // Standard PPC helper layout:
+  //   std/ld rN, -((33 - N) * 8)(r1), N = first_gpr..31
+  //   stw/lwz r12, -8(r1)
+  const int32_t first_slot_offset = static_cast<int32_t>((33 - first_gpr) * 8);
+  const int32_t lr_slot_offset = -8;
+
+  // rax = guest r1. Scratch here must stay out of gpr_reg_map_ (RBX, R10-R15)
+  // so live HIR values survive; rax/rcx/rdx are free at a call site.
+  mov(eax, dword[GetContextReg() + offsetof(ppc::PPCContext, r[1])]);
+  if (xe::memory::allocation_granularity() > 0x1000) {
+    // Branch-free: edx = r1 + 0x1000, kept only when r1 >= 0xE0000000.
+    lea(edx, ptr[rax + 0x1000]);
+    cmp(eax, 0xE0000000);
+    cmovae(eax, edx);
+  }
+
+  const bool has_movbe = IsFeatureEnabled(kX64EmitMovbe);
+
+  if (function->IsSave()) {
+    for (unsigned guest_reg = first_gpr; guest_reg <= 31; ++guest_reg) {
+      const int32_t disp = -first_slot_offset +
+                           static_cast<int32_t>((guest_reg - first_gpr) * 8);
+      mov(rdx,
+          qword[GetContextReg() + offsetof(ppc::PPCContext, r[guest_reg])]);
+      if (has_movbe) {
+        movbe(qword[GetMembaseReg() + rax + disp], rdx);
+      } else {
+        bswap(rdx);
+        mov(qword[GetMembaseReg() + rax + disp], rdx);
+      }
+    }
+
+    mov(edx, dword[GetContextReg() + offsetof(ppc::PPCContext, r[12])]);
+    if (has_movbe) {
+      movbe(dword[GetMembaseReg() + rax + lr_slot_offset], edx);
+    } else {
+      bswap(edx);
+      mov(dword[GetMembaseReg() + rax + lr_slot_offset], edx);
+    }
+    return true;
+  }
+
+  for (unsigned guest_reg = first_gpr; guest_reg <= 31; ++guest_reg) {
+    const int32_t disp =
+        -first_slot_offset + static_cast<int32_t>((guest_reg - first_gpr) * 8);
+    if (has_movbe) {
+      movbe(rdx, qword[GetMembaseReg() + rax + disp]);
+    } else {
+      mov(rdx, qword[GetMembaseReg() + rax + disp]);
+      bswap(rdx);
+    }
+    mov(qword[GetContextReg() + offsetof(ppc::PPCContext, r[guest_reg])], rdx);
+  }
+
+  // The reloaded LR lands in both r12 and lr; 32-bit ops zero the rest of rcx.
+  if (has_movbe) {
+    movbe(ecx, dword[GetMembaseReg() + rax + lr_slot_offset]);
+  } else {
+    mov(ecx, dword[GetMembaseReg() + rax + lr_slot_offset]);
+    bswap(ecx);
+  }
+  mov(qword[GetContextReg() + offsetof(ppc::PPCContext, r[12])], rcx);
+  mov(qword[GetContextReg() + offsetof(ppc::PPCContext, lr)], rcx);
+
+  // __restgprlr_N returns to the reloaded LR: take our epilogue when it is our
+  // own return address, otherwise tail-call it. CallIndirect emits the
+  // indirection lookup and, for a tail call, the stack teardown and jump.
+  cmp(ecx, dword[rsp + StackLayout::GUEST_RET_ADDR]);
+  je(epilog_label(), CodeGenerator::T_NEAR);
+  CallIndirect(instr, rcx);
+  return true;
+}
+
 void X64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   assert_not_null(function);
   ForgetMxcsrMode();
+  if (TryInlinePPCGprLrSaveRestore(instr, function)) {
+    return;
+  }
+
   auto fn = static_cast<X64Function*>(function);
   // Resolve address to the function to call and store in rax.
 
@@ -1028,15 +1132,13 @@ void X64Emitter::MovMem64(const Xbyak::RegExp& addr, uint64_t v) {
     }
   }
 }
-static inline vec128_t v128_setr_bytes(unsigned char v0, unsigned char v1,
-                                       unsigned char v2, unsigned char v3,
-                                       unsigned char v4, unsigned char v5,
-                                       unsigned char v6, unsigned char v7,
-                                       unsigned char v8, unsigned char v9,
-                                       unsigned char v10, unsigned char v11,
-                                       unsigned char v12, unsigned char v13,
-                                       unsigned char v14, unsigned char v15) {
-  vec128_t result;
+static constexpr vec128_t v128_setr_bytes(
+    unsigned char v0, unsigned char v1, unsigned char v2, unsigned char v3,
+    unsigned char v4, unsigned char v5, unsigned char v6, unsigned char v7,
+    unsigned char v8, unsigned char v9, unsigned char v10, unsigned char v11,
+    unsigned char v12, unsigned char v13, unsigned char v14,
+    unsigned char v15) {
+  vec128_t result{};
 
   result.u8[0] = v0;
   result.u8[1] = v1;
@@ -1058,9 +1160,9 @@ static inline vec128_t v128_setr_bytes(unsigned char v0, unsigned char v1,
   return result;
 }
 
-static inline vec128_t v128_setr_words(uint32_t v0, uint32_t v1, uint32_t v2,
-                                       uint32_t v3) {
-  vec128_t result;
+static constexpr vec128_t v128_setr_words(uint32_t v0, uint32_t v1, uint32_t v2,
+                                          uint32_t v3) {
+  vec128_t result{};
   result.u32[0] = v0;
   result.u32[1] = v1;
   result.u32[2] = v2;
@@ -1068,7 +1170,9 @@ static inline vec128_t v128_setr_words(uint32_t v0, uint32_t v1, uint32_t v2,
   return result;
 }
 
-static const vec128_t xmm_consts[] = {
+// constinit keeps this out of .bss: a dynamically initialized copy loses
+// stores that land on a fresh page under Rosetta 2.
+static constinit const vec128_t xmm_consts[] = {
     /* XMMZero                */ vec128f(0.0f),
     /* XMMByteSwapMask        */
     vec128i(0x00010203u, 0x04050607u, 0x08090A0Bu, 0x0C0D0E0Fu),
@@ -1227,14 +1331,39 @@ static const vec128_t xmm_consts[] = {
     vec128s(15),
     /*XMMXOPDwordShiftMask*/
     vec128i(31),
-    /*XMMLVLShuffle*/
-    v128_setr_bytes(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12),
-    /*XMMLVRCmp16*/
-    vec128b(16),
     /*XMMVSRShlByteshuf*/
     v128_setr_bytes(13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3, 0x80),
     // XMMVSRMask
     vec128b(1),
+    // XMMExp2Poly, 2^f on [0,1), max relative error 7.7e-08
+    vec128f(0.9999999266823865f),
+    vec128f(0.6931530239113992f),
+    vec128f(0.24015381838022493f),
+    vec128f(0.055826172900559086f),
+    vec128f(0.008989127362479102f),
+    vec128f(0.0018777841277241077f),
+    // XMMLog2Poly, log2(1+u) on [0,1], max absolute error 1.85e-06
+    vec128f(1.8456866772102942e-06f),
+    vec128f(1.4424953159391898f),
+    vec128f(-0.7177910762015521f),
+    vec128f(0.4565216600899004f),
+    vec128f(-0.2765407398023532f),
+    vec128f(0.12100223739860312f),
+    vec128f(-0.025691088797142478f),
+    // XMMEstScale
+    vec128f(2048.0f),
+    // XMMEstUnscale
+    vec128f(1.0f / 2048.0f),
+    // XMMExp2Max
+    vec128f(128.0f),
+    // XMMExp2Min
+    vec128f(-126.0f),
+    // XMMQuietBit
+    vec128i(0x00400000u),
+    // XMMFloatNegInf
+    vec128i(0xFF800000u),
+    // XMMMantissaMask
+    vec128i(0x007FFFFFu),
     // XMMVRsqrteTableStart
     v128_setr_words(0x568B4FD, 0x4F3AF97, 0x48DAAA5, 0x435A618),
     v128_setr_words(0x3E7A1E4, 0x3A29DFE, 0x3659A5C, 0x32E96F8),
@@ -1245,8 +1374,76 @@ static const vec128_t xmm_consts[] = {
     v128_setr_words(0x21D6881, 0x1FD6665, 0x1E16468, 0x1C76287),
     v128_setr_words(0x1AF60C1, 0x1995F12, 0x1855D79, 0x1735BF4),
     // XMMVRsqrteTableBase
-    vec128i(0)  // filled in later
+    vec128i(0),  // filled in later
+    // XMMLVLTable
+    v128_setr_bytes(0x03, 0x02, 0x01, 0x00, 0x07, 0x06, 0x05, 0x04, 0x0B, 0x0A,
+                    0x09, 0x08, 0x0F, 0x0E, 0x0D, 0x0C),
+    v128_setr_bytes(0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05, 0x0C, 0x0B,
+                    0x0A, 0x09, 0x80, 0x0F, 0x0E, 0x0D),
+    v128_setr_bytes(0x05, 0x04, 0x03, 0x02, 0x09, 0x08, 0x07, 0x06, 0x0D, 0x0C,
+                    0x0B, 0x0A, 0x80, 0x80, 0x0F, 0x0E),
+    v128_setr_bytes(0x06, 0x05, 0x04, 0x03, 0x0A, 0x09, 0x08, 0x07, 0x0E, 0x0D,
+                    0x0C, 0x0B, 0x80, 0x80, 0x80, 0x0F),
+    v128_setr_bytes(0x07, 0x06, 0x05, 0x04, 0x0B, 0x0A, 0x09, 0x08, 0x0F, 0x0E,
+                    0x0D, 0x0C, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x08, 0x07, 0x06, 0x05, 0x0C, 0x0B, 0x0A, 0x09, 0x80, 0x0F,
+                    0x0E, 0x0D, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x09, 0x08, 0x07, 0x06, 0x0D, 0x0C, 0x0B, 0x0A, 0x80, 0x80,
+                    0x0F, 0x0E, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x0A, 0x09, 0x08, 0x07, 0x0E, 0x0D, 0x0C, 0x0B, 0x80, 0x80,
+                    0x80, 0x0F, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x0B, 0x0A, 0x09, 0x08, 0x0F, 0x0E, 0x0D, 0x0C, 0x80, 0x80,
+                    0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x0C, 0x0B, 0x0A, 0x09, 0x80, 0x0F, 0x0E, 0x0D, 0x80, 0x80,
+                    0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x0D, 0x0C, 0x0B, 0x0A, 0x80, 0x80, 0x0F, 0x0E, 0x80, 0x80,
+                    0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x0E, 0x0D, 0x0C, 0x0B, 0x80, 0x80, 0x80, 0x0F, 0x80, 0x80,
+                    0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x0F, 0x0E, 0x0D, 0x0C, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                    0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x80, 0x0F, 0x0E, 0x0D, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                    0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x80, 0x80, 0x0F, 0x0E, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                    0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x0F, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                    0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+    // XMMLVRTable
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                    0x80, 0x80, 0x80, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                    0x80, 0x80, 0x00, 0x80, 0x80, 0x80),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                    0x80, 0x80, 0x01, 0x00, 0x80, 0x80),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                    0x80, 0x80, 0x02, 0x01, 0x00, 0x80),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                    0x80, 0x80, 0x03, 0x02, 0x01, 0x00),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x80,
+                    0x80, 0x80, 0x04, 0x03, 0x02, 0x01),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, 0x00,
+                    0x80, 0x80, 0x05, 0x04, 0x03, 0x02),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02, 0x01,
+                    0x00, 0x80, 0x06, 0x05, 0x04, 0x03),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x03, 0x02,
+                    0x01, 0x00, 0x07, 0x06, 0x05, 0x04),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x00, 0x80, 0x80, 0x80, 0x04, 0x03,
+                    0x02, 0x01, 0x08, 0x07, 0x06, 0x05),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x01, 0x00, 0x80, 0x80, 0x05, 0x04,
+                    0x03, 0x02, 0x09, 0x08, 0x07, 0x06),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x02, 0x01, 0x00, 0x80, 0x06, 0x05,
+                    0x04, 0x03, 0x0A, 0x09, 0x08, 0x07),
+    v128_setr_bytes(0x80, 0x80, 0x80, 0x80, 0x03, 0x02, 0x01, 0x00, 0x07, 0x06,
+                    0x05, 0x04, 0x0B, 0x0A, 0x09, 0x08),
+    v128_setr_bytes(0x00, 0x80, 0x80, 0x80, 0x04, 0x03, 0x02, 0x01, 0x08, 0x07,
+                    0x06, 0x05, 0x0C, 0x0B, 0x0A, 0x09),
+    v128_setr_bytes(0x01, 0x00, 0x80, 0x80, 0x05, 0x04, 0x03, 0x02, 0x09, 0x08,
+                    0x07, 0x06, 0x0D, 0x0C, 0x0B, 0x0A),
+    v128_setr_bytes(0x02, 0x01, 0x00, 0x80, 0x06, 0x05, 0x04, 0x03, 0x0A, 0x09,
+                    0x08, 0x07, 0x0E, 0x0D, 0x0C, 0x0B),
 };
+static_assert(sizeof(xmm_consts) / sizeof(xmm_consts[0]) == XMMLVRTable + 16,
+              "xmm_consts needs one entry per XmmConst");
 
 void* X64Emitter::FindByteConstantOffset(unsigned bytevalue) {
   for (auto& vec : xmm_consts) {
@@ -1706,7 +1903,7 @@ Xbyak::Label& X64Emitter::NewCachedLabel() {
   return *tmp;
 }
 
-void X64Emitter::EmitPreemptCheck() {
+void X64Emitter::EmitPreemptCheck(uint32_t guest_address) {
   // Only safe at a block head, where the per-block register allocator leaves no
   // guest value live and ForgetMxcsrMode has already run, so the unannounced
   // guest->host call cannot lose a register or desync the mode tracking.
@@ -1715,6 +1912,13 @@ void X64Emitter::EmitPreemptCheck() {
   // deferred yield re-sets it.
   Xbyak::Label& after = NewCachedLabel();
   Xbyak::Label& restore = NewCachedLabel();
+  if (cvars::log_safepoint_pc && guest_address) {
+    // Diagnostic only: one store on every loop back-edge, so it stays off
+    // unless a wedge is being chased. Immediate-to-memory needs no scratch
+    // register and leaves the flags the cmp below sets untouched.
+    mov(dword[GetContextReg() + offsetof(ppc::PPCContext, last_safepoint_pc)],
+        guest_address);
+  }
   cmp(byte[GetContextReg() + offsetof(ppc::PPCContext, preempt_requested)], 0);
   Xbyak::Label& do_yield =
       AddToTail([&restore, &after](X64Emitter& e, Xbyak::Label& tail) {
@@ -1745,33 +1949,89 @@ void X64Emitter::EmitPreemptCheck() {
   L(after);
 }
 
-template <bool switching_to_fpu>
-static void ChangeMxcsrModeDynamicHelper(X64Emitter& e) {
-  auto flags = e.GetBackendFlagsPtr();
-  if (switching_to_fpu) {
-    e.btr(flags, 0);  // bit 0 set to 0 = is fpu mode
+static void LoadMxcsrDirectForMode(X64Emitter& e, MXCSRMode mode) {
+  if (mode == MXCSRMode::Fpu) {
+    e.LoadFpuMxcsrDirect();
+  } else if (mode == MXCSRMode::Vmx) {
+    e.LoadVmxMxcsrDirect();
+  } else if (mode == MXCSRMode::VmxDaz) {
+    e.LoadVmxDazMxcsrDirect();
   } else {
-    e.bts(flags, 0);  // bit 0 set to 1 = is vmx mode
+    assert_unhandled_case(mode);
   }
-  Xbyak::Label& come_back = e.NewCachedLabel();
+}
 
-  Xbyak::Label& reload_bailout =
-      e.AddToTail([&come_back](X64Emitter& e, Xbyak::Label& thislabel) {
+static bool IsVmxMode(MXCSRMode mode) {
+  return mode == MXCSRMode::Vmx || mode == MXCSRMode::VmxDaz;
+}
+
+// Record which of the three mxcsr values is live. The daz bit only means
+// anything while the mode bit says vmx, and only while NJM is off.
+static void SetMxcsrModeFlags(X64Emitter& e, MXCSRMode mode) {
+  auto flags = e.GetBackendFlagsPtr();
+  if (mode == MXCSRMode::Fpu) {
+    e.btr(flags, kX64BackendMXCSRModeBit);
+  } else {
+    e.bts(flags, kX64BackendMXCSRModeBit);
+    if (mode == MXCSRMode::VmxDaz) {
+      e.bts(flags, kX64BackendMXCSRDazBit);
+    } else {
+      e.btr(flags, kX64BackendMXCSRDazBit);
+    }
+  }
+}
+
+// SET_NJM only ever writes mxcsr_vmx one of two values, and the NJM on value is
+// the one mxcsr_vmx_daz always holds. So while NJM is on the two vmx mxcsrs are
+// the same bits and switching between them is nothing at all. Switching with
+// the mode statically known then costs a test and a fallthrough, not a
+// vldmxcsr.
+static void ChangeVmxVariantWithNjmGate(X64Emitter& e, MXCSRMode new_mode) {
+  Xbyak::Label& come_back = e.NewCachedLabel();
+  Xbyak::Label& reload = e.AddToTail(
+      [&come_back, new_mode](X64Emitter& e, Xbyak::Label& thislabel) {
         e.L(thislabel);
-        if (switching_to_fpu) {
-          e.LoadFpuMxcsrDirect();
-        } else {
-          e.LoadVmxMxcsrDirect();
-        }
+        LoadMxcsrDirectForMode(e, new_mode);
+        SetMxcsrModeFlags(e, new_mode);
         e.jmp(come_back, X64Emitter::T_NEAR);
       });
-  if (switching_to_fpu) {
-    e.jc(reload_bailout,
-         X64Emitter::T_NEAR);  // if carry flag was set, we were VMX mxcsr mode.
+  e.bt(e.GetBackendFlagsPtr(), kX64BackendNJMOn);
+  e.jnc(reload, X64Emitter::T_NEAR);
+  e.L(come_back);
+}
+
+static void ChangeMxcsrModeDynamicHelper(X64Emitter& e, MXCSRMode new_mode) {
+  auto flags = e.GetBackendFlagsPtr();
+  Xbyak::Label& come_back = e.NewCachedLabel();
+
+  Xbyak::Label& reload_bailout = e.AddToTail(
+      [&come_back, new_mode](X64Emitter& e, Xbyak::Label& thislabel) {
+        e.L(thislabel);
+        LoadMxcsrDirectForMode(e, new_mode);
+        // Reached by any test below, so normalize both bits here.
+        SetMxcsrModeFlags(e, new_mode);
+        e.jmp(come_back, X64Emitter::T_NEAR);
+      });
+
+  // Each bt both records the bit we want and reports what it was, so a
+  // mismatch on either one falls out to the reload.
+  if (new_mode == MXCSRMode::Fpu) {
+    e.btr(flags, kX64BackendMXCSRModeBit);
+    e.jc(reload_bailout, X64Emitter::T_NEAR);  // was one of the vmx mxcsrs
   } else {
-    e.jnc(
-        reload_bailout,
-        X64Emitter::T_NEAR);  // if carry flag was set, we were VMX mxcsr mode.
+    e.bts(flags, kX64BackendMXCSRModeBit);
+    e.jnc(reload_bailout, X64Emitter::T_NEAR);  // was the fpu mxcsr
+    // Some vmx mxcsr is live and with NJM on both are the same bits, so it
+    // already serves whichever of the two we were asked for.
+    e.bt(flags, kX64BackendNJMOn);
+    e.jc(come_back, X64Emitter::T_NEAR);
+    if (new_mode == MXCSRMode::VmxDaz) {
+      e.bts(flags, kX64BackendMXCSRDazBit);
+      e.jnc(reload_bailout, X64Emitter::T_NEAR);  // was plain vmx
+    } else {
+      e.btr(flags, kX64BackendMXCSRDazBit);
+      e.jc(reload_bailout, X64Emitter::T_NEAR);  // was daz vmx
+    }
   }
   e.L(come_back);
 }
@@ -1789,37 +2049,22 @@ bool X64Emitter::ChangeMxcsrMode(MXCSRMode new_mode, bool already_set) {
     // check the mode dynamically
     mxcsr_mode_ = new_mode;
     if (!already_set) {
-      if (new_mode == MXCSRMode::Fpu) {
-        ChangeMxcsrModeDynamicHelper<true>(*this);
-      } else if (new_mode == MXCSRMode::Vmx) {
-        ChangeMxcsrModeDynamicHelper<false>(*this);
-      } else {
-        assert_unhandled_case(new_mode);
-      }
+      ChangeMxcsrModeDynamicHelper(*this, new_mode);
     } else {  // even if already set, we still need to update flags to reflect
               // our mode
-      if (new_mode == MXCSRMode::Fpu) {
-        btr(GetBackendFlagsPtr(), kX64BackendMXCSRModeBit);
-      } else if (new_mode == MXCSRMode::Vmx) {
-        bts(GetBackendFlagsPtr(), kX64BackendMXCSRModeBit);
-      } else {
-        assert_unhandled_case(new_mode);
-      }
+      SetMxcsrModeFlags(*this, new_mode);
     }
   } else {
+    MXCSRMode old_mode = mxcsr_mode_;
     mxcsr_mode_ = new_mode;
     if (!already_set) {
-      if (new_mode == MXCSRMode::Fpu) {
-        LoadFpuMxcsrDirect();
-        btr(GetBackendFlagsPtr(), kX64BackendMXCSRModeBit);
-        return true;
-      } else if (new_mode == MXCSRMode::Vmx) {
-        LoadVmxMxcsrDirect();
-        bts(GetBackendFlagsPtr(), kX64BackendMXCSRModeBit);
-        return true;
+      if (IsVmxMode(old_mode) && IsVmxMode(new_mode)) {
+        ChangeVmxVariantWithNjmGate(*this, new_mode);
       } else {
-        assert_unhandled_case(new_mode);
+        LoadMxcsrDirectForMode(*this, new_mode);
+        SetMxcsrModeFlags(*this, new_mode);
       }
+      return true;
     }
   }
   return false;
@@ -1829,6 +2074,9 @@ void X64Emitter::LoadFpuMxcsrDirect() {
 }
 void X64Emitter::LoadVmxMxcsrDirect() {
   vldmxcsr(GetBackendCtxPtr(offsetof(X64BackendContext, mxcsr_vmx)));
+}
+void X64Emitter::LoadVmxDazMxcsrDirect() {
+  vldmxcsr(GetBackendCtxPtr(offsetof(X64BackendContext, mxcsr_vmx_daz)));
 }
 Xbyak::Address X64Emitter::GetBackendFlagsPtr() const {
   Xbyak::Address pt = GetBackendCtxPtr(offsetof(X64BackendContext, flags));

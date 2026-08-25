@@ -3483,11 +3483,7 @@ void EmulatorWindow::ToggleGPUSetting(gpu::GPUSetting setting) {
     if (title_id != 0) {
       toml::table config_table = config::LoadGameConfig(title_id);
 
-      if (!config_table.contains("GPU")) {
-        config_table.insert("GPU", toml::table{});
-      }
-
-      auto* gpu_table = config_table["GPU"].as_table();
+      auto* gpu_table = config::ResolveSectionTable(config_table, "GPU");
       if (gpu_table) {
         gpu_table->insert_or_assign(cvar_name, new_value);
       }

@@ -16,6 +16,16 @@
 
 DECLARE_bool(guest_scheduler);
 
+// Defined here rather than in a backend: the backends are mutually exclusive by
+// target arch, and both emitters read this.
+DEFINE_bool(
+    log_safepoint_pc, false,
+    "Record the guest address of every JIT safepoint a fiber passes, so the "
+    "cooperative scheduler's no-progress report can name where a wedged "
+    "fiber last checked in rather than only its link register. Costs a "
+    "store on every loop back-edge; diagnostic only.",
+    "CPU");
+
 namespace xe {
 namespace cpu {
 namespace compiler {
@@ -44,8 +54,11 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
   for (auto block = builder->first_block(); block != nullptr;
        block = block->next) {
     seen.insert(block);
-    auto instr = block->instr_tail;
-    while (instr && (instr->opcode->flags & OPCODE_FLAG_BRANCH) != 0) {
+    // Scan every instruction: a back-edge is not always in the trailing
+    // branch run. A loop ending its block with a call hides the loop branch
+    // from a tail-backward walk, leaving it to spin with no safepoint.
+    for (auto instr = block->instr_head; instr != nullptr;
+         instr = instr->next) {
       Label* label = nullptr;
       if (instr->opcode == &OPCODE_BRANCH_info) {
         label = instr->src1.label;
@@ -56,7 +69,6 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
       if (label && label->block && seen.count(label->block)) {
         check_blocks.insert(label->block);
       }
-      instr = instr->prev;
     }
   }
   for (auto block : check_blocks) {
@@ -68,7 +80,20 @@ bool PreemptCheckInjectionPass::Run(HIRBuilder* builder) {
       }
       if (first) {
         if (first->GetOpcodeNum() != OPCODE_CHECK_PREEMPT) {
-          builder->CheckPreempt()->MoveBefore(first);
+          // Carry the guest address of the safepoint so the backend can record
+          // where a fiber last checked in. A fiber that stops yielding is
+          // otherwise only locatable by its link register, which points at the
+          // last call it made rather than the loop it is stuck in.
+          uint32_t guest_address = 0;
+          for (auto s = b->instr_head; s; s = s->next) {
+            if (s->opcode == &OPCODE_SOURCE_OFFSET_info) {
+              guest_address = uint32_t(s->src1.offset);
+              break;
+            }
+          }
+          Instr* check = builder->CheckPreempt();
+          check->src1.offset = guest_address;
+          check->MoveBefore(first);
         }
         break;
       }

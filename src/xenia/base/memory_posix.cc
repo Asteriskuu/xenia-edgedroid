@@ -34,6 +34,7 @@
 #include <mach/vm_region.h>
 #endif  // XE_PLATFORM_MAC
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/platform.h"
@@ -47,6 +48,20 @@
 
 #include "xenia/base/main_android.h"
 #endif
+
+#if XE_PLATFORM_GNU_LINUX
+// Needs Linux 6.3 / glibc 2.38 headers.
+#ifndef MFD_EXEC
+#define MFD_EXEC 0x0010U
+#endif
+
+DEFINE_bool(use_shm_open, false,
+            "Back guest memory and the code cache with a /dev/shm file instead "
+            "of memfd.\n"
+            "Exposes both as named files that other processes can open to "
+            "inspect guest memory or JIT output while a title runs.",
+            "Linux");
+#endif  // XE_PLATFORM_GNU_LINUX
 
 namespace xe {
 namespace memory {
@@ -465,6 +480,32 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path,
   return ret;
 #else
   auto full_path = "/" / path;
+#if XE_PLATFORM_GNU_LINUX
+  // Prefer memfd: unlike /dev/shm it is unaffected by noexec mounts, LSM
+  // policy or a container's --shm-size, and the kernel reclaims it on exit so
+  // it needs no crash cleanup.
+  if (!cvars::use_shm_open) {
+    const bool needs_exec = access == PageAccess::kExecuteReadOnly ||
+                            access == PageAccess::kExecuteReadWrite;
+    int memfd =
+        memfd_create(path.c_str(), MFD_CLOEXEC | (needs_exec ? MFD_EXEC : 0u));
+    if (memfd < 0 && needs_exec && errno == EINVAL) {
+      // Pre-6.3 kernels reject the unknown flag but map exec anyway.
+      memfd = memfd_create(path.c_str(), MFD_CLOEXEC);
+    }
+    if (memfd >= 0) {
+      if (ftruncate(memfd, length) < 0) {
+        XELOGE("ftruncate(memfd {}, 0x{:X}) failed: {} ({})", path.string(),
+               length, strerror(errno), errno);
+        close(memfd);
+        return kFileMappingHandleInvalid;
+      }
+      return memfd;
+    }
+    XELOGW("memfd_create({}) failed: {} ({}), falling back to shm_open",
+           path.string(), strerror(errno), errno);
+  }
+#endif  // XE_PLATFORM_GNU_LINUX
   int ret = shm_open(full_path.c_str(), oflag, 0777);
   if (ret < 0) {
     XELOGE("shm_open({}) failed: {} ({})", full_path.string(), strerror(errno),
@@ -505,23 +546,26 @@ void CloseFileMappingHandle(FileMappingHandle handle,
   // Remove from tracking
   {
     std::lock_guard guard(g_shm_file_names_mutex);
-    auto it =
-        std::find(g_shm_file_names.begin(), g_shm_file_names.end(), shm_name);
+    auto it = std::ranges::find(g_shm_file_names, shm_name);
     if (it != g_shm_file_names.end()) {
       g_shm_file_names.erase(it);
     }
   }
 #else
   auto full_path = "/" / path;
-  shm_unlink(full_path.c_str());
-  // Remove from tracking
+  // Only shm_open mappings have a name to unlink; a memfd dies with the close
+  // above and was never tracked.
+  bool tracked = false;
   {
     std::lock_guard guard(g_shm_file_names_mutex);
-    auto it = std::find(g_shm_file_names.begin(), g_shm_file_names.end(),
-                        full_path.string());
+    auto it = std::ranges::find(g_shm_file_names, full_path.string());
     if (it != g_shm_file_names.end()) {
       g_shm_file_names.erase(it);
+      tracked = true;
     }
+  }
+  if (tracked) {
+    shm_unlink(full_path.c_str());
   }
 #endif  // XE_PLATFORM_MAC
 #endif

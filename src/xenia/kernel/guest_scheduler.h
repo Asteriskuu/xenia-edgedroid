@@ -24,6 +24,7 @@ namespace xe {
 namespace kernel {
 
 class KernelState;
+class XObject;
 class XThread;
 
 // Cooperative, in-kernel scheduler for guest threads.
@@ -76,6 +77,11 @@ class GuestScheduler {
   // backoff remains a backstop so a missed wake only adds latency.
   void WakeAll();
 
+  // Targeted WakeAll: pokes only the CPUs hosting a blocked waiter of
+  // |object|. Untracked waits (9+ object sets) poll on the backoff cadence,
+  // which remains the backstop throughout.
+  void WakeForSignal(const XObject* object);
+
   // Runs |fn|, a blocking host call such as a disc read, without stalling the
   // dispatch thread. On a fiber it hands |fn| to the I/O worker and parks until
   // it finishes, otherwise it runs inline. The single worker serializes all
@@ -101,6 +107,9 @@ class GuestScheduler {
   // the dispatch thread, so an unbounded wait such as a UI dialog does not
   // freeze the guest threads sharing it. The Fence must have one waiter.
   static void WaitOnFence(xe::threading::Fence& fence);
+
+  // Counts a safepoint preemption forced through a deferring IRQL.
+  void NoteForcedPreempt();
 
   // Yields the running guest fiber back to its CPU's idle fiber. Returns (on
   // the calling fiber) once the dispatcher switches back into it.
@@ -158,6 +167,9 @@ class GuestScheduler {
   // At least this often every blocked fiber re-polls regardless of the epoch
   // gate, so a missed epoch bump costs a latency blip, not a hang.
   static constexpr uint64_t kRepollBackstopMs = 64;
+  // Floor on the watchdog's wake period. Below this the wakeups cost more than
+  // the preemption accuracy is worth on a mobile SoC.
+  static constexpr uint64_t kMinWatchdogPeriodUs = 250;
 
   // Per-CPU dispatch state, each driven by its own host thread. Ready and
   // blocked fibers are intrusive FIFOs linked through
@@ -254,6 +266,22 @@ class GuestScheduler {
   uint64_t quantum_ticks_ = 0;
   std::unique_ptr<xe::threading::Thread> watchdog_thread_;
   std::unique_ptr<xe::threading::Event> watchdog_event_;
+  // No-progress detection. The stall detector above only catches a CPU that
+  // stops switching fibers; the other wedge mode has every CPU rotating
+  // healthily while the guest presents no frames, because the fibers are all
+  // waiting on something none of them will produce. Triggered off the present
+  // counter, it dumps what every CPU is running or waiting on.
+  static constexpr uint32_t kNoProgressReportTicks = 2000;  // ~2 s
+  uint32_t last_frame_number_ = 0;
+  uint32_t no_progress_ticks_ = 0;
+  bool no_progress_reported_ = false;
+  void ReportNoProgress();
+
+  // Watchdog-only stall detection state, touched under lock_.
+  static constexpr uint32_t kStallReportTicks = 2000;  // ~2 s at a 1 ms period
+  uint64_t stall_last_seq_[kMaxCpus] = {};
+  uint32_t stall_ticks_[kMaxCpus] = {};
+  bool stall_reported_[kMaxCpus] = {};
 
   // Guards every CPU's ready and blocked lists. Never held across a fiber
   // switch.
@@ -281,7 +309,30 @@ class GuestScheduler {
   struct BlockingCall {
     const std::function<void()>* fn = nullptr;
     std::atomic<bool> done{false};
+    // Raw host ticks when queued, for the I/O wait-time counter.
+    uint64_t queued_ns = 0;
   };
+  // Cheap counters for the costs this scheduler adds on a mobile SoC: how
+  // often parked waiters force a dispatch CPU awake, and how long offloaded
+  // blocking calls queue behind the single I/O worker. Reported by
+  // ReportStatsIfDue when guest_scheduler_stats is set.
+  struct Stats {
+    std::atomic<uint64_t> repolls{0};          // RereadyBlocked passes
+    std::atomic<uint64_t> rereadied{0};        // waiters actually re-readied
+    std::atomic<uint64_t> idle_wakes{0};       // timed wakes of a parked CPU
+    std::atomic<uint64_t> switches{0};         // fiber dispatches
+    std::atomic<uint64_t> forced_preempts{0};  // IRQL defers escaped
+    std::atomic<uint64_t> io_calls{0};
+    std::atomic<uint64_t> io_queue_ns{0};  // time queued before the worker ran
+    std::atomic<uint64_t> io_run_ns{0};    // time inside the blocking call
+    std::atomic<uint64_t> io_queue_max_ns{0};
+  };
+  Stats stats_;
+  uint64_t stats_last_report_ms_ = 0;
+  // Calibrated in EnsureStarted, used to render the raw-tick I/O counters.
+  double ticks_per_us_ = 0.0;
+  void ReportStatsIfDue();
+
   std::once_flag io_once_;
   std::atomic<bool> io_started_{false};
   std::mutex io_lock_;

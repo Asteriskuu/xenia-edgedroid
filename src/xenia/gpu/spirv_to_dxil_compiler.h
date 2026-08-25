@@ -7,21 +7,20 @@
  ******************************************************************************
  */
 
-#ifndef XENIA_GPU_D3D12_SPIRV_TO_DXIL_COMPILER_H_
-#define XENIA_GPU_D3D12_SPIRV_TO_DXIL_COMPILER_H_
+#ifndef XENIA_GPU_SPIRV_TO_DXIL_COMPILER_H_
+#define XENIA_GPU_SPIRV_TO_DXIL_COMPILER_H_
 
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
-#include "xenia/gpu/xenos.h"
-
 namespace xe {
 namespace gpu {
-namespace d3d12 {
 
-// Wraps Mesa's spirv_to_dxil (NIR-based SPIR-V to DXIL) for the D3D12 guest
-// shader path. Produces DXIL from the SPIR-V emitted by SpirvShaderTranslator.
+// Wraps Mesa's spirv_to_dxil (NIR-based SPIR-V to DXIL) for the guest shader
+// paths that consume DXIL. Produces DXIL from the SPIR-V emitted by
+// SpirvShaderTranslator, for D3D12 directly and for Metal by way of Apple's
+// Metal Shader Converter.
 //
 // Supports both render target cache paths. The Mesa fork lowers SPIR-V fragment
 // shader interlock to D3D12 rasterizer-ordered views, so the EDRAM ROV path
@@ -31,14 +30,16 @@ class SpirvToDxilCompiler {
   // Mesa git revision of the linked library.
   static uint64_t version();
 
-  // Pipeline stage of the SPIR-V module. Covers the guest vertex/pixel shaders
-  // and the host primitive-expansion geometry and tessellation shaders.
+  // Pipeline stage of the SPIR-V module. Covers the guest vertex/pixel shaders,
+  // the host primitive-expansion geometry and tessellation shaders, and the
+  // render target cache's internal compute shaders.
   enum class Stage {
     kVertex,
     kTessellationControl,
     kTessellationEvaluation,
     kGeometry,
     kPixel,
+    kCompute,
   };
 
   // Translates one SPIR-V module to signed DXIL for the given stage. When
@@ -69,8 +70,7 @@ class SpirvToDxilCompiler {
       const std::vector<LinkedStage>& stages, bool lower_to_bindless = false);
 };
 
-}  // namespace d3d12
 }  // namespace gpu
 }  // namespace xe
 
-#endif  // XENIA_GPU_D3D12_SPIRV_TO_DXIL_COMPILER_H_
+#endif  // XENIA_GPU_SPIRV_TO_DXIL_COMPILER_H_

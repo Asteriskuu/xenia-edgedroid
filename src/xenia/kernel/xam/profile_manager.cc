@@ -346,9 +346,9 @@ void ProfileManager::Login(const uint64_t xuid, const uint8_t user_index,
   }
 
   // Find if xuid is already logged in. We might want to logout.
-  auto it = std::find_if(
-      logged_profiles_.begin(), logged_profiles_.end(),
-      [xuid](const auto& entry) { return entry.second->xuid() == xuid; });
+  auto it = std::ranges::find_if(logged_profiles_, [xuid](const auto& entry) {
+    return entry.second->xuid() == xuid;
+  });
   if (it != logged_profiles_.end()) {
     Logout(it->first);
   }
@@ -567,7 +567,7 @@ bool ProfileManager::CreateAccount(const uint64_t xuid,
   const std::u16string gamertag_u16 = xe::to_utf16(gamertag);
 
   string_util::copy_and_swap_truncating(account.gamertag, gamertag_u16,
-                                        sizeof(account.gamertag));
+                                        xe::countof(account.gamertag));
 
   const bool result = UpdateAccount(xuid, &account);
   DismountProfile(xuid);

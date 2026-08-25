@@ -43,8 +43,10 @@ static constexpr uint32_t MAX_GUEST_TRAMPOLINES =
 static constexpr uint32_t A64_RESERVE_GRANULE_SHIFT = 7;
 // A generation counter per granule, hashed. stwcx. bumps its granule to kill
 // other threads' reservations. Colliding granules only cost a spurious failure.
-static constexpr uint32_t A64_RESERVE_NUM_ENTRIES = 1u << 20;
-static constexpr uint32_t A64_RESERVE_ENTRY_MASK = A64_RESERVE_NUM_ENTRIES - 1;
+static constexpr uint32_t A64_RESERVE_ENTRY_BITS = 20;
+static constexpr uint32_t A64_RESERVE_ENTRY_MASK =
+    (1u << A64_RESERVE_ENTRY_BITS) - 1;
+static constexpr uint32_t A64_RESERVE_NUM_ENTRIES = A64_RESERVE_ENTRY_MASK + 1;
 
 struct ReserveHelper {
   std::atomic<uint32_t> generations[A64_RESERVE_NUM_ENTRIES];
@@ -73,7 +75,28 @@ enum : uint32_t {
 };
 
 // Located prior to the context register (x20) in memory.
+// vexptefp/vlogefp estimate constants, splatted across all four lanes. a64 has
+// no memory operands and only v0-v3 are scratch, so these live in the backend
+// context and load with a single ldr q rather than being materialized.
+enum A64EstConst {
+  kEstExp2Poly = 0,                 // 6 entries, 2^f minimax on [0,1)
+  kEstLog2Poly = kEstExp2Poly + 6,  // 7 entries, log2(1+u) minimax on [0,1]
+  kEstScale = kEstLog2Poly + 7,     // 2048.0f
+  kEstUnscale,                      // 1.0f / 2048.0f
+  kEstExp2Max,                      // 128.0f
+  kEstExp2Min,                      // -126.0f
+  kEstOne,                          // 0x3F800000
+  kEstInt127,                       // 127
+  kEstPosInf,                       // 0x7F800000
+  kEstNegInf,                       // 0xFF800000
+  kEstQNaN,                         // 0x7FC00000
+  kEstMantissaMask,                 // 0x007FFFFF
+  kEstQuietBit,                     // 0x00400000
+  kEstConstCount,
+};
+
 struct A64BackendContext {
+  alignas(16) uint32_t est_consts[kEstConstCount][4];
   // Scratch vectors for helper routines.
   // Using uint8_t[16] instead of NEON intrinsic types to avoid including
   // arm_neon.h in the header.
@@ -97,6 +120,8 @@ struct A64BackendContext {
   // bit 1 = got reserve
   unsigned int flags;
   unsigned int Ox1000;  // constant 0x1000
+  // DEFAULT_VMX_FPCR regardless of NJM, for the ops that always flush
+  unsigned int fpcr_vmx_daz;
 };
 
 // Default FPCR for FPU mode (round to nearest, no flush to zero).
@@ -174,6 +199,7 @@ class A64Backend : public Backend {
   void set_trace_data_enabled(bool value) override;
   bool trace_func_enabled() const override;
   void set_trace_func_enabled(bool value) override;
+  std::string FormatSequenceKey(uint64_t key) const override;
 
   void RecordMMIOExceptionForGuestInstruction(void* host_address);
 
@@ -192,12 +218,6 @@ class A64Backend : public Backend {
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
   uint32_t guest_return_trampoline_ = 0;
 
- public:
-  void* try_acquire_reservation_helper_ = nullptr;
-  void* reserved_store_32_helper = nullptr;
-  void* reserved_store_64_helper = nullptr;
-
- private:
   alignas(64) ReserveHelper reserve_helper_;
   BitMap guest_trampoline_address_bitmap_;
   uint8_t* guest_trampoline_memory_ = nullptr;

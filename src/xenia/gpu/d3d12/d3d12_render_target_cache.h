@@ -103,9 +103,6 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
                reg::RB_COPY_DEST_INFO* copy_dest_info_out = nullptr,
                bool* written_scaled_out = nullptr);
 
-  // Returns true if any downloads were submitted to the command processor.
-  bool InitializeTraceSubmitDownloads();
-  void InitializeTraceCompleteDownloads();
   void RestoreEdramSnapshot(const void* snapshot);
 
   // For host render targets.
@@ -235,6 +232,7 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
 
   // For traces.
   ID3D12Resource* edram_snapshot_download_buffer_ = nullptr;
+  bool edram_snapshot_download_mapped_ = false;
   std::unique_ptr<ui::d3d12::D3D12UploadBufferPool>
       edram_snapshot_restore_pool_;
 
@@ -738,6 +736,11 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   void DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used,
                          uint32_t dump_rows, uint32_t dump_pitch,
                          bool native_layout);
+
+  void DumpAllRenderTargetsToEdram() override;
+  bool BeginEdramSnapshotReadback() override;
+  const void* MapEdramSnapshotReadback() override;
+  void EndEdramSnapshotReadback() override;
 
   bool use_stencil_reference_output_ = false;
 

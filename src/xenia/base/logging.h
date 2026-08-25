@@ -95,6 +95,9 @@ bool ShouldLog(LogLevel log_level,
 // Advances the present-frame counter shown in the log prefix.
 // Called once per guest present (VdSwap).
 void IncrementFrameNumber();
+// The same counter, for anything needing a cheap "is the guest still
+// presenting frames" signal (the guest scheduler's no-progress detector).
+uint32_t GetFrameNumber();
 namespace internal {
 
 uint32_t GetLogLevel();

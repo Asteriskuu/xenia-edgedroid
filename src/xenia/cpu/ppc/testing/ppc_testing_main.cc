@@ -21,6 +21,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/raw_module.h"
 
+#include <algorithm>
 #include <chrono>
 #include <unordered_set>
 
@@ -34,22 +35,19 @@
 #include "xenia/base/platform_win.h"
 #endif  // XE_COMPILER_MSVC
 
-DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
-DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
-DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
-            "Storage");
-
-// xenia-core's Emulator::SetupSubsystems pulls in these cvars; provide stubs
-// so the test runner links without depending on xenia_main.cc.
-DEFINE_string(apu, "nop", "Audio system stub for tests.", "APU");
-DEFINE_string(gpu, "null", "Graphics system stub for tests.", "GPU");
-
 DEFINE_path(test_path, "src/xenia/cpu/ppc/testing/",
             "Directory scanned for test files.", "Other");
 DEFINE_path(test_bin_path, "src/xenia/cpu/ppc/testing/bin/",
             "Directory with binary outputs of the test files.", "Other");
 DEFINE_path(test_skip_file, "src/xenia/cpu/ppc/testing/skip.txt",
             "File containing test case names to skip (one per line).", "Other");
+DEFINE_bool(test_only_skipped, false,
+            "Invert the skip list: run only the test cases it names. Entries "
+            "that pass are stale and can be deleted from it.",
+            "Other");
+DEFINE_path(test_passed_file, "",
+            "Write the name of every passing test case here, one per line.",
+            "Other");
 DEFINE_transient_string(test_name, "", "Test suite name.", "General");
 
 namespace xe {
@@ -521,8 +519,8 @@ int filter(unsigned int code) {
 #endif  // XE_COMPILER_MSVC
 
 void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
-                      TestCase& test_case, int& failed_count,
-                      int& passed_count) {
+                      TestCase& test_case, int& failed_count, int& passed_count,
+                      std::vector<std::string>& passed_names) {
 #if XE_COMPILER_MSVC
   try {
     if (!runner.Setup(test_suite)) {
@@ -533,6 +531,7 @@ void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
     }
     if (runner.Run(test_case)) {
       ++passed_count;
+      passed_names.push_back(test_case.name);
     } else {
       fprintf(stderr, "  [%s] FAILED\n", test_case.name.c_str());
       fflush(stderr);
@@ -555,6 +554,7 @@ void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
   }
   if (runner.Run(test_case)) {
     ++passed_count;
+    passed_names.push_back(test_case.name);
   } else {
     fprintf(stderr, "  [%s] FAILED\n", test_case.name.c_str());
     fflush(stderr);
@@ -575,12 +575,19 @@ bool RunTests(const std::vector<std::string>& test_names) {
   // Load skip list
   auto skip_list = LoadSkipList(cvars::test_skip_file);
   if (!skip_list.empty()) {
-    fprintf(stderr, "Loaded skip list with %zu test cases to skip.\n",
-            skip_list.size());
+    fprintf(stderr, "Loaded skip list with %zu test cases to %s.\n",
+            skip_list.size(), cvars::test_only_skipped ? "run" : "skip");
   } else {
     fprintf(stderr, "Warning: skip list is empty (path: %s)\n",
             cvars::test_skip_file.string().c_str());
   }
+  // Inverted, the skip list becomes the run list: whatever passes is a stale
+  // entry that can be deleted from it.
+  auto should_run = [&skip_list](const std::string& name) {
+    return (skip_list.find(name) != skip_list.end()) ==
+           cvars::test_only_skipped;
+  };
+  std::vector<std::string> passed_names;
 
   // Build a set of requested test names for fast lookup
   std::unordered_set<std::string> test_name_filter(test_names.begin(),
@@ -624,7 +631,7 @@ bool RunTests(const std::vector<std::string>& test_names) {
   int skipped_count = 0;
   for (auto& test_suite : test_suites) {
     for (auto& test_case : test_suite.test_cases()) {
-      if (skip_list.find(test_case.name) != skip_list.end()) {
+      if (!should_run(test_case.name)) {
         ++skipped_count;
         continue;
       }
@@ -633,7 +640,7 @@ bool RunTests(const std::vector<std::string>& test_names) {
   }
 
   if (skipped_count > 0) {
-    fprintf(stderr, "Skipped %d test cases based on skip list.\n",
+    fprintf(stderr, "Filtered out %d test cases based on skip list.\n",
             skipped_count);
   }
   fprintf(stderr, "Running %zu test suites, %zu test cases...\n",
@@ -650,7 +657,7 @@ bool RunTests(const std::vector<std::string>& test_names) {
   size_t total_tests = all_tests.size();
   for (auto& test_suite : test_suites) {
     for (auto& test_case : test_suite.test_cases()) {
-      if (skip_list.find(test_case.name) == skip_list.end()) {
+      if (should_run(test_case.name)) {
         ++suite_total;
         break;
       }
@@ -660,7 +667,7 @@ bool RunTests(const std::vector<std::string>& test_names) {
     // Collect non-skipped test cases for this suite
     std::vector<TestCase*> suite_tests;
     for (auto& test_case : test_suite.test_cases()) {
-      if (skip_list.find(test_case.name) == skip_list.end()) {
+      if (should_run(test_case.name)) {
         suite_tests.push_back(&test_case);
       }
     }
@@ -676,7 +683,7 @@ bool RunTests(const std::vector<std::string>& test_names) {
     fflush(stdout);
     for (size_t i = 0; i < suite_tests.size(); i++) {
       ProtectedRunTest(test_suite, runner, *suite_tests[i], failed_count,
-                       passed_count);
+                       passed_count, passed_names);
       ++tests_done;
       if ((i + 1) % 500 == 0 && i + 1 < suite_tests.size()) {
         pct = static_cast<int>(tests_done * 100 / total_tests);
@@ -698,6 +705,22 @@ bool RunTests(const std::vector<std::string>& test_names) {
   fprintf(stderr, "Failed: %d\n", failed_count);
   fprintf(stderr, "Time: %dm %ds\n", minutes, seconds);
   fflush(stderr);
+
+  if (!cvars::test_passed_file.empty()) {
+    std::sort(passed_names.begin(), passed_names.end());
+    FILE* f = filesystem::OpenFile(cvars::test_passed_file, "w");
+    if (f) {
+      for (const auto& name : passed_names) {
+        fprintf(f, "%s\n", name.c_str());
+      }
+      fclose(f);
+      fprintf(stderr, "Wrote %zu passing test names to %s\n",
+              passed_names.size(), cvars::test_passed_file.string().c_str());
+    } else {
+      fprintf(stderr, "Failed to open %s for writing\n",
+              cvars::test_passed_file.string().c_str());
+    }
+  }
 
   return failed_count ? false : true;
 }

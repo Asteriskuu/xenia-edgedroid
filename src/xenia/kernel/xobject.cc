@@ -218,6 +218,12 @@ X_KTHREAD* WaitEnter(uint32_t wait_reason, uint32_t processor_mode,
 }
 
 void WaitExit(X_KTHREAD* kthread, X_STATUS result) {
+  // Runs on every cooperative wait exit, so it is also where the diagnostic
+  // wait shape is dropped. Unconditional: a thread that never waits again must
+  // not keep reporting a stale handle set.
+  if (auto* self = XThread::GetCurrentThread()) {
+    self->clear_cooperative_wait_shape();
+  }
   if (!kthread) {
     return;
   }
@@ -246,8 +252,15 @@ X_STATUS CooperativeWait(GuestScheduler* scheduler, X_KTHREAD* kthread,
     }
     // Sampled before polling, so a signal landing after a failed poll changes
     // the epoch and the re-poll is not skipped.
-    uint32_t wait_epoch =
-        wait_object ? wait_object->cooperative_signal_epoch() : 0;
+    // Sampled before polling, so a signal landing after a failed poll changes
+    // it and the re-poll is not skipped. A multi-wait has no single object, so
+    // it uses the summed epoch of its set.
+    uint32_t wait_epoch = 0;
+    if (wait_object) {
+      wait_epoch = wait_object->cooperative_signal_epoch();
+    } else if (auto* self = XThread::GetCurrentThread()) {
+      wait_epoch = self->cooperative_wait_set_epoch();
+    }
     std::optional<X_STATUS> resolved = poll();
     if (resolved) {
       WaitExit(kthread, *resolved);
@@ -330,9 +343,57 @@ bool CooperativeWaiterFifo::HasWaiters() {
   return !waiters_.empty();
 }
 
+namespace {
+// Signal ring. Small, lock-guarded and write-mostly: it is touched once per
+// cooperative wake, which is rare next to the poll traffic it helps explain.
+constexpr size_t kSignalRingSize = 256;
+std::mutex g_signal_ring_lock;
+XObject::SignalRecord g_signal_ring[kSignalRingSize];
+uint64_t g_signal_ring_seq = 0;
+}  // namespace
+
+void XObject::RecordCooperativeSignal(XObject* object) {
+  SignalRecord rec = {};
+  rec.handle = object->handle();
+  rec.type = static_cast<uint8_t>(object->type());
+  rec.uptime_ms = uint32_t(Clock::QueryGuestUptimeMillis());
+  if (auto* thread = XThread::GetCurrentThread()) {
+    rec.signaler_thread = thread->handle();
+    if (auto* state = thread->thread_state()) {
+      rec.signaler_lr = uint32_t(state->context()->lr);
+    }
+  } else {
+    rec.signaler_thread = 0xFFFFFFFF;  // host-side signaller
+  }
+  std::lock_guard<std::mutex> lock(g_signal_ring_lock);
+  rec.seq = ++g_signal_ring_seq;
+  g_signal_ring[(rec.seq - 1) % kSignalRingSize] = rec;
+}
+
+std::vector<XObject::SignalRecord> XObject::RecentCooperativeSignals(
+    size_t max) {
+  std::vector<SignalRecord> out;
+  std::lock_guard<std::mutex> lock(g_signal_ring_lock);
+  uint64_t total = g_signal_ring_seq;
+  size_t have = size_t(total < kSignalRingSize ? total : kSignalRingSize);
+  size_t want = have < max ? have : max;
+  out.reserve(want);
+  for (size_t i = have - want; i < have; ++i) {
+    out.push_back(g_signal_ring[(total - have + i) % kSignalRingSize]);
+  }
+  return out;
+}
+
 void XObject::WakeCooperativeWaiters() {
   cooperative_signal_epoch_.fetch_add(1);
-  kernel_state()->guest_scheduler()->WakeAll();
+  RecordCooperativeSignal(this);
+  // Wake only the CPUs that can act on this signal instead of every CPU with
+  // any blocked thread - broadcast wakes on every semaphore release were most
+  // of some titles' kernel time (Eternal Sonata: 69% of CPU in futex wakes
+  // and the resulting empty scheduling passes). Every watcher's CPU is woken,
+  // not just the permit FIFO front's, which loses the wake whenever that
+  // waiter leaves between the signal and its dispatch.
+  kernel_state()->guest_scheduler()->WakeForSignal(this);
 }
 
 void XObject::EnterCooperativeWait(XThread* thread) {
@@ -358,6 +419,9 @@ void XObject::AbandonCooperativeWait(XThread* thread) {
   if (XObject* object = thread->cooperative_wait_object()) {
     object->LeaveCooperativeWait(thread);
   }
+  // A terminated fiber exits inside the wait, skipping WaitExit, so the gate
+  // pointers into its abandoned wait frame are dropped here.
+  thread->clear_cooperative_wait_shape();
 }
 
 xe::threading::WaitHandle* XObject::GetWaitHandleForCurrentThread(size_t slot) {
@@ -388,6 +452,11 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                                        : 0;
     const uint32_t entry_pulse_epoch = cooperative_pulse_epoch();
     EnterCooperativeWait(self);  // FIFO fairness for semaphores
+    if (self) {
+      const uint32_t wait_handle_id = handle();
+      self->set_cooperative_wait_shape(XThread::CooperativeWaitKind::kSingle,
+                                       &wait_handle_id, 1);
+    }
     X_STATUS status = CooperativeWait(
         scheduler, kthread, this, alertable != 0, deadline_ms,
         [&]() -> std::optional<X_STATUS> {
@@ -609,8 +678,32 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                                                  TimeoutTicksToMs(*opt_timeout))
                                        : 0;
     uint32_t entry_pulse_epochs[kMaxWaitHandles];
+    uint32_t handle_ids[kMaxWaitHandles];
     for (size_t i = 0; i < count; ++i) {
       entry_pulse_epochs[i] = objects[i]->cooperative_pulse_epoch();
+      handle_ids[i] = objects[i]->handle();
+    }
+    // A multi-wait registers no single wait object, so this is the only
+    // record of what it blocks on. It also gates re-polling: only
+    // Event/Semaphore/Mutant bump the signal epoch, so a set holding any other
+    // type must stay ungated or its transitions wait for the backstop.
+    bool gateable_set = count <= 8;
+    for (size_t i = 0; gateable_set && i < count; ++i) {
+      switch (objects[i]->type()) {
+        case XObject::Type::Event:
+        case XObject::Type::Semaphore:
+        case XObject::Type::Mutant:
+          break;
+        default:
+          gateable_set = false;
+          break;
+      }
+    }
+    if (auto* self = XThread::GetCurrentThread()) {
+      self->set_cooperative_wait_shape(
+          wait_type ? XThread::CooperativeWaitKind::kMultiAny
+                    : XThread::CooperativeWaitKind::kMultiAll,
+          handle_ids, count, gateable_set ? objects : nullptr);
     }
     return CooperativeWait(
         scheduler, kthread, nullptr, alertable != 0, deadline_ms,
@@ -823,7 +916,7 @@ void XObject::SetNativePointer(uint32_t native_ptr, bool uninitialized) {
 
 object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
                                              void* native_ptr,
-                                             X_DISPATCHER_FLAGS as_type,
+                                             X_OBJECT_TYPES as_type,
                                              bool already_locked) {
   assert_not_null(native_ptr);
 
@@ -842,9 +935,9 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
   XObject* result = nullptr;
 
   auto header = reinterpret_cast<X_DISPATCH_HEADER*>(native_ptr);
-  X_DISPATCHER_FLAGS type = as_type;
+  X_OBJECT_TYPES type = as_type;
 
-  if (as_type == X_DISPATCHER_FLAGS::DISPATCHER_UNDEFINED) {
+  if (as_type == X_OBJECT_TYPES::UndefinedObject) {
     type = header->type;
   }
 
@@ -867,37 +960,36 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     // First use, create new.
     // https://www.nirsoft.net/kernel_struct/vista/KOBJECTS.html
     switch (type) {
-      case X_DISPATCHER_FLAGS::DISPATCHER_MANUAL_RESET_EVENT:
-      case X_DISPATCHER_FLAGS::DISPATCHER_AUTO_RESET_EVENT: {
+      case X_OBJECT_TYPES::EventNotificationObject:
+      case X_OBJECT_TYPES::EventSynchronizationObject: {
         auto ev = new XEvent(kernel_state);
         ev->InitializeNative(native_ptr, header);
         result = ev;
       } break;
-      case X_DISPATCHER_FLAGS::DISPATCHER_MUTANT: {
+      case X_OBJECT_TYPES::MutantObject: {
         auto mutant = new XMutant(kernel_state);
         mutant->InitializeNative(native_ptr, header);
         result = mutant;
       } break;
-      case X_DISPATCHER_FLAGS::DISPATCHER_SEMAPHORE: {
+      case X_OBJECT_TYPES::SemaphoreObject: {
         auto sem = new XSemaphore(kernel_state);
         auto success = sem->InitializeNative(native_ptr, header);
         // Can't report failure to the guest at late initialization:
         assert_true(success);
         result = sem;
       } break;
-      case 3:   // ProcessObject
-      case 4:   // QueueObject
-      case 6:   // ThreadObject
-      case 7:   // GateObject
-      case 8:   // TimerNotificationObject
-      case 9:   // TimerSynchronizationObject
-      case 18:  // ApcObject
-      case 19:  // DpcObject
-      case 20:  // DeviceQueueObject
-      case 21:  // EventPairObject
-      case 22:  // InterruptObject
-      case 23:  // ProfileObject
-      case 24:  // ThreadedDpcObject
+      case X_OBJECT_TYPES::ProcessObject:
+      case X_OBJECT_TYPES::QueueObject:
+      case X_OBJECT_TYPES::ThreadObject:
+      case X_OBJECT_TYPES::Spare1Object:
+      case X_OBJECT_TYPES::TimerNotificationObject:
+      case X_OBJECT_TYPES::TimerSynchronizationObject:
+      case X_OBJECT_TYPES::ApcObject:
+      case X_OBJECT_TYPES::DpcObject:
+      case X_OBJECT_TYPES::DeviceQueueObject:
+      case X_OBJECT_TYPES::EventPairObject:
+      case X_OBJECT_TYPES::InterruptObject:
+      case X_OBJECT_TYPES::ProfileObject:
       default:
         // Unimplemented object type - just log and return nullptr
         XELOGW("GetNativeObject: Unimplemented object type {}",

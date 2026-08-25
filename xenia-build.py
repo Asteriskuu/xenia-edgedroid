@@ -11,6 +11,7 @@ from functools import partial
 from argparse import ArgumentParser, ArgumentTypeError
 from glob import glob
 from json import loads as jsonloads
+import hashlib
 import os
 import platform
 from shutil import rmtree, copy2, which as shutil_which
@@ -656,6 +657,82 @@ def find_slangc(slang_dir, slangc_relpath):
     return direct
 
 
+# Apple's Metal Shader Converter turns the DXIL that spirv_to_dxil emits into
+# the AIR the Metal backend runs. Apple's own download needs a developer login,
+# so the dylib is mirrored as a release asset (Apache 2.0 permits it), versioned
+# by the label on Apple's download page.
+MSC_VERSION = "4.0-beta2"
+MSC_SHA256 = "4b007174a7d67d7122d4b0230781ce344b6ee5273c8c27cd2b1ab20c0537ea69"
+MSC_RELEASE_URL = ("https://github.com/has207/xenia-edge/releases/download/"
+                   f"deps-metal-shader-converter-{MSC_VERSION}")
+MSC_DYLIB_NAME = "libmetalirconverter.dylib"
+
+
+def download_metal_shader_converter():
+    """Downloads the pinned Metal Shader Converter dylib into
+    .metal-shader-converter/<version>/.
+
+    Skips the download if the pinned version is already present. Any other
+    (stale) version is removed so the tree holds only the pinned one (cmake
+    globs .metal-shader-converter/*/libmetalirconverter.dylib to find it).
+    macOS only - the dylib is the Metal backend's shader compiler.
+    """
+    if sys.platform != "darwin":
+        print("- Metal Shader Converter is macOS only; skipping.")
+        return None
+
+    root = os.path.abspath(".metal-shader-converter")
+    msc_dir = os.path.join(root, MSC_VERSION)
+    dylib_path = os.path.join(msc_dir, MSC_DYLIB_NAME)
+    if os.path.exists(dylib_path):
+        print(f"- Metal Shader Converter {MSC_VERSION} already present: "
+              f"{dylib_path}")
+        return dylib_path
+
+    if os.path.isdir(root):
+        rmtree(root, onerror=remove_readonly)
+    os.makedirs(msc_dir)
+
+    archive_name = f"libmetalirconverter-{MSC_VERSION}-macos.zip"
+    url = f"{MSC_RELEASE_URL}/{archive_name}"
+    print(f"- downloading Metal Shader Converter {MSC_VERSION} "
+          f"({archive_name})...")
+    archive_path = os.path.join(msc_dir, archive_name)
+    try:
+        urllib.request.urlretrieve(url, archive_path)
+        digest = hashlib.sha256()
+        with open(archive_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != MSC_SHA256:
+            print_error(f"{archive_name} sha256 is {digest.hexdigest()}, "
+                        f"expected {MSC_SHA256}.")
+            sys.exit(1)
+        with zipfile.ZipFile(archive_path) as zf:
+            zf.extractall(msc_dir)
+    finally:
+        if os.path.exists(archive_path):
+            os.remove(archive_path)
+
+    if not os.path.exists(dylib_path):
+        print_error(f"The download did not produce {MSC_DYLIB_NAME} under "
+                    f"{msc_dir}.")
+        sys.exit(1)
+
+    # The dylib carries Apple's own signature, so this proves the mirrored copy
+    # is Apple's untampered binary rather than merely the bytes we uploaded.
+    result = subprocess.run(["codesign", "--verify", "--strict", dylib_path],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        print_error(f"{MSC_DYLIB_NAME} failed Apple signature verification: "
+                    f"{result.stderr.strip()}")
+        sys.exit(1)
+
+    os.chmod(dylib_path, os.stat(dylib_path).st_mode | stat.S_IEXEC)
+    print(f"- Metal Shader Converter: {dylib_path}")
+    return dylib_path
+
+
 def download_slang():
     """Downloads the pinned Slang release into .slang/<version>/.
 
@@ -711,7 +788,7 @@ def download_slang():
 def run_cmake_configure(cc=None, generator=None, build_tests=False,
                         disable_lto=False, enable_profiler=False,
                         enable_itrace=False, enable_dtrace=False,
-                        enable_ftrace=False,
+                        enable_ftrace=False, build_misc=False,
                         target_arch=None, config=None):
     """Runs `cmake` to (re)configure build/ from the source root.
 
@@ -722,7 +799,9 @@ def run_cmake_configure(cc=None, generator=None, build_tests=False,
     (faster Release link, at the cost of LTO's whole-program opts);
     enable_profiler toggles -DXENIA_ENABLE_PROFILER=ON (microprofile
     instrumentation; UI overlay only in Debug, profile.html dump on
-    shutdown otherwise). target_arch enables cross-compilation on
+    shutdown otherwise); build_misc toggles -DXENIA_BUILD_MISC=ON (trace
+    viewers and dumps, shader compiler, vfs-dump, demos).
+    target_arch enables cross-compilation on
     Windows (arm64↔x64 via the MSVC cross-compiler) and macOS
     (arm64↔x86_64 via clang's -arch and CMAKE_OSX_ARCHITECTURES) into a
     separate build-<arch>/ tree; Linux rejects non-native target_arch.
@@ -816,6 +895,7 @@ def run_cmake_configure(cc=None, generator=None, build_tests=False,
     args += [f"-DXENIA_ENABLE_ITRACE={'ON' if enable_itrace else 'OFF'}"]
     args += [f"-DXENIA_ENABLE_DTRACE={'ON' if enable_dtrace else 'OFF'}"]
     args += [f"-DXENIA_ENABLE_FTRACE={'ON' if enable_ftrace else 'OFF'}"]
+    args += [f"-DXENIA_BUILD_MISC={'ON' if build_misc else 'OFF'}"]
     if config:
         args += [f"-DCMAKE_BUILD_TYPE={config.title()}"]
     ret = subprocess.call(args)
@@ -895,6 +975,7 @@ def discover_commands(subparsers):
         "setup": SetupCommand(subparsers),
         "fetchdata": FetchDataCommand(subparsers),
         "slang": SlangCommand(subparsers),
+        "msc": MetalShaderConverterCommand(subparsers),
         "build": BuildCommand(subparsers),
         "devenv": DevenvCommand(subparsers),
         "gentests": GenTestsCommand(subparsers),
@@ -1098,6 +1179,12 @@ class BaseBuildCommand(Command):
             help="Enables JIT per-function-call tracing to the log (sets "
                  "-DXENIA_ENABLE_FTRACE=ON). For debugging only.")
         self.parser.add_argument(
+            "--build-misc", dest="build_misc", action="store_true",
+            default=False,
+            help="Enables building the misc subprojects (sets "
+                 "-DXENIA_BUILD_MISC=ON): trace viewers and trace dumps, "
+                 "the shader compiler, vfs-dump and the demos.")
+        self.parser.add_argument(
             "--target-arch", type=normalize_target_arch, default=None,
             help="Target architecture (arm64/aarch64/a64, x64/amd64/x86_64/x86). "
                  "On Windows and macOS, non-native values enable cross-compilation "
@@ -1115,6 +1202,7 @@ class BaseBuildCommand(Command):
                 enable_itrace=args["enable_itrace"],
                 enable_dtrace=args["enable_dtrace"],
                 enable_ftrace=args["enable_ftrace"],
+                build_misc=args["build_misc"],
                 target_arch=target_arch,
                 config=args["config"],
             )

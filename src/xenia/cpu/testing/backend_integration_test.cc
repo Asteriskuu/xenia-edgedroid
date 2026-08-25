@@ -772,16 +772,26 @@ TEST_CASE("FPCR_PRESERVED_ACROSS_HOST_CALLBACK", "[backend]") {
 // JIT code.
 //
 // Windows: RtlLookupFunctionEntry directly queries the registered SEH tables.
-// POSIX: we call backtrace() from inside a JIT callback and verify we get
-// enough frames to have unwound through the JIT thunks.  This exercises the
-// DWARF .eh_frame data registered via __register_frame.
+// POSIX: we unwind from inside a JIT callback and verify we get enough frames
+// to have unwound through the JIT thunks.  This exercises the DWARF .eh_frame
+// data registered via __register_frame.
+//
+// _Unwind_Backtrace is used rather than backtrace(3) because it consults the
+// registered FDEs on both glibc and Apple libunwind.  backtrace(3) on Apple
+// arm64 walks the x29 frame-pointer chain instead, which JIT'd code does not
+// maintain, so it stops at the first JIT frame regardless of unwind data.
 
 #if !XE_PLATFORM_WIN32
-#include <execinfo.h>
+#include <unwind.h>
 static int jit_backtrace_depth = 0;
+static _Unwind_Reason_Code CountJITFrame(struct _Unwind_Context* context,
+                                         void* arg) {
+  ++jit_backtrace_depth;
+  return _URC_NO_REASON;
+}
 static void CaptureJITBacktrace(ppc::PPCContext* ctx, void* arg0, void* arg1) {
-  void* frames[64];
-  jit_backtrace_depth = backtrace(frames, 64);
+  jit_backtrace_depth = 0;
+  _Unwind_Backtrace(CountJITFrame, nullptr);
 }
 #endif
 
@@ -822,8 +832,8 @@ TEST_CASE("JIT_UNWIND_INFO_REGISTERED", "[backend]") {
   REQUIRE(entry != nullptr);
   REQUIRE(image_base != 0);
 #else
-  // On POSIX, call backtrace() from inside a JIT callback. If the .eh_frame
-  // unwind info is correctly registered, backtrace will unwind through:
+  // On POSIX, unwind from inside a JIT callback. If the .eh_frame unwind info
+  // is correctly registered, the unwinder will walk through:
   //   callback -> GuestToHostThunk -> guest func -> HostToGuestThunk -> Call
   // giving at least 4 frames. Without unwind info it stops at 1-2.
   jit_backtrace_depth = 0;
@@ -974,5 +984,294 @@ TEST_CASE("GUEST_TO_GUEST_CALL", "[backend]") {
   REQUIRE(ctx->r[23] == kCanary7);
   REQUIRE(ctx->r[24] == kCanary8);
 
+  memory->SystemHeapFree(stack_address);
+}
+
+// =============================================================================
+// Inlined PPC GPR/LR save-restore helpers
+// =============================================================================
+// Guest binaries call __savegprlr_N / __restgprlr_N in their prologue and
+// epilogue instead of spilling registers inline.  The backend recognizes those
+// callees and emits the helper body directly rather than emitting a call, so
+// these assert the resulting guest memory and register state.
+//
+// The XEX loader tags the helpers by byte-pattern search over the guest image
+// (xex_module.cc); SetSaverest is called directly here so no XEX is needed.
+//
+// Helper layout for first GPR N:
+//   std rG, -((33 - N) * 8)(r1)   for G = N..31
+//   stw r12, -8(r1)               the caller's LR, a 32-bit slot
+namespace {
+constexpr uint32_t kSaverestCallerAddr = 0x80000000;
+constexpr uint32_t kSaverestHelperAddr = 0x80001000;
+constexpr unsigned kSaverestFirstGpr = 14;
+constexpr uint32_t kSaverestFirstSlot = (33 - kSaverestFirstGpr) * 8;
+constexpr uint32_t kSaverestRetAddr = 0xBCBCBCBC;
+
+// Distinct per-register value; a slot mixup or a 32-bit truncation is visible.
+uint64_t SaverestCanary(unsigned guest_reg) {
+  return (uint64_t(0xC0DE0000u + guest_reg) << 32) | (0xBEEF0000u + guest_reg);
+}
+
+// Guest address of the spill slot for `guest_reg`, given the guest stack ptr.
+uint32_t SaverestSlot(uint32_t guest_sp, unsigned guest_reg) {
+  return guest_sp - kSaverestFirstSlot + (guest_reg - kSaverestFirstGpr) * 8;
+}
+}  // namespace
+
+TEST_CASE("PPC_SAVEGPRLR_INLINED", "[backend]") {
+  auto memory = std::make_unique<Memory>();
+  memory->Initialize();
+
+  auto backend = CreateBackend();
+  REQUIRE(backend);
+  auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+  processor->Setup(std::move(backend));
+
+  int gen_invocation = 0;
+  Function* helper_fn = nullptr;
+  auto module_owner = std::make_unique<TestModule>(
+      processor.get(), "Test",
+      [](uint32_t address) {
+        return address == kSaverestCallerAddr || address == kSaverestHelperAddr;
+      },
+      [&](HIRBuilder& b) {
+        if (gen_invocation++ == 0) {
+          // Helper body: the backend inlines the call, so this never runs.
+          b.Return();
+        } else {
+          REQUIRE(helper_fn != nullptr);
+          b.Call(helper_fn);
+          b.Return();
+        }
+        return true;
+      },
+      /*skip_cf_simplification=*/true);
+  processor->AddModule(std::move(module_owner));
+  processor->backend()->CommitExecutableRange(kSaverestCallerAddr,
+                                              kSaverestHelperAddr + 0x1000);
+
+  helper_fn = processor->ResolveFunction(kSaverestHelperAddr);
+  REQUIRE(helper_fn != nullptr);
+  helper_fn->SetSaverest(SaveRestoreType::GPR, /*is_rest=*/false,
+                         kSaverestFirstGpr);
+
+  auto* caller_fn = processor->ResolveFunction(kSaverestCallerAddr);
+  REQUIRE(caller_fn != nullptr);
+
+  uint32_t stack_size = 64 * 1024;
+  uint32_t stack_address = memory->SystemHeapAlloc(stack_size);
+  uint32_t frame_size = 1024;
+  uint32_t frame_address = memory->SystemHeapAlloc(frame_size);
+  // The helper writes below r1, so leave headroom underneath it.
+  uint32_t guest_sp = frame_address + frame_size / 2;
+  std::memset(memory->TranslateVirtual(frame_address), 0, frame_size);
+
+  auto thread_state = std::make_unique<ThreadState>(processor.get(), 0x100,
+                                                    stack_address + stack_size);
+  auto ctx = thread_state->context();
+  ctx->lr = kSaverestRetAddr;
+  ctx->r[1] = guest_sp;
+  ctx->r[12] = 0x1234ABCD;
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    ctx->r[g] = SaverestCanary(g);
+  }
+
+  caller_fn->Call(thread_state.get(), kSaverestRetAddr);
+
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    INFO("guest r" << g);
+    REQUIRE(load_and_swap<uint64_t>(memory->TranslateVirtual(
+                SaverestSlot(guest_sp, g))) == SaverestCanary(g));
+  }
+  REQUIRE(load_and_swap<uint32_t>(memory->TranslateVirtual(guest_sp - 8)) ==
+          uint32_t(ctx->r[12]));
+
+  memory->SystemHeapFree(frame_address);
+  memory->SystemHeapFree(stack_address);
+}
+
+// The restore helper is always tail-called: it reloads the GPRs and LR, then
+// returns to the reloaded LR.  With the spilled LR equal to the caller's own
+// return address the backend takes its epilogue, so the call returns normally
+// here and the restored context can be inspected.
+TEST_CASE("PPC_RESTGPRLR_INLINED", "[backend]") {
+  auto memory = std::make_unique<Memory>();
+  memory->Initialize();
+
+  auto backend = CreateBackend();
+  REQUIRE(backend);
+  auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+  processor->Setup(std::move(backend));
+
+  int gen_invocation = 0;
+  Function* helper_fn = nullptr;
+  auto module_owner = std::make_unique<TestModule>(
+      processor.get(), "Test",
+      [](uint32_t address) {
+        return address == kSaverestCallerAddr || address == kSaverestHelperAddr;
+      },
+      [&](HIRBuilder& b) {
+        if (gen_invocation++ == 0) {
+          b.Return();
+        } else {
+          REQUIRE(helper_fn != nullptr);
+          b.Call(helper_fn, CALL_TAIL);
+          b.Return();
+        }
+        return true;
+      },
+      /*skip_cf_simplification=*/true);
+  processor->AddModule(std::move(module_owner));
+  processor->backend()->CommitExecutableRange(kSaverestCallerAddr,
+                                              kSaverestHelperAddr + 0x1000);
+
+  helper_fn = processor->ResolveFunction(kSaverestHelperAddr);
+  REQUIRE(helper_fn != nullptr);
+  helper_fn->SetSaverest(SaveRestoreType::GPR, /*is_rest=*/true,
+                         kSaverestFirstGpr);
+
+  auto* caller_fn = processor->ResolveFunction(kSaverestCallerAddr);
+  REQUIRE(caller_fn != nullptr);
+
+  uint32_t stack_size = 64 * 1024;
+  uint32_t stack_address = memory->SystemHeapAlloc(stack_size);
+  uint32_t frame_size = 1024;
+  uint32_t frame_address = memory->SystemHeapAlloc(frame_size);
+  uint32_t guest_sp = frame_address + frame_size / 2;
+  std::memset(memory->TranslateVirtual(frame_address), 0, frame_size);
+
+  // Seed the spill slots as a matching __savegprlr_14 would have left them.
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    store_and_swap<uint64_t>(
+        memory->TranslateVirtual(SaverestSlot(guest_sp, g)), SaverestCanary(g));
+  }
+  store_and_swap<uint32_t>(memory->TranslateVirtual(guest_sp - 8),
+                           kSaverestRetAddr);
+
+  auto thread_state = std::make_unique<ThreadState>(processor.get(), 0x100,
+                                                    stack_address + stack_size);
+  auto ctx = thread_state->context();
+  ctx->lr = 0;
+  ctx->r[1] = guest_sp;
+  ctx->r[12] = 0;
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    ctx->r[g] = 0;
+  }
+
+  caller_fn->Call(thread_state.get(), kSaverestRetAddr);
+
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    INFO("guest r" << g);
+    REQUIRE(ctx->r[g] == SaverestCanary(g));
+  }
+  // The reloaded LR lands in both r12 and lr, zero-extended from 32 bits.
+  REQUIRE(ctx->r[12] == kSaverestRetAddr);
+  REQUIRE(ctx->lr == kSaverestRetAddr);
+
+  memory->SystemHeapFree(frame_address);
+  memory->SystemHeapFree(stack_address);
+}
+
+// The other half of the restore's branch: when the reloaded LR is *not* the
+// caller's own return address the backend must dispatch to it as a tail call
+// rather than taking the epilogue.  The spilled LR here points at a third
+// guest function, which writes a sentinel so the landing is observable.
+TEST_CASE("PPC_RESTGPRLR_INLINED_TAIL_DISPATCH", "[backend]") {
+  constexpr uint32_t kTailTargetAddr = 0x80002000;
+  constexpr uint64_t kTailSentinel = 0x5A5A1234BEEF0001ull;
+
+  auto memory = std::make_unique<Memory>();
+  memory->Initialize();
+
+  auto backend = CreateBackend();
+  REQUIRE(backend);
+  auto processor = std::make_unique<Processor>(memory.get(), nullptr);
+  processor->Setup(std::move(backend));
+
+  int gen_invocation = 0;
+  Function* helper_fn = nullptr;
+  auto module_owner = std::make_unique<TestModule>(
+      processor.get(), "Test",
+      [](uint32_t address) {
+        return address == kSaverestCallerAddr ||
+               address == kSaverestHelperAddr || address == kTailTargetAddr;
+      },
+      [&](HIRBuilder& b) {
+        switch (gen_invocation++) {
+          case 0:
+            // Helper body; the backend inlines the call so this never runs.
+            b.Return();
+            break;
+          case 1:
+            // Tail-call target: proves the dispatch landed here.
+            StoreGPR(b, 3, b.LoadConstantUint64(kTailSentinel));
+            b.Return();
+            break;
+          default:
+            REQUIRE(helper_fn != nullptr);
+            b.Call(helper_fn, CALL_TAIL);
+            b.Return();
+            break;
+        }
+        return true;
+      },
+      /*skip_cf_simplification=*/true);
+  processor->AddModule(std::move(module_owner));
+  processor->backend()->CommitExecutableRange(kSaverestCallerAddr,
+                                              kTailTargetAddr + 0x1000);
+
+  helper_fn = processor->ResolveFunction(kSaverestHelperAddr);
+  REQUIRE(helper_fn != nullptr);
+  helper_fn->SetSaverest(SaveRestoreType::GPR, /*is_rest=*/true,
+                         kSaverestFirstGpr);
+
+  // Resolve the tail target before the caller so it is in the indirection
+  // table by the time the restore dispatches to it.
+  auto* target_fn = processor->ResolveFunction(kTailTargetAddr);
+  REQUIRE(target_fn != nullptr);
+
+  auto* caller_fn = processor->ResolveFunction(kSaverestCallerAddr);
+  REQUIRE(caller_fn != nullptr);
+
+  uint32_t stack_size = 64 * 1024;
+  uint32_t stack_address = memory->SystemHeapAlloc(stack_size);
+  uint32_t frame_size = 1024;
+  uint32_t frame_address = memory->SystemHeapAlloc(frame_size);
+  uint32_t guest_sp = frame_address + frame_size / 2;
+  std::memset(memory->TranslateVirtual(frame_address), 0, frame_size);
+
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    store_and_swap<uint64_t>(
+        memory->TranslateVirtual(SaverestSlot(guest_sp, g)), SaverestCanary(g));
+  }
+  // Spilled LR differs from the return address passed to Call below, so the
+  // epilogue comparison must fail and the tail dispatch must run.
+  store_and_swap<uint32_t>(memory->TranslateVirtual(guest_sp - 8),
+                           kTailTargetAddr);
+
+  auto thread_state = std::make_unique<ThreadState>(processor.get(), 0x100,
+                                                    stack_address + stack_size);
+  auto ctx = thread_state->context();
+  ctx->lr = 0;
+  ctx->r[1] = guest_sp;
+  ctx->r[3] = 0;
+  ctx->r[12] = 0;
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    ctx->r[g] = 0;
+  }
+
+  caller_fn->Call(thread_state.get(), kSaverestRetAddr);
+
+  // The dispatch landed in the target rather than returning early.
+  REQUIRE(ctx->r[3] == kTailSentinel);
+  for (unsigned g = kSaverestFirstGpr; g <= 31; ++g) {
+    INFO("guest r" << g);
+    REQUIRE(ctx->r[g] == SaverestCanary(g));
+  }
+  REQUIRE(ctx->r[12] == kTailTargetAddr);
+  REQUIRE(ctx->lr == kTailTargetAddr);
+
+  memory->SystemHeapFree(frame_address);
   memory->SystemHeapFree(stack_address);
 }

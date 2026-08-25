@@ -56,10 +56,16 @@ extern "C" {
 DEFINE_bool(ffmpeg_verbose, false, "Verbose FFmpeg output (debug and above)",
             "APU");
 
-DEFINE_bool(use_dedicated_xma_thread, true,
-            "Enables XMA decoding on separate thread. Disabled should produce "
-            "better results, but decrease performance a bit.",
+DEFINE_bool(use_dedicated_xma_thread, false,
+            "Decode XMA on a separate thread.\n"
+            "Off decodes on the guest thread that kicked the context, costing "
+            "that thread the decode but leaving the title's data always "
+            "current.\n"
+            "On returns from the kick before the decode finishes, moving the "
+            "work off the guest thread at the cost of a title that reads its "
+            "context straight afterwards seeing stale data.",
             "APU");
+UPDATE_from_bool(use_dedicated_xma_thread, 2026, 8, 21, 0, true);
 
 DEFINE_string(
     xma_decoder, "new",
@@ -201,17 +207,7 @@ void XmaDecoder::WorkerThreadMain() {
     // Okay, let's loop through XMA contexts to find ones we need to decode!
     bool did_work = false;
     for (uint32_t n = 0; n < kContextCount; n++) {
-      bool worked = contexts_[n]->Work();
-      if (!worked && contexts_[n]->is_enabled() &&
-          !contexts_[n]->is_allocated()) {
-        // Consume a kick on an unallocated context so its kicker is released.
-        contexts_[n]->set_is_enabled(false);
-        worked = true;
-      }
-      if (worked) {
-        contexts_[n]->SignalWorkDone();
-      }
-      did_work = did_work || worked;
+      did_work = contexts_[n]->Work() || did_work;
     }
 
     if (paused_) {
@@ -346,7 +342,6 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
 
     // The context ID is a bit in the range of the entire context array.
     const uint32_t base_context_id = (r - XmaRegister::Context0Kick) * 32;
-    const uint32_t kicked_value = value;
     while (value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
@@ -358,16 +353,6 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     }
     // Signal the decoder thread to start processing.
     work_event_->SetBoostPriority();
-    if (cvars::use_dedicated_xma_thread) {
-      // Block until the worker finishes, so the game sees updated context data.
-      uint32_t remaining = kicked_value;
-      while (remaining) {
-        const uint32_t context_id =
-            base_context_id + std::countr_zero(remaining);
-        contexts_[context_id]->WaitForWorkDone();
-        remaining &= remaining - 1;
-      }
-    }
   } else if (r >= XmaRegister::Context0Lock && r <= XmaRegister::Context9Lock) {
     // Context lock command.
     // This requests a lock by flagging the context.
@@ -376,14 +361,9 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
     while (value) {
       const uint32_t context_id = base_context_id + std::countr_zero(value);
       auto& context = *contexts_[context_id];
-      // The disable may consume a pending kick's enable, release its kicker.
-      const bool consumed_kick = context.is_enabled();
       context.Disable();
       // Ensure the worker isn't mid-processing this context.
       context.Block(false);
-      if (consumed_kick) {
-        context.SignalWorkDone();
-      }
       value &= value - 1;
     }
   } else if (r >= XmaRegister::Context0Clear &&

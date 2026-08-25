@@ -643,7 +643,7 @@ dword_result_t XamGetLanguageTypeface_entry(dword_t language,
   }
   xe::string_util::copy_and_swap_truncating(
       kernel_state()->memory()->TranslateVirtual<char16_t*>(buffer), path,
-      path.size() + 1);
+      buffer_size);
 
   return X_STATUS_SUCCESS;
 }

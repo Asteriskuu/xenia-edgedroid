@@ -1206,6 +1206,18 @@ Value* HIRBuilder::LoadClock() {
   return i->dest;
 }
 
+void HIRBuilder::ClearFpExceptions() {
+  Instr* i = AppendInstr(OPCODE_CLEAR_FP_EXCEPTIONS_info, 0);
+  i->src1.value = i->src2.value = i->src3.value = NULL;
+}
+
+Value* HIRBuilder::LoadFpExceptions() {
+  Instr* i =
+      AppendInstr(OPCODE_LOAD_FP_EXCEPTIONS_info, 0, AllocValue(INT32_TYPE));
+  i->src1.value = i->src2.value = i->src3.value = NULL;
+  return i->dest;
+}
+
 Value* HIRBuilder::AllocLocal(TypeName type) {
   Value* slot = AllocValue(type);
   locals_.push_back(slot);
@@ -1449,26 +1461,10 @@ Value* HIRBuilder::Select(Value* cond, Value* value1, Value* value2) {
   i->set_src3(value2);
   return i->dest;
 }
-static Value* OrLanes32(HIRBuilder& f, Value* value) {
-  hir::Value* v1 = f.Extract(value, (uint8_t)0, INT32_TYPE);
-  hir::Value* v2 = f.Extract(value, (uint8_t)1, INT32_TYPE);
-  hir::Value* v3 = f.Extract(value, (uint8_t)2, INT32_TYPE);
-  hir::Value* ored = f.Or(v1, v2);
-
-  hir::Value* v4 = f.Extract(value, (uint8_t)3, INT32_TYPE);
-  ored = f.Or(ored, v3);
-
-  ored = f.Or(ored, v4);
-  return ored;
-}
 Value* HIRBuilder::IsTrue(Value* value) {
   assert_true(value);
   if (value->type == VEC128_TYPE) {
-    // chrispy: this probably doesnt happen often enough to be worth its own
-    // opcode or special code path but this could be optimized to not require as
-    // many extracts, we can shuffle and or v128 and then extract the low
-
-    return CompareEQ(OrLanes32(*this, value), LoadZeroInt32());
+    return CompareEQ(VectorNoneSet(value), LoadZeroInt8());
   }
 
   if (value->IsConstant()) {
@@ -1482,11 +1478,7 @@ Value* HIRBuilder::IsFalse(Value* value) {
   assert_true(value);
 
   if (value->type == VEC128_TYPE) {
-    // chrispy: this probably doesnt happen often enough to be worth its own
-    // opcode or special code path but this could be optimized to not require as
-    // many extracts, we can shuffle and or v128 and then extract the low
-
-    return CompareEQ(OrLanes32(*this, value), LoadZeroInt32());
+    return VectorNoneSet(value);
   }
 
   if (value->IsConstant()) {
@@ -1494,6 +1486,22 @@ Value* HIRBuilder::IsFalse(Value* value) {
   }
 
   return CompareEQ(value, LoadZero(value->type));
+}
+
+Value* HIRBuilder::VectorAllSet(Value* value) {
+  assert_true(value->type == VEC128_TYPE);
+  Instr* i = AppendInstr(OPCODE_VECTOR_ALL_SET_info, 0, AllocValue(INT8_TYPE));
+  i->set_src1(value);
+  i->src2.value = i->src3.value = NULL;
+  return i->dest;
+}
+
+Value* HIRBuilder::VectorNoneSet(Value* value) {
+  assert_true(value->type == VEC128_TYPE);
+  Instr* i = AppendInstr(OPCODE_VECTOR_NONE_SET_info, 0, AllocValue(INT8_TYPE));
+  i->set_src1(value);
+  i->src2.value = i->src3.value = NULL;
+  return i->dest;
 }
 
 Value* HIRBuilder::IsNan(Value* value) {
@@ -1745,22 +1753,28 @@ Value* HIRBuilder::Div(Value* value1, Value* value2,
   return i->dest;
 }
 
-Value* HIRBuilder::MulAdd(Value* value1, Value* value2, Value* value3) {
+Value* HIRBuilder::MulAdd(Value* value1, Value* value2, Value* value3,
+                          bool negate_result) {
   ASSERT_TYPES_EQUAL(value1, value2);
   ASSERT_TYPES_EQUAL(value1, value3);
 
-  Instr* i = AppendInstr(OPCODE_MUL_ADD_info, 0, AllocValue(value1->type));
+  Instr* i = AppendInstr(OPCODE_MUL_ADD_info,
+                         negate_result ? ARITHMETIC_NEGATE_RESULT : 0,
+                         AllocValue(value1->type));
   i->set_src1(value1);
   i->set_src2(value2);
   i->set_src3(value3);
   return i->dest;
 }
 
-Value* HIRBuilder::MulSub(Value* value1, Value* value2, Value* value3) {
+Value* HIRBuilder::MulSub(Value* value1, Value* value2, Value* value3,
+                          bool negate_result) {
   ASSERT_TYPES_EQUAL(value1, value2);
   ASSERT_TYPES_EQUAL(value1, value3);
 
-  Instr* i = AppendInstr(OPCODE_MUL_SUB_info, 0, AllocValue(value1->type));
+  Instr* i = AppendInstr(OPCODE_MUL_SUB_info,
+                         negate_result ? ARITHMETIC_NEGATE_RESULT : 0,
+                         AllocValue(value1->type));
   i->set_src1(value1);
   i->set_src2(value2);
   i->set_src3(value3);

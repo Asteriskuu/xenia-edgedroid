@@ -50,6 +50,17 @@ enum class ReadbackResolveMode {
 // The readback_resolve_sync cvar makes fast/all copies stall for same-frame
 // coherency instead of running deferred, about a frame behind.
 
+// What a resolve's output should do, decided per resolve by
+// DecideResolveHostCopy.
+enum class ResolveHostCopyAction {
+  // Leave it where the resolve put it, held or not.
+  kSkip,
+  kToGuestRam,
+  // Downscale into a hold snapshot, the scaled resolve buffer cannot be
+  // downscaled from once the release comes around.
+  kToHoldSnapshot,
+};
+
 // Occlusion queries - ZPD report mode.
 enum class ZPDMode {
   kFake,     // Fake sample counts, no real GPU queries (fake)
@@ -155,6 +166,8 @@ class CommandProcessor {
   virtual void InvalidateGpuMemory();
   virtual void ClearReadbackBuffers();
 
+  TraceWriter& trace_writer() { return trace_writer_; }
+
   // Get cached readback resolve mode (avoids string parsing every frame)
   ReadbackResolveMode GetReadbackResolveMode() const {
     return cached_readback_resolve_mode_;
@@ -204,6 +217,10 @@ class CommandProcessor {
   // the CPU, so there is nothing to wait for.
   void AwaitMemexportForFence() {}
   void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {}
+  // Shadowed by backends that hold resolve output in the shared memory buffer
+  // (see command_processor_resolve_readwatch.inc), where a coherency request
+  // naming a held range is what releases it into guest RAM.
+  void NoteResolveCoherency(uint32_t base, uint32_t size, uint32_t status) {}
 
   void RestoreRegisters(uint32_t first_register,
                         const uint32_t* register_values,
@@ -527,6 +544,9 @@ class CommandProcessor {
   }
 
   virtual void InitializeTrace();
+  // Saves the guest output of the frame that was just traced next to the trace
+  // itself, as ground truth for what a replay of it should produce.
+  void WriteTraceFrameScreenshot();
 
   Memory* memory_ = nullptr;
   kernel::KernelState* kernel_state_ = nullptr;
@@ -585,6 +605,9 @@ class CommandProcessor {
   TraceState trace_state_ = TraceState::kDisabled;
   std::filesystem::path trace_stream_path_;
   std::filesystem::path trace_frame_path_;
+  // Full path of the frame trace currently being written, so the reference
+  // screenshot can be saved beside it when the frame closes.
+  std::filesystem::path trace_frame_file_path_;
 
   std::atomic<bool> worker_running_;
   kernel::object_ref<kernel::XHostThread> worker_thread_;

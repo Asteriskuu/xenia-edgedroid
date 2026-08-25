@@ -11,6 +11,7 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/metal/metal_command_processor.h"
 
@@ -19,8 +20,10 @@ namespace gpu {
 namespace metal {
 
 MetalSharedMemory::MetalSharedMemory(MetalCommandProcessor& command_processor,
-                                     Memory& memory)
-    : SharedMemory(memory), command_processor_(command_processor) {}
+                                     Memory& memory, TraceWriter& trace_writer)
+    : SharedMemory(memory),
+      command_processor_(command_processor),
+      trace_writer_(trace_writer) {}
 
 MetalSharedMemory::~MetalSharedMemory() { Shutdown(); }
 
@@ -90,6 +93,7 @@ void MetalSharedMemory::ClearCache() { SharedMemory::ClearCache(); }
 bool MetalSharedMemory::UploadRanges(
     const std::pair<uint32_t, uint32_t>* upload_page_ranges,
     uint32_t num_upload_ranges) {
+  SCOPE_profile_cpu_f("gpu");
   // Copy modified ranges from Xbox memory to Metal buffer when not using
   // bytes-no-copy shared memory.
   if (!buffer_ || num_upload_ranges == 0) {
@@ -135,6 +139,7 @@ bool MetalSharedMemory::UploadRanges(
     if (end > kBufferSize) {
       end = kBufferSize;
     }
+    trace_writer_.WriteMemoryRead(start, end - start);
 
     if (!have_merged) {
       merged_start = start;
@@ -160,6 +165,23 @@ bool MetalSharedMemory::UploadRanges(
   }
 
   return true;
+}
+
+bool MetalSharedMemory::InitializeTraceSubmitDownloads() {
+  PrepareForTraceDownload();
+  return trace_download_page_count() != 0;
+}
+
+void MetalSharedMemory::InitializeTraceCompleteDownloads() {
+  if (buffer_) {
+    const uint8_t* buffer_data =
+        static_cast<const uint8_t*>(buffer_->contents());
+    for (const auto& download_range : trace_download_ranges()) {
+      trace_writer_.WriteMemoryRead(download_range.first, download_range.second,
+                                    buffer_data + download_range.first);
+    }
+  }
+  ReleaseTraceDownloadRanges();
 }
 
 void MetalSharedMemory::Shutdown() {

@@ -66,9 +66,9 @@ Device* VirtualFileSystem::GetDevice(const std::string_view path) {
 bool VirtualFileSystem::RegisterSymbolicLink(const std::string_view path,
                                              const std::string_view target) {
   auto global_lock = global_critical_region_.Acquire();
-  auto it = std::find_if(
-      symlinks_.cbegin(), symlinks_.cend(),
-      [&](const auto& s) { return xe::utf8::equal_case(path, s.first); });
+  auto it = std::ranges::find_if(std::as_const(symlinks_), [&](const auto& s) {
+    return xe::utf8::equal_case(path, s.first);
+  });
   if (it != symlinks_.end()) {
     XELOGE("Trying to re-register already registered symbolic link: {} => {}",
            path, target);
@@ -83,9 +83,9 @@ bool VirtualFileSystem::RegisterSymbolicLink(const std::string_view path,
 
 bool VirtualFileSystem::UnregisterSymbolicLink(const std::string_view path) {
   auto global_lock = global_critical_region_.Acquire();
-  auto it = std::find_if(
-      symlinks_.cbegin(), symlinks_.cend(),
-      [&](const auto& s) { return xe::utf8::equal_case(path, s.first); });
+  auto it = std::ranges::find_if(std::as_const(symlinks_), [&](const auto& s) {
+    return xe::utf8::equal_case(path, s.first);
+  });
   if (it == symlinks_.end()) {
     return false;
   }
@@ -96,18 +96,18 @@ bool VirtualFileSystem::UnregisterSymbolicLink(const std::string_view path) {
 }
 
 bool VirtualFileSystem::IsSymbolicLinkRegistered(const std::string_view path) {
-  auto it = std::find_if(
-      symlinks_.cbegin(), symlinks_.cend(),
-      [&](const auto& s) { return xe::utf8::equal_case(path, s.first); });
+  auto it = std::ranges::find_if(std::as_const(symlinks_), [&](const auto& s) {
+    return xe::utf8::equal_case(path, s.first);
+  });
 
   return it != symlinks_.cend();
 }
 
 bool VirtualFileSystem::FindSymbolicLink(const std::string_view path,
                                          std::string& target) {
-  auto it = std::find_if(
-      symlinks_.cbegin(), symlinks_.cend(),
-      [&](const auto& s) { return xe::utf8::starts_with_case(path, s.first); });
+  auto it = std::ranges::find_if(std::as_const(symlinks_), [&](const auto& s) {
+    return xe::utf8::starts_with_case(path, s.first);
+  });
   if (it == symlinks_.cend()) {
     return false;
   }
@@ -121,7 +121,7 @@ bool VirtualFileSystem::ResolveSymbolicLink(const std::string_view path,
   bool was_resolved = false;
   while (true) {
     auto it =
-        std::find_if(symlinks_.cbegin(), symlinks_.cend(), [&](const auto& s) {
+        std::ranges::find_if(std::as_const(symlinks_), [&](const auto& s) {
           return xe::utf8::starts_with_case(result, s.first);
         });
     if (it == symlinks_.cend()) {

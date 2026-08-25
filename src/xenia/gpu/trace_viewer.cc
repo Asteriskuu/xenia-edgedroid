@@ -134,6 +134,12 @@ bool TraceViewer::Setup() {
     XELOGE("Failed to setup emulator: {:08X}", result);
     return false;
   }
+  // Setup only stores the factories; the graphics system is created here.
+  result = emulator_->SetupSubsystems();
+  if (XFAILED(result)) {
+    XELOGE("Failed to setup emulator subsystems: {:08X}", result);
+    return false;
+  }
   memory_ = emulator_->memory();
   graphics_system_ = emulator_->graphics_system();
 

@@ -626,7 +626,7 @@ void ProfileEditorDialog::OnSave() {
   std::u16string gamertag =
       xe::to_utf16(gamertag_edit_->GetValue().utf8_string());
   string_util::copy_and_swap_truncating(account.gamertag, gamertag,
-                                        sizeof(account.gamertag));
+                                        std::size(account.gamertag));
   account.SetLanguage(static_cast<XLanguage>(
       CurrentValue(language_combo_, LanguageValues(),
                    static_cast<int>(account.GetLanguage()))));

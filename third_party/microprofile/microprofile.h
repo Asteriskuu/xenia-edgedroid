@@ -2081,7 +2081,8 @@ void MicroProfileFlipCpu()
 								MP_ASSERT(nGroup < MICROPROFILE_MAX_GROUPS);
 								pGroupStackPos[nGroup]++;
 								pStack[nStackPos++] = k;
-								pChildTickStack[nStackPos] = 0;
+								if(nStackPos < MICROPROFILE_STACK_MAX)
+									pChildTickStack[nStackPos] = 0;
 
 							}
 							else if(MP_LOG_META == nType)
@@ -2726,7 +2727,7 @@ void MicroProfileDumpCsv(MicroProfileWriteCallback CB, void* Handle, int nMaxFra
 	float fToMsGPU = MicroProfileTickToMsMultiplier(MicroProfileTicksPerSecondGpu());
 
 	MicroProfilePrintf(CB, Handle, "frames,%d\n", nAggregateFrames);
-	MicroProfilePrintf(CB, Handle, "group,name,average,max,callaverage\n");
+	MicroProfilePrintf(CB, Handle, "group,name,average,max,callaverage,exclusiveaverage,exclusivemax,min,total,count\n");
 
 	uint32_t nNumTimers = S.nTotalTimers;
 	uint32_t nBlockSize = 2 * nNumTimers;
@@ -2745,7 +2746,7 @@ void MicroProfileDumpCsv(MicroProfileWriteCallback CB, void* Handle, int nMaxFra
 	for(uint32_t i = 0; i < S.nTotalTimers; ++i)
 	{
 		uint32_t nIdx = i * 2;
-		MicroProfilePrintf(CB, Handle, "\"%s\",\"%s\",%f,%f,%f\n", S.TimerInfo[i].pName, S.GroupInfo[S.TimerInfo[i].nGroupIndex].pName, pAverage[nIdx], pMax[nIdx], pCallAverage[nIdx]);
+		MicroProfilePrintf(CB, Handle, "\"%s\",\"%s\",%f,%f,%f,%f,%f,%f,%f,%u\n", S.TimerInfo[i].pName, S.GroupInfo[S.TimerInfo[i].nGroupIndex].pName, pAverage[nIdx], pMax[nIdx], pCallAverage[nIdx], pAverageExclusive[nIdx], pMaxExclusive[nIdx], pMin[nIdx], pTotal[nIdx], S.Aggregate[i].nCount);
 	}
 
 	MicroProfilePrintf(CB, Handle, "\n\n");
@@ -2819,6 +2820,38 @@ void MicroProfileDumpCsv(MicroProfileWriteCallback CB, void* Handle, int nMaxFra
 		{
 			MicroProfilePrintf(CB, Handle, "\"%s\",%f,%lld,%lld\n",S.MetaCounters[j].pName, S.MetaCounters[j].nSumAggregate / (float)nAggregateFrames, (long long)S.MetaCounters[j].nSumAggregateMax, (long long)S.MetaCounters[j].nSumAggregate);
 		}
+	}
+
+	MicroProfilePrintf(CB, Handle, "\n\n");
+	MicroProfilePrintf(CB, Handle, "Counters\n");//only single frame snapshot
+	MicroProfilePrintf(CB, Handle, "name,value,formatted\n");
+	for(uint32_t i = 0; i < S.nNumCounters; ++i)
+	{
+		//names are stored per level, so walk to the root to spell the full path
+		int nStack[16];
+		int nDepth = 0;
+		for(int nNode = (int)i; nNode >= 0 && nDepth < 16; nNode = S.CounterInfo[nNode].nParent)
+		{
+			nStack[nDepth++] = nNode;
+		}
+		char Path[512];
+		uint32_t nPathLen = 0;
+		while(nDepth-- > 0)
+		{
+			const char* pName = S.CounterInfo[nStack[nDepth]].pName;
+			uint32_t nLen = (uint32_t)strlen(pName);
+			if(nPathLen + nLen + 2 >= sizeof(Path))
+				break;
+			if(nPathLen)
+				Path[nPathLen++] = '/';
+			memcpy(Path + nPathLen, pName, nLen);
+			nPathLen += nLen;
+		}
+		Path[nPathLen] = '\0';
+		int64_t nCounter = S.Counters[i].load();
+		char Formatted[64];
+		MicroProfileFormatCounter(S.CounterInfo[i].eFormat, nCounter, Formatted, sizeof(Formatted)-1);
+		MicroProfilePrintf(CB, Handle, "\"%s\",%lld,\"%s\"\n", Path, (long long)nCounter, Formatted);
 	}
 }
 

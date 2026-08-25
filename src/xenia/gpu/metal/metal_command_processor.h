@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -29,10 +30,14 @@
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/metal/dxil_shader.h"
+#include "xenia/gpu/metal/metal_dxil_binder.h"
 #include "xenia/gpu/metal/metal_primitive_processor.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
+#include "xenia/gpu/metal/metal_shader_converter.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
+#include "xenia/gpu/metal/metal_zpd_visibility_pool.h"
 #include "xenia/gpu/metal/msl_bindings.h"
 #include "xenia/gpu/metal/msl_shader.h"
 #include "xenia/gpu/spirv_shader_translator.h"
@@ -63,14 +68,15 @@ class MetalCommandProcessor : public CommandProcessor {
 
   void TracePlaybackWroteMemory(uint32_t base_ptr, uint32_t length) override;
   void RestoreEdramSnapshot(const void* snapshot) override;
+  void InitializeTrace() override;
   void ClearCaches() override;
   void InvalidateGpuMemory() override;
   void ClearReadbackBuffers() override;
 
   std::string GetTitleStateSuffix() const override;
 
-  // Track memory regions written by IssueCopy (resolve) so trace playback
-  // can skip overwriting them with stale data from the trace file.
+  // Guest memory a resolve or memexport draw wrote from the still-open command
+  // buffer. Cleared once a split puts the writes behind a queue boundary.
   void MarkResolvedMemory(uint32_t base_ptr, uint32_t length);
   bool IsResolvedMemory(uint32_t base_ptr, uint32_t length) const;
   void ClearResolvedMemory();
@@ -89,13 +95,50 @@ class MetalCommandProcessor : public CommandProcessor {
   uint32_t current_draw_index() const { return current_draw_index_; }
   uint64_t GetCurrentSubmission() const;
   uint64_t GetCompletedSubmission() const override;
+  // What a command buffer was created for, to attribute the per-frame count.
+  // Submission kinds name what ended the previous one, since that is what
+  // forced a new submission to be started.
+  enum class CommandBufferKind : uint32_t {
+    kSubmissionOther,
+    kSubmissionCopyToDrawSync,
+    kSubmissionZpdQuery,
+    kSubmissionUniformsRollover,
+    kSubmissionPrimaryBufferEnd,
+    kSubmissionWait,
+    kTextureUploadBatch,
+    kTextureUploadPrivate,
+    kTextureOther,
+    kRenderTargetResolve,
+    kRenderTargetDump,
+    kRenderTargetOther,
+    kCount,
+  };
+
   MTL::CommandBuffer* EnsureCommandBuffer();
+  // Creates a command buffer with GPU time accounting attached. Every command
+  // buffer the backend commits outside the submission one has to come from
+  // here, or its work is missing from gpu_busy_us_per_frame.
+  MTL::CommandBuffer* CreateAccountedCommandBuffer(CommandBufferKind kind);
+  // For one released without ever being committed - its completion handler
+  // will never run, so the accounting has to be released by hand.
+  void DiscardAccountedCommandBuffer(MTL::CommandBuffer* command_buffer,
+                                     CommandBufferKind kind);
   void EndRenderEncoder();
   void ResetRenderEncoderResourceUsage();
   void UseRenderEncoderResource(MTL::Resource* resource,
                                 MTL::ResourceUsage usage);
   void EnsureCommandBufferAutoreleasePool();
   void DrainCommandBufferAutoreleasePool();
+  // Sub-allocates from a command-buffer scoped pool, recycled once the GPU is
+  // done with it.
+  bool AcquireSpirvArgumentBufferSlice(uint32_t bytes, uint32_t alignment,
+                                       MTL::Buffer** buffer_out,
+                                       NS::UInteger* offset_out);
+  const MetalShaderConverter& metal_shader_converter() const {
+    return metal_shader_converter_;
+  }
+  MTL::Buffer* null_buffer() const { return null_buffer_; }
+  MTL::SamplerState* null_sampler() const { return null_sampler_; }
 
   // Get current render pass descriptor (for render target binding)
   MTL::RenderPassDescriptor* GetCurrentRenderPassDescriptor();
@@ -118,6 +161,24 @@ class MetalCommandProcessor : public CommandProcessor {
   // the autorelease pool is drained, preventing hangs from deferred
   // deallocation.
   void PrepareForWait() override;
+  void PollCompletedSubmission() override;
+
+  // ZPD occlusion query backend overrides. Metal has no query pool object:
+  // visibility counting is a render encoder mode writing into an offset of the
+  // pass descriptor's visibility result buffer, so the buffer must be attached
+  // before the encoder is created and a segment can't outlive its encoder.
+  void EnsureZPDQueryResources() override;
+  void ShutdownZPDQueryResources() override;
+  bool IsZPDQueryPoolReady() const override;
+  bool CanOpenZPDQuery() const override;
+  QueryOpenResult OpenZPDQuery(ReportHandle report_handle,
+                               bool can_close_submission) override;
+  bool CloseZPDQuery(ReportHandle report_handle,
+                     uint64_t& out_submission) override;
+  bool DiscardZPDQuery() override;
+  void PumpQueryResolves() override;
+  bool AwaitQueryResolve(ReportHandle report_handle,
+                         uint64_t wait_for_submission) override;
 
   // Use base class WriteRegister - don't override with empty implementation!
   // The base class stores values in register_file_->values[] which we need.
@@ -143,6 +204,13 @@ class MetalCommandProcessor : public CommandProcessor {
       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
       bool primitive_polygonal, bool is_rasterization_done, bool memexport_used,
       uint32_t normalized_color_mask, const RegisterFile& regs);
+  // SPIR-V -> DXIL -> AIR draw path. Resources go through the Metal Shader
+  // Converter argument buffer MetalDxilBinder builds instead of Metal slots.
+  bool IssueDrawDxil(
+      Shader* vertex_shader, Shader* pixel_shader,
+      const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+      bool primitive_polygonal, bool memexport_used,
+      uint32_t normalized_color_mask, const RegisterFile& regs);
   bool IssueCopy() override;
   void WriteRegister(uint32_t index, uint32_t value) override;
 
@@ -152,26 +220,33 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Command buffer management
   void BeginCommandBuffer();
-  void EndCommandBuffer();
+  // next_kind attributes the submission this forces to be started.
+  void EndCommandBuffer(
+      CommandBufferKind next_kind = CommandBufferKind::kSubmissionOther);
   // Reset per-render-encoder cached bindings/state for the SPIRV-Cross (MSL)
   // path. Safe to call when no render encoder is active.
   void ResetMslRenderEncoderStateCache();
   // Reset cross-encoder SPIRV-Cross reuse caches at command-buffer boundaries.
   void ResetMslCrossEncoderReuseCaches();
+  // Drops the cached bindings and states the render target cache's transfer
+  // draws overwrote while sharing the guest's render encoder.
+  void InvalidateRenderEncoderStateAfterDrawPassTransfers(
+      MetalRenderTargetCache::DrawPassTransferEncoderMutationMask mutations);
   bool CanEndSubmissionImmediately();
+  // Blocks until the given submission's command buffer has completed. The
+  // submission must already be committed.
+  void AwaitSubmissionCompletion(uint64_t submission);
+  // Commits the open submission, then blocks until every submission completes.
+  void AwaitAllQueueOperationsCompletion();
+  void AddGpuTimeHandler(MTL::CommandBuffer* command_buffer);
   void WaitForPendingCompletionHandlers();
   void ProcessCompletedSubmissions();
   bool EnsureDrawRingCapacity();
-  void UseRenderEncoderAttachmentHeaps(MTL::RenderPassDescriptor* descriptor);
-  void UseRenderEncoderHeap(MTL::Heap* heap);
   // SPIRV-Cross path: uniforms buffer is command-buffer scoped to avoid
   // CPU writes racing ahead of in-flight GPU reads.
   bool EnsureSpirvUniformBuffer();
   bool EnsureSpirvUniformBufferCapacity();
   void ScheduleSpirvUniformBufferRelease(MTL::CommandBuffer* command_buffer);
-  bool AcquireSpirvArgumentBufferSlice(uint32_t bytes, uint32_t alignment,
-                                       MTL::Buffer** buffer_out,
-                                       NS::UInteger* offset_out);
   void ScheduleSpirvArgumentBufferRelease(MTL::CommandBuffer* command_buffer);
 
   // Fixed-function depth/stencil state (mirrors Vulkan/D3D12 dynamic state).
@@ -179,11 +254,52 @@ class MetalCommandProcessor : public CommandProcessor {
                               reg::RB_DEPTHCONTROL normalized_depth_control);
   void ApplyRasterizerState(bool primitive_polygonal);
 
-  // Constants shared between MSC and SPIRV-Cross paths.
+  // Draw setup shared by both guest shader paths.
+
+  // Makes the vertex fetch and memexport ranges the draw touches resident in
+  // shared memory.
+  bool RequestDrawSharedMemoryRanges(const Shader& vertex_shader,
+                                     const RegisterFile& regs);
+  void ComputeDrawViewportInfo(const RegisterFile& regs,
+                               const Shader* pixel_shader,
+                               reg::RB_DEPTHCONTROL normalized_depth_control,
+                               draw_util::ViewportInfo& viewport_info_out);
+  void ApplyViewportAndScissor(const RegisterFile& regs,
+                               const draw_util::ViewportInfo& viewport_info);
+  // Splits the command buffer when the draw samples memory a pending resolve
+  // wrote, then requests the textures the draw uses. Returns false when the
+  // draw has to be skipped.
+  bool PrepareDrawTextures(uint32_t used_texture_mask,
+                           const RegisterFile& regs);
+  // Refreshes the packed float / bool-loop / fetch constant blobs from the
+  // guest registers, skipping any whose registers and used-constant layout are
+  // unchanged.
+  void UpdateGuestConstantCaches(const Shader* vertex_shader,
+                                 const Shader* pixel_shader,
+                                 const RegisterFile& regs);
+  // What to feed the draw call: the host primitive type, and either an index
+  // buffer or a plain vertex range.
+  struct DrawIndexBuffer {
+    MTL::PrimitiveType primitive_type = MTL::PrimitiveTypeTriangle;
+    uint32_t index_count = 0;
+    bool indexed = false;
+    MTL::IndexType index_type = MTL::IndexTypeUInt16;
+    MTL::Buffer* buffer = nullptr;
+    uint64_t offset = 0;
+  };
+  bool ResolveDrawIndexBuffer(
+      const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+      Shader::HostVertexShaderType host_vertex_shader_type, bool tessellated,
+      DrawIndexBuffer& index_buffer_out);
+
+  // Constants shared between the guest shader paths.
   static constexpr size_t kStageCount = 2;  // Vertex + pixel.
   static constexpr size_t kNullBufferSize = 4096;
   static constexpr size_t kCbvSizeBytes = 4096;
   static constexpr size_t kUniformsBytesPerTable = 6 * kCbvSizeBytes;
+  static constexpr size_t kBoolLoopConstantsSize = (8 + 32) * sizeof(uint32_t);
+  static constexpr size_t kFetchConstantsSize =
+      xenos::kTextureFetchConstantCount * 6 * sizeof(uint32_t);
 
   struct SpirvArgumentBufferPage {
     MTL::Buffer* buffer = nullptr;
@@ -237,13 +353,60 @@ class MetalCommandProcessor : public CommandProcessor {
   bool EnqueueMslShaderCompilation(MslShader::MslTranslation* translation,
                                    bool is_ios, uint8_t priority);
   bool EnqueueMslPipelineCompilation(const MslPipelineCompileRequest& request);
+  // Formats, write masks and blend state, shared by the render and mesh
+  // pipeline descriptors.
+  static void ApplyColorAttachmentState(
+      MTL::RenderPipelineColorAttachmentDescriptorArray* attachments,
+      const MslPipelineCompileRequest& request);
   MTL::RenderPipelineState* CreateMslPipelineState(
       const MslPipelineCompileRequest& request, std::string* error_out);
   void MslShaderCompileThread(size_t thread_index);
+  // Fills a request's attachment formats and blend state from the active render
+  // pass and the registers, returning the pipeline cache key. The translations
+  // only identify the shaders within that key.
+  uint64_t PopulatePipelineCompileRequest(
+      const RegisterFile& regs, const Shader::Translation* vertex_translation,
+      const Shader::Translation* pixel_translation,
+      MslPipelineCompileRequest& request);
   MTL::RenderPipelineState* GetOrCreateMslPipelineState(
       MslShader::MslTranslation* vertex_translation,
       MslShader::MslTranslation* pixel_translation, const RegisterFile& regs,
       MslPipelineCompileStatus* compile_status_out = nullptr);
+
+  // TODO(macos): compile these on the MSL compile threads, which are keyed on
+  // MslShader::MslTranslation today, instead of on the draw thread.
+  DxilShader::DxilTranslation* GetOrCreateDxilTranslation(
+      DxilShader& shader, uint64_t modification);
+  MTL::RenderPipelineState* GetOrCreateDxilPipelineState(
+      DxilShader::DxilTranslation* vertex_translation,
+      DxilShader::DxilTranslation* pixel_translation, const RegisterFile& regs);
+
+  // One MSC stage of a tessellated draw.
+  struct DxilTessellationStage {
+    MTL::Library* library = nullptr;
+    MTL::Function* function = nullptr;
+    std::string function_name;
+    MetalShaderReflection reflection;
+  };
+  // The host vertex and hull shaders linked with one guest domain shader.
+  // Tessellation emulation links all three together, so they are cached as a
+  // unit rather than per stage.
+  struct DxilTessellationShaders {
+    DxilTessellationStage vertex;
+    DxilTessellationStage hull;
+    DxilTessellationStage domain;
+    // Pipelines built from these, keyed by render state.
+    std::unordered_map<uint64_t, MTL::RenderPipelineState*> pipelines;
+  };
+  DxilTessellationShaders* GetOrCreateDxilTessellationShaders(
+      DxilShader& domain_shader, uint64_t domain_modification,
+      xenos::TessellationMode tessellation_mode,
+      Shader::HostVertexShaderType host_vertex_shader_type);
+  MTL::RenderPipelineState* GetOrCreateDxilTessellationPipelineState(
+      DxilTessellationShaders& shaders,
+      DxilShader::DxilTranslation* pixel_translation, const RegisterFile& regs);
+  // MSC's tessellator lookup tables, allocated once and kept resident.
+  bool EnsureTessellatorTablesBuffer();
 
   // Metal device and command queue (from provider)
   MTL::Device* device_ = nullptr;
@@ -263,11 +426,13 @@ class MetalCommandProcessor : public CommandProcessor {
   MTL::RenderCommandEncoder* current_render_encoder_ = nullptr;
   MTL::RenderPassDescriptor* current_render_pass_descriptor_ = nullptr;
   NS::AutoreleasePool* command_buffer_autorelease_pool_ = nullptr;
+  // Whether the descriptor the current encoder was created from carried the
+  // visibility result buffer, so a ZPD segment may be opened on it.
+  bool render_encoder_has_zpd_visibility_ = false;
 
   // Tracks resources marked via useResource for the current render encoder
   // to avoid redundant driver calls across draws within the same encoder.
   std::unordered_map<MTL::Resource*, uint32_t> render_encoder_resource_usage_;
-  std::unordered_set<MTL::Heap*> render_encoder_heap_usage_;
 
   // Shared memory for Xbox 360 memory access
   std::unique_ptr<MetalSharedMemory> shared_memory_;
@@ -291,9 +456,22 @@ class MetalCommandProcessor : public CommandProcessor {
   // Shader ucode disassembly buffer (used by AnalyzeUcode).
   StringBuffer ucode_disasm_buffer_;
 
-  // SPIRV-Cross (MSL) path - shader translator and cache.
+  // The cache holds MslShader or DxilShader depending on the active path; both
+  // derive from SpirvShader and share this translator's output.
   std::unique_ptr<SpirvShaderTranslator> spirv_shader_translator_;
-  std::unordered_map<uint64_t, std::unique_ptr<MslShader>> msl_shader_cache_;
+  std::unordered_map<uint64_t, std::unique_ptr<SpirvShader>>
+      guest_shader_cache_;
+  // Owns the root signature the DXIL shaders are compiled against.
+  MetalShaderConverter metal_shader_converter_;
+  MetalDxilBinder dxil_binder_;
+  std::unordered_map<uint64_t, MTL::RenderPipelineState*> dxil_pipeline_cache_;
+  std::unordered_set<Shader::Translation*> dxil_translation_failed_;
+  // Keyed by domain shader hash, modification, tessellation mode and host
+  // vertex shader type, which together pick all three linked stages.
+  std::unordered_map<uint64_t, std::unique_ptr<DxilTessellationShaders>>
+      dxil_tessellation_cache_;
+  MTL::Buffer* tessellator_tables_buffer_ = nullptr;
+  bool mesh_shader_supported_ = false;
   // Includes user clip planes and tessellation constants.
   SpirvShaderTranslator::SystemConstants spirv_system_constants_ = {};
   struct MslShaderCompileRequest {
@@ -401,8 +579,6 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unordered_map<DepthStencilStateKey, MTL::DepthStencilState*,
                      DepthStencilStateKey::Hasher>
       depth_stencil_state_cache_;
-
-  bool mesh_shader_supported_ = false;
 
   // Texture cache for guest texture uploads
   std::unique_ptr<MetalTextureCache> texture_cache_;
@@ -541,8 +717,53 @@ class MetalCommandProcessor : public CommandProcessor {
 
   std::atomic<uint64_t> completed_command_buffers_{0};
   std::atomic<uint32_t> pending_completion_handlers_{0};
+  // Summed GPU busy time of the completed command buffers, from Metal's own
+  // timestamps rather than the wall clock, so it isn't confounded by whatever
+  // the CPU is doing. Published as a rolling per-frame mean by IssueSwap.
+  std::atomic<uint64_t> completed_gpu_time_ns_{0};
+  uint64_t gpu_time_window_start_ns_ = 0;
+  uint32_t gpu_time_window_frames_ = 0;
+  // Completed command buffers, published per frame beside the busy time - a
+  // sum of per-command-buffer intervals is not readable without it.
+  std::atomic<uint64_t> gpu_time_command_buffers_{0};
+  uint64_t gpu_time_command_buffers_window_start_ = 0;
+  // Created command buffers by kind, to attribute that per-frame count.
+  static constexpr size_t kCommandBufferKindCount =
+      size_t(CommandBufferKind::kCount);
+  uint64_t command_buffer_kind_counts_[kCommandBufferKindCount] = {};
+  uint64_t command_buffer_kind_window_start_[kCommandBufferKindCount] = {};
+  CommandBufferKind next_submission_kind_ = CommandBufferKind::kSubmissionOther;
+  // Each render encoder is a tile store plus an attachment reload on a TBDR
+  // GPU, so the count per frame is comparable against Vulkan's render passes.
+  uint64_t render_passes_total_ = 0;
+  uint64_t render_passes_window_start_ = 0;
   uint64_t submission_current_ = 0;
   uint64_t submission_completed_processed_ = 0;
+  // Signaled by the submission completion handler so waits for a specific
+  // submission don't have to poll.
+  std::mutex completion_mutex_;
+  std::condition_variable completion_cond_;
+
+  // ZPD visibility query state. Metal has no query pool object; each physical
+  // query segment gets one fresh 8-byte offset in the visibility buffer.
+  struct MetalZPDResolve {
+    uint64_t submission = 0;
+    uint32_t index = UINT32_MAX;
+    uint32_t generation = 0;
+    uint32_t scale_area = 1;
+    ReportHandle report_handle = kInvalidReportHandle;
+  };
+  struct MetalZPDActiveQuery {
+    uint32_t index = UINT32_MAX;
+    uint32_t generation = 0;
+    size_t offset = 0;
+
+    bool is_open() const { return index != UINT32_MAX; }
+    void Reset() { *this = {}; }
+  };
+  std::unique_ptr<MetalZPDVisibilityPool> zpd_visibility_pool_;
+  MetalZPDActiveQuery zpd_active_query_;
+  std::deque<MetalZPDResolve> zpd_resolves_in_flight_;
 
   // Draw counter for ring-buffer descriptor heap allocation
   // Each draw uses a different region of the descriptor heap to avoid
@@ -552,13 +773,14 @@ class MetalCommandProcessor : public CommandProcessor {
 
   // Memexport tracking for shared memory invalidation.
   std::vector<draw_util::MemExportRange> memexport_ranges_;
+  // Page tracking so a fence the guest reads can await export output. The
+  // fragment's host/device routing half is unused - Metal has one buffer.
+#include "../command_processor_memexport.inc"
+  void NoteMemexportRangesWritten();
 
   bool gamma_ramp_256_entry_table_up_to_date_ = false;
   bool gamma_ramp_pwl_up_to_date_ = false;
 
-  // Track memory regions written by IssueCopy (resolve) during trace playback.
-  // This prevents the trace player from overwriting resolved data with stale
-  // data from the trace file.
   struct ResolvedRange {
     uint32_t base;
     uint32_t length;

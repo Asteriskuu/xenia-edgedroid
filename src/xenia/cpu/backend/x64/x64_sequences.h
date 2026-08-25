@@ -13,6 +13,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/cpu/hir/instr.h"
 
+#include <string>
 #include <unordered_map>
 #define assert_impossible_sequence(name)          \
   assert_always("impossible sequence hit" #name); \
@@ -46,6 +47,10 @@ static bool Register() {
 
 bool SelectSequence(X64Emitter* e, const hir::Instr* i,
                     const hir::Instr** new_tail);
+
+// Renders a selection key as "OPCODE_NAME dest,src1,src2,src3". Lives here
+// because the key layout belongs to this file's InstrKey.
+std::string FormatSequenceKey(uint64_t key);
 
 }  // namespace x64
 }  // namespace backend

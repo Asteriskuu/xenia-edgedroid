@@ -35,13 +35,13 @@ DEFINE_bool(
 DEFINE_bool(use_50Hz_mode, false, "Enables usage of PAL-50 mode.", "Console");
 
 DEFINE_path(trace_gpu_prefix, "scratch/gpu/",
-            "Prefix path for GPU trace files.", "GPU");
-DEFINE_bool(trace_gpu_stream, false, "Trace all GPU packets.", "GPU");
+            "Prefix path for GPU trace files.", "GPU.Debug");
+DEFINE_bool(trace_gpu_stream, false, "Trace all GPU packets.", "GPU.Debug");
 
 DEFINE_path(
     dump_shaders, "",
     "For shader debugging, path to dump GPU shaders to as they are compiled.",
-    "GPU");
+    "GPU.Debug");
 
 DEFINE_bool(guest_display_refresh_cap, true,
             "Control guest vblank timing.\n"
@@ -83,7 +83,7 @@ DEFINE_bool(
     "Disable filtering between cube map faces near edges where possible "
     "(Vulkan with VK_EXT_non_seamless_cube_map) to reproduce the Direct3D 9 "
     "behavior.",
-    "GPU");
+    "GPU.Debug");
 
 // Extremely bright screen borders in 4D5307E6.
 // Reading between texels with half-pixel offset in 58410954.
@@ -97,7 +97,7 @@ DEFINE_bool(
     "textures, for instance, when they are read between texels rather than "
     "at texel centers, or the leftmost/topmost pixels may not be fully covered "
     "when MSAA is used with fullscreen passes.",
-    "GPU");
+    "GPU.Debug");
 
 DEFINE_int32(occlusion_query_fake_lower_threshold, 80,
              "Lower end of the fake sample count value written on "
@@ -192,7 +192,7 @@ DEFINE_bool(submit_on_primary_buffer_end, true,
 DEFINE_bool(no_discard_stencil_in_transfer_pipelines, false,
             "Skip stencil bit discard in render target transfer pipelines. "
             "May improve performance on some GPUs.",
-            "GPU");
+            "GPU.Debug");
 
 DEFINE_bool(
     async_shader_compilation, true,
@@ -238,11 +238,13 @@ DEFINE_bool(
     "reading back specific pixel values (e.g., for gamma detection).",
     "GPU");
 
-DEFINE_bool(readback_resolve_sync, true,
+DEFINE_bool(readback_resolve_sync, false,
             "Stall the GPU after each readback_resolve copy so guest RAM is "
-            "coherent in "
-            "the same frame, instead of copying asynchronously.",
+            "coherent in the same frame, instead of copying asynchronously.\n"
+            "The copies a guest read actually waits on stall on their own, so "
+            "this only adds a stall for the rest.",
             "GPU");
+UPDATE_from_bool(readback_resolve_sync, 2026, 8, 14, 12, true);
 
 DEFINE_bool(gpu_3d_to_2d_texture, true,
             "Handle shaders that sample 3D textures as 2D by creating a 2D "
@@ -267,3 +269,10 @@ DEFINE_bool(use_fuzzy_alpha_epsilon, false,
             "Use approximate compare for alpha values to prevent flickering on "
             "NVIDIA graphics cards",
             "GPU");
+
+DEFINE_bool(
+    force_depth_clamp, false,
+    "Use host depth clamping instead of near and far plane clipping when "
+    "guest clipping is enabled. X/Y/W clipping is unaffected. On Vulkan, "
+    "this requires depthClamp support.",
+    "GPU");

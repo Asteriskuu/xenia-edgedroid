@@ -28,12 +28,13 @@
 #include "xenia/gpu/shader.h"
 #include "xenia/gpu/xenos.h"
 
+DECLARE_bool(debug_msaa_2x_as_4x);
 DECLARE_bool(depth_transfer_not_equal_test);
+DECLARE_bool(direct_host_resolve);
 DECLARE_bool(depth_float24_round);
 DECLARE_bool(depth_float24_convert_in_pixel_shader);
 DECLARE_bool(draw_resolution_scaled_texture_offsets);
 DECLARE_bool(gamma_render_target_as_unorm16);
-DECLARE_bool(native_2x_msaa);
 DECLARE_bool(native_stencil_value_output);
 DECLARE_bool(snorm16_render_target_full_range);
 
@@ -222,11 +223,19 @@ class RenderTargetCache {
   uint32_t GetLastUpdateBoundRenderTargets(
       uint32_t* depth_and_color_formats_out = nullptr) const;
 
+  // Writes the EDRAM contents into the trace, so a replay starts from the same
+  // state the capture did. Split because the readback goes through the
+  // implementation's submission - Submit records it, Complete maps the result
+  // afterwards. Submit returns whether there is anything for Complete to read.
+  bool InitializeTraceSubmitDownloads();
+  void InitializeTraceCompleteDownloads();
+
  protected:
   RenderTargetCache(const RegisterFile& register_file, const Memory& memory,
                     TraceWriter* trace_writer, uint32_t draw_resolution_scale_x,
                     uint32_t draw_resolution_scale_y)
       : register_file_(register_file),
+        trace_writer_(trace_writer),
         draw_resolution_scale_x_(draw_resolution_scale_x),
         draw_resolution_scale_y_(draw_resolution_scale_y),
         draw_extent_estimator_(register_file, memory, trace_writer) {
@@ -525,6 +534,37 @@ class RenderTargetCache {
       }
       return dispatch_count;
     }
+    uint32_t GetTileCount(uint32_t row_length_used) const {
+      if (!rows) {
+        return 0;
+      }
+      if (rows == 1) {
+        return row_last_end - row_first_start;
+      }
+      return (row_length_used - row_first_start) +
+             (rows - 2) * row_length_used + row_last_end;
+    }
+  };
+
+  // Whether a resolve could read the host render targets straight into shared
+  // memory, skipping the dump to the EDRAM buffer and the copy back out of it,
+  // and if not, what stands in the way.
+  enum class DirectResolveEligibility : uint32_t {
+    kEligible,
+    // The EDRAM buffer holds the real data rather than being resolve scratch.
+    kNotHostRenderTargets,
+    // The copy converts formats, which the direct shaders don't reproduce.
+    kConvertingCopyShader,
+    // The scaled destination layout isn't in the direct shaders.
+    kResolutionScaled,
+    // No render target owns any of the source tiles.
+    kNoOwnership,
+    // A source render target's tile layout differs from the one the resolve
+    // reads EDRAM with, so its bits only line up after the round trip.
+    kSourceLayoutMismatch,
+    // Part of the source span is owned by no render target - the round trip
+    // copies whatever EDRAM already holds there.
+    kPartialOwnership,
   };
 
   virtual uint32_t GetMaxRenderTargetWidth() const = 0;
@@ -602,6 +642,11 @@ class RenderTargetCache {
   bool IsResolveSourceNativeOnly(uint32_t base, uint32_t row_length,
                                  uint32_t rows, uint32_t pitch) const;
 
+  // copy_shader is the one ResolveInfo::GetCopyShader picked for this resolve.
+  DirectResolveEligibility GetDirectResolveEligibility(
+      const draw_util::ResolveInfo& resolve_info,
+      draw_util::ResolveCopyShaderIndex copy_shader) const;
+
   // Sets up the needed render targets and transfers to perform a clear in a
   // resolve operation via a host render target clear. resolve_info is expected
   // to be obtained via draw_util::GetResolveInfo. Returns whether any clears
@@ -626,6 +671,21 @@ class RenderTargetCache {
   RenderTarget* PrepareFullEdram1280xRenderTargetForSnapshotRestoration(
       xenos::ColorRenderTargetFormat color_format);
 
+  // EDRAM snapshot readback, backing InitializeTrace*Downloads. The defaults
+  // leave a backend without snapshot support.
+
+  // Transfers every host render target into the implementation's EDRAM buffer,
+  // only called on the host render target path.
+  virtual void DumpAllRenderTargetsToEdram() {}
+  // Allocates the host-visible destination if needed and records a copy of the
+  // whole EDRAM buffer into it. Returns whether the copy was recorded.
+  virtual bool BeginEdramSnapshotReadback() { return false; }
+  // kEdramSizeBytes of readback data, or nullptr if it can't be mapped. Only
+  // valid once the submission holding the copy has completed.
+  virtual const void* MapEdramSnapshotReadback() { return nullptr; }
+  // Unmaps and releases what BeginEdramSnapshotReadback allocated.
+  virtual void EndEdramSnapshotReadback() {}
+
   // For pixel shader interlock.
 
   virtual void RequestPixelShaderInterlockBarrier() {}
@@ -645,6 +705,7 @@ class RenderTargetCache {
 
  private:
   const RegisterFile& register_file_;
+  TraceWriter* trace_writer_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
 

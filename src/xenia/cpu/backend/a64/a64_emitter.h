@@ -15,9 +15,10 @@
 #include <vector>
 
 #include "xenia/base/arena.h"
+#include "xenia/base/vec128.h"
+#include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/backend/code_cache_base.h"
 #include "xenia/cpu/function.h"
-#include "xenia/cpu/function_trace_data.h"
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/hir/instr.h"
 #include "xenia/cpu/hir/value.h"
@@ -40,7 +41,12 @@ using namespace arm64;
 class A64Backend;
 class A64CodeCache;
 
-enum class FPCRMode : uint32_t { Unknown, Fpu, Vmx };
+// VmxDaz is Vmx with FZ pinned on, for the VMX ops that flush regardless of
+// NJM.
+enum class FPCRMode : uint32_t { Unknown, Fpu, Vmx, VmxDaz };
+inline bool IsVmxFpcrMode(FPCRMode mode) {
+  return mode == FPCRMode::Vmx || mode == FPCRMode::VmxDaz;
+}
 
 // Unfortunately due to the design of xbyak we have to pass this to the ctor.
 class XbyakA64Allocator : public Xbyak_aarch64::Allocator {
@@ -111,6 +117,11 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   void MarkSourceOffset(const hir::Instr* i);
 
+  // Called from SelectSequence once a sequence has emitted. Cheap no-op unless
+  // this function is being counted.
+  void RecordSequenceSample(const hir::Instr* i, uint32_t backend_key,
+                            uint32_t host_bytes);
+
   void DebugBreak();
   void Trap(uint16_t trap_type = 0);
   void UnimplementedInstr(const hir::Instr* i);
@@ -118,6 +129,10 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   void Call(const hir::Instr* instr, GuestFunction* function);
   void CallIndirect(const hir::Instr* instr, int reg_index);
   void CallExtern(const hir::Instr* instr, const Function* function);
+  // Emits a PPC __savegprlr_N/__restgprlr_N helper body inline instead of
+  // calling it. Returns false when the callee is not a GPR saverest helper.
+  bool TryInlinePPCGprLrSaveRestore(const hir::Instr* instr,
+                                    const GuestFunction* function);
   void CallNative(void* fn);
   void CallNativeSafe(void* fn);
   void SetReturnAddress(uint64_t value);
@@ -139,7 +154,7 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   static void HandleStackpointOverflowError(ppc::PPCContext* context);
 
   void ForgetFpcrMode() {
-    if (fpcr_mode_ == FPCRMode::Vmx) {
+    if (IsVmxFpcrMode(fpcr_mode_)) {
       ChangeFpcrMode(FPCRMode::Fpu);
     }
     fpcr_mode_ = FPCRMode::Unknown;
@@ -155,7 +170,9 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   // Emits a cooperative-scheduler preemption safepoint: yields the fiber once
   // the context's preempt_requested flag is raised. Only valid at a block head.
-  void EmitPreemptCheck();
+  // guest_address is stamped into the context for wedge diagnosis when
+  // log_safepoint_pc is on; 0 means unknown.
+  void EmitPreemptCheck(uint32_t guest_address = 0);
 
   // ARM64 conditional branches (cbz/cbnz: ±1 MiB, tbz/tbnz: ±32 KiB,
   // b.cond: ±1 MiB) can fall short of their target in large guest functions.
@@ -163,6 +180,12 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // routing the long branch through unconditional b (±128 MiB). The
   // int64_t-immediate overloads remain available via the using-declarations
   // for hand-tuned thunks that pass literal byte offsets.
+  //
+  // When the target label is already bound (backward branch — e.g. loop
+  // back-edges) the distance is known exactly, so a single direct branch is
+  // emitted whenever it is in range. This halves the hottest branches in
+  // guest code and keeps the natural taken/not-taken polarity for the
+  // branch predictor.
   using Xbyak_aarch64::CodeGenerator::b;
   using Xbyak_aarch64::CodeGenerator::cbnz;
   using Xbyak_aarch64::CodeGenerator::cbz;
@@ -182,8 +205,45 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   void tbnz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
             const Xbyak_aarch64::Label& label);
 
+  // Single-instruction conditional branches for forward targets that are
+  // PROVABLY within range because the label is bound a bounded number of
+  // instructions later within the same sequence/helper emission (e.g.
+  // intra-sequence fast-path skips). Callers must guarantee the bound:
+  // ±1 MiB for b_near/cbz_near/cbnz_near. Backward targets are handled
+  // automatically by the shadows above.
+  void b_near(const Xbyak_aarch64::Cond cond,
+              const Xbyak_aarch64::Label& label) {
+    CodeGenerator::b(cond, label);
+  }
+  void cbz_near(const Xbyak_aarch64::WReg& rt,
+                const Xbyak_aarch64::Label& label) {
+    CodeGenerator::cbz(rt, label);
+  }
+  void cbz_near(const Xbyak_aarch64::XReg& rt,
+                const Xbyak_aarch64::Label& label) {
+    CodeGenerator::cbz(rt, label);
+  }
+  void cbnz_near(const Xbyak_aarch64::WReg& rt,
+                 const Xbyak_aarch64::Label& label) {
+    CodeGenerator::cbnz(rt, label);
+  }
+  void cbnz_near(const Xbyak_aarch64::XReg& rt,
+                 const Xbyak_aarch64::Label& label) {
+    CodeGenerator::cbnz(rt, label);
+  }
+
+  // Shadow of CodeGenerator::L that records the bind offset so later
+  // branches to this label can be emitted in single-instruction form.
+  void L(Xbyak_aarch64::Label& label) {
+    CodeGenerator::L(label);
+    label_bind_offsets_.emplace(label.getId(), getSize());
+  }
+
   // Get or create a xbyak_aarch64 label for a HIR label ID.
   Xbyak_aarch64::Label& GetLabel(uint32_t label_id);
+
+  // Get or create a pool slot for a v128 constant with no immediate form.
+  Xbyak_aarch64::Label& GetV128ConstLabel(const vec128_t& value);
 
   XexModule* GuestModule() { return guest_module_; }
 
@@ -194,6 +254,11 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   // path and a failed compile must run it, or stale labels carry over.
   void ResetPerFunctionState();
   bool Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info);
+
+  // Emit the pending v128 literals, branching over them when code follows.
+  bool FlushV128ConstPool(bool branch_over);
+  // Plant an island, only safe where a branch and data cannot split a sequence.
+  bool MaybeFlushV128ConstPool();
 
  protected:
   Processor* processor_ = nullptr;
@@ -210,7 +275,12 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   FunctionDebugInfo* debug_info_ = nullptr;
   uint32_t debug_info_flags_ = 0;
-  FunctionTraceData* trace_data_ = nullptr;
+  size_t coverage_offset_ = 0;
+  uint32_t coverage_start_address_ = 0;
+  uint32_t coverage_instruction_count_ = 0;
+  uint32_t coverage_current_index_ = UINT32_MAX;
+  bool coverage_out_of_range_ = false;
+  std::vector<SequenceSample> sequence_samples_;
   Arena source_map_arena_;
 
   size_t stack_size_ = 0;
@@ -221,8 +291,42 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   std::vector<TailEmitter> tail_code_;
   std::vector<Xbyak_aarch64::Label*> label_cache_;
 
+  // v128 constants needing a literal, with labels owned by label_cache_.
+  std::vector<std::pair<vec128_t, Xbyak_aarch64::Label*>> v128_consts_;
+  // Code offset of the ldr that opened the pending pool.
+  size_t v128_consts_first_use_ = 0;
+
   // Map from HIR label IDs to xbyak_aarch64 Labels.
   std::unordered_map<uint32_t, Xbyak_aarch64::Label*> label_map_;
+
+  // Byte offsets at which labels were bound (keyed by xbyak label id).
+  // Used to emit short-form backward branches when the distance is known
+  // to be in range. Must be cleared whenever the code generator is reset
+  // (xbyak reuses label ids after reset()).
+  std::unordered_map<int, size_t> label_bind_offsets_;
+
+  // True if `label` is bound at most `max_backward_bytes` behind the
+  // current emission offset.
+  bool IsBoundLabelInRange(const Xbyak_aarch64::Label& label,
+                           int64_t max_backward_bytes) const {
+    const int id = label.getId();
+    if (id == 0) {
+      return false;
+    }
+    const auto it = label_bind_offsets_.find(id);
+    if (it == label_bind_offsets_.end()) {
+      return false;
+    }
+    const int64_t distance =
+        static_cast<int64_t>(it->second) - static_cast<int64_t>(getSize());
+    return distance >= -max_backward_bytes;
+  }
+
+  // Conservative reach limits (exact architectural ranges are ±1 MiB for
+  // b.cond/cbz/cbnz and ±32 KiB for tbz/tbnz; leave one instruction of
+  // margin).
+  static constexpr int64_t kCondBranchBackwardRange = (1ll << 20) - 8;
+  static constexpr int64_t kTestBranchBackwardRange = (1ll << 15) - 8;
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
   bool synchronize_stack_on_next_instruction_ = false;

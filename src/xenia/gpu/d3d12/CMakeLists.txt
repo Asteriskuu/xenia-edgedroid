@@ -8,10 +8,8 @@ target_link_libraries(xenia-gpu-d3d12 PUBLIC
 xe_target_defaults(xenia-gpu-d3d12)
 
 # Guest shaders are sourced exclusively from Mesa spirv_to_dxil (SPIR-V emitted
-# by SpirvShaderTranslator); there is no HLSL guest shader path. spirv_to_dxil
-# is built and linked unconditionally (the D3D12 backend is Windows-only, the
-# only place the Mesa tree is built - see third_party/CMakeLists.txt).
-target_link_libraries(xenia-gpu-d3d12 PUBLIC spirv_to_dxil)
+# by SpirvShaderTranslator); there is no HLSL guest shader path. The wrapper and
+# the spirv_to_dxil link come from xenia-gpu, which shares them with Metal.
 # spirv_shader_translator.h pulls in glslang's SpvBuilder, like the Vulkan and
 # Metal backends, so it needs glslang's include root and symbols.
 target_include_directories(xenia-gpu-d3d12 PRIVATE
@@ -31,8 +29,8 @@ endforeach()
 if(XENIA_BUILD_MISC)
   add_executable(xenia-gpu-d3d12-trace-viewer WIN32
     ${CMAKE_CURRENT_SOURCE_DIR}/d3d12_trace_viewer_main.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_qt.cc
   )
+  xe_windowed_app_main(xenia-gpu-d3d12-trace-viewer)
   target_link_libraries(xenia-gpu-d3d12-trace-viewer PRIVATE
     xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
     xenia-gpu xenia-gpu-d3d12 xenia-hid xenia-hid-nop xenia-hid-portal
@@ -41,6 +39,9 @@ if(XENIA_BUILD_MISC)
   )
   if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-d3d12-trace-viewer PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-d3d12-trace-viewer PRIVATE xenia-cpu-backend-a64)
   endif()
   xe_target_defaults(xenia-gpu-d3d12-trace-viewer)
 
@@ -57,6 +58,9 @@ if(XENIA_BUILD_MISC)
   )
   if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-d3d12-trace-dump PRIVATE xenia-cpu-backend-x64)
+  endif()
+  if(XE_TARGET_AARCH64)
+    target_link_libraries(xenia-gpu-d3d12-trace-dump PRIVATE xenia-cpu-backend-a64)
   endif()
   xe_target_defaults(xenia-gpu-d3d12-trace-dump)
 endif()

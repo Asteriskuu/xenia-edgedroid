@@ -10,13 +10,14 @@
 #ifndef XENIA_CPU_PROCESSOR_H_
 #define XENIA_CPU_PROCESSOR_H_
 
+#include <cstdio>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "xenia/base/cvar.h"
-#include "xenia/base/mapped_memory.h"
 #include "xenia/base/mutex.h"
 #include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/debug_listener.h"
@@ -209,9 +210,39 @@ class Processor {
   bool OnUnhandledException(Exception* ex);
   bool OnThreadBreakpointHit(Exception* ex);
 
-  uint8_t* AllocateFunctionTraceData(size_t size);
+  // Instruction coverage counters live in a per-thread arena so the JIT can
+  // increment them unsynchronized. Every arena shares one layout: a function
+  // reserves an offset here, and each thread holds a private copy at that
+  // offset. Returns GuestFunction::kInvalidCoverageOffset if the arena is
+  // full.
+  size_t AllocateTraceCountsOffset(uint32_t start_address,
+                                   uint32_t instruction_count);
+  uint8_t* AcquireTraceCounts(uint32_t thread_id);
+  void ReleaseTraceCounts(uint8_t* arena);
+  // Starts a fresh capture window. Racing threads may land a count on either
+  // side of this, which does not matter at the scale being measured.
+  void ResetTraceCounts();
+  // Call once a title's config is applied and before its code is translated.
+  void RefreshTraceCountsEnabled();
+  // Handed over by the backend once a function is emitted, so the sequences it
+  // selected can be weighted by how often each guest instruction runs.
+  void RecordSequenceSamples(uint32_t start_address,
+                             std::vector<backend::SequenceSample> samples);
+  bool trace_counts_enabled() const { return trace_counts_enabled_; }
 
  private:
+  // Write the guestcoverage, guestcoveragethreads and guestsequences tables
+  // appended to the profiler's CSV dump. Both require trace_counts_mutex_.
+  void DumpTraceCounts(FILE* f);
+  void DumpSequences(FILE* f);
+
+  // All require trace_counts_mutex_ held.
+  uint8_t* ReserveTraceCountsArenaLocked(uint32_t thread_id);
+  void SetTraceCountsArenaThreadLocked(uint8_t* arena, uint32_t thread_id);
+  bool EnsureTraceCountsFallbackLocked();
+  bool CommitTraceCountsLocked(size_t required);
+  void FoldTraceCountsLocked(uint8_t* arena);
+
   // Synchronously demands a debug listener.
   void DemandDebugListener();
 
@@ -257,9 +288,32 @@ class Processor {
 
   // Which debug features are enabled in generated code.
   uint32_t debug_info_flags_ = 0;
-  // If specified, the file trace data gets written to when running.
-  std::filesystem::path functions_trace_path_;
-  std::unique_ptr<ChunkedMappedMemoryWriter> functions_trace_file_;
+  struct TraceCountsRegion {
+    uint32_t start_address;
+    size_t offset;
+    size_t count;
+    // Counts from threads that have exited, folded in as they go.
+    std::unique_ptr<uint64_t[]> retired;
+    // What the backend emitted for this function, empty until it is compiled.
+    std::vector<backend::SequenceSample> samples;
+  };
+  struct TraceCountsArena {
+    uint8_t* base;
+    // Zero once the owning thread exits, or for the shared fallback.
+    uint32_t thread_id;
+  };
+  uintptr_t trace_counts_dump_section_ = 0;
+  std::mutex trace_counts_mutex_;
+  std::vector<TraceCountsRegion> trace_counts_regions_;
+  // Every arena ever reserved, and the subset free for a new thread to claim.
+  std::vector<TraceCountsArena> trace_counts_arenas_;
+  std::vector<uint8_t*> trace_counts_free_;
+  // Shared by any thread that could not get a private arena.
+  uint8_t* trace_counts_fallback_ = nullptr;
+  bool trace_counts_failed_ = false;
+  bool trace_counts_enabled_ = false;
+  size_t trace_counts_next_offset_ = 0;
+  size_t trace_counts_committed_ = 0;
 
   std::unique_ptr<ppc::PPCFrontend> frontend_;
   std::unique_ptr<backend::Backend> backend_;

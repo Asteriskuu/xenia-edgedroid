@@ -30,6 +30,8 @@
 DECLARE_int64(a64_max_stackpoints);
 DECLARE_bool(a64_enable_host_guest_stack_synchronization);
 
+DECLARE_bool(log_safepoint_pc);
+
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -83,7 +85,15 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
 
   debug_info_ = debug_info;
   debug_info_flags_ = debug_info_flags;
-  trace_data_ = &function->trace_data();
+  coverage_offset_ = function->coverage_offset();
+  coverage_start_address_ = function->address();
+  coverage_instruction_count_ =
+      function->has_end_address()
+          ? (function->end_address() - function->address()) / 4 + 1
+          : 0;
+  coverage_current_index_ = UINT32_MAX;
+  coverage_out_of_range_ = false;
+  sequence_samples_.clear();
 
   current_guest_function_ = function->address();
 
@@ -91,6 +101,7 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
   stack_size_ = StackLayout::GUEST_STACK_SIZE;
   source_map_arena_.Reset();
   tail_code_.clear();
+  label_bind_offsets_.clear();
   fpcr_mode_ = FPCRMode::Unknown;
 
   // The prolog, epilog and helpers emit outside the per-opcode guard below, so
@@ -116,6 +127,12 @@ bool A64Emitter::Emit(GuestFunction* function, hir::HIRBuilder* builder,
 
   // Copy source map.
   source_map_arena_.CloneContents(out_source_map);
+
+  if (!sequence_samples_.empty()) {
+    processor_->RecordSequenceSamples(function->address(),
+                                      std::move(sequence_samples_));
+    sequence_samples_.clear();
+  }
 
   return *out_code_address != nullptr;
 }
@@ -244,6 +261,10 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
       instr = new_tail;
     }
 
+    if (!MaybeFlushV128ConstPool()) {
+      return false;
+    }
+
     block = block->next;
   }
 
@@ -286,8 +307,18 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
              current_guest_function_, e.what());
       return false;
     }
+    if (!MaybeFlushV128ConstPool()) {
+      return false;
+    }
   }
   code_offsets.tail = getSize();
+
+  // ========================================================================
+  // LITERAL POOL
+  // ========================================================================
+  if (!FlushV128ConstPool(false)) {
+    return false;
+  }
 
   // Fill in EmitFunctionInfo metrics.
   assert_zero(code_offsets.prolog);
@@ -331,6 +362,9 @@ void* A64Emitter::Emplace(const EmitFunctionInfo& func_info,
 void A64Emitter::ResetPerFunctionState() {
   reset();
   tail_code_.clear();
+  // reset() restarts xbyak label ids from 1, so recorded bind offsets from
+  // this function must not leak into the next one.
+  label_bind_offsets_.clear();
 
   // Clean up cached labels.
   epilog_label_ = nullptr;
@@ -338,6 +372,8 @@ void A64Emitter::ResetPerFunctionState() {
     delete cached_label;
   }
   label_cache_.clear();
+  v128_consts_.clear();
+  v128_consts_first_use_ = 0;
 
   // Clean up HIR->xbyak label map. HIR label ids restart at each function, so
   // stale entries would hand the next function this one's labels.
@@ -352,6 +388,56 @@ void A64Emitter::MarkSourceOffset(const hir::Instr* i) {
   entry->guest_address = static_cast<uint32_t>(i->src1.offset);
   entry->hir_offset = uint32_t(i->block->ordinal << 16) | i->ordinal;
   entry->code_offset = static_cast<uint32_t>(getSize());
+
+  if ((debug_info_flags_ & DebugInfoFlags::kDebugInfoTraceFunctionCoverage) &&
+      coverage_offset_ != GuestFunction::kInvalidCoverageOffset) {
+    // A source offset is not guaranteed to land inside the range the scanner
+    // reported, and counting outside the reserved slice writes through a wild
+    // displacement into whatever the arena holds next.
+    uint32_t instruction_index =
+        (entry->guest_address - coverage_start_address_) / 4;
+    if (entry->guest_address < coverage_start_address_ ||
+        instruction_index >= coverage_instruction_count_) {
+      coverage_current_index_ = UINT32_MAX;
+      if (!coverage_out_of_range_) {
+        coverage_out_of_range_ = true;
+        XELOGW(
+            "Coverage: {:08X} is outside {:08X} and the {} instructions after "
+            "it, not counting it",
+            entry->guest_address, coverage_start_address_,
+            coverage_instruction_count_);
+      }
+      return;
+    }
+    // Everything emitted from here until the next source offset belongs to
+    // this guest instruction.
+    coverage_current_index_ = instruction_index;
+    const size_t byte_offset =
+        coverage_offset_ + static_cast<size_t>(instruction_index) * 8;
+    // Counters are per thread, so this needs no atomic. x0 and x1 are scratch
+    // and outside gpr_reg_map_ (x22-x28), and this sits on its own
+    // OPCODE_SOURCE_OFFSET instruction, so no HIR value is live in either.
+    //
+    // add rather than adds because NZCV has to survive: a guest compare and
+    // the branch consuming it are separate guest instructions, so a source
+    // offset lands between them.
+    ldr(x0, ptr(GetContextReg(),
+                static_cast<int32_t>(offsetof(ppc::PPCContext, trace_counts))));
+    mov(x1, static_cast<uint64_t>(byte_offset));
+    add(x0, x0, x1);
+    ldr(x1, ptr(x0));
+    add(x1, x1, 1);
+    str(x1, ptr(x0));
+  }
+}
+
+void A64Emitter::RecordSequenceSample(const hir::Instr* i, uint32_t backend_key,
+                                      uint32_t host_bytes) {
+  if (coverage_current_index_ == UINT32_MAX || !host_bytes) {
+    return;
+  }
+  sequence_samples_.push_back({hir::MakeSequenceSampleKey(i, backend_key),
+                               coverage_current_index_, host_bytes});
 }
 
 void A64Emitter::DebugBreak() { brk(0xF000); }
@@ -360,6 +446,10 @@ void A64Emitter::Trap(uint16_t trap_type) { brk(trap_type); }
 
 void A64Emitter::b(const Xbyak_aarch64::Cond cond,
                    const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::b(cond, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::b(static_cast<Xbyak_aarch64::Cond>(cond ^ 1), skip);
   CodeGenerator::b(label);
@@ -368,6 +458,10 @@ void A64Emitter::b(const Xbyak_aarch64::Cond cond,
 
 void A64Emitter::cbz(const Xbyak_aarch64::WReg& rt,
                      const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::cbz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbnz(rt, skip);
   CodeGenerator::b(label);
@@ -376,6 +470,10 @@ void A64Emitter::cbz(const Xbyak_aarch64::WReg& rt,
 
 void A64Emitter::cbz(const Xbyak_aarch64::XReg& rt,
                      const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::cbz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbnz(rt, skip);
   CodeGenerator::b(label);
@@ -384,6 +482,10 @@ void A64Emitter::cbz(const Xbyak_aarch64::XReg& rt,
 
 void A64Emitter::cbnz(const Xbyak_aarch64::WReg& rt,
                       const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::cbnz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbz(rt, skip);
   CodeGenerator::b(label);
@@ -392,6 +494,10 @@ void A64Emitter::cbnz(const Xbyak_aarch64::WReg& rt,
 
 void A64Emitter::cbnz(const Xbyak_aarch64::XReg& rt,
                       const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kCondBranchBackwardRange)) {
+    CodeGenerator::cbnz(rt, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::cbz(rt, skip);
   CodeGenerator::b(label);
@@ -400,6 +506,10 @@ void A64Emitter::cbnz(const Xbyak_aarch64::XReg& rt,
 
 void A64Emitter::tbz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
                      const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kTestBranchBackwardRange)) {
+    CodeGenerator::tbz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbnz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -408,6 +518,10 @@ void A64Emitter::tbz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
 
 void A64Emitter::tbz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
                      const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kTestBranchBackwardRange)) {
+    CodeGenerator::tbz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbnz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -416,6 +530,10 @@ void A64Emitter::tbz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
 
 void A64Emitter::tbnz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
                       const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kTestBranchBackwardRange)) {
+    CodeGenerator::tbnz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -424,6 +542,10 @@ void A64Emitter::tbnz(const Xbyak_aarch64::WReg& rt, uint32_t imm,
 
 void A64Emitter::tbnz(const Xbyak_aarch64::XReg& rt, uint32_t imm,
                       const Xbyak_aarch64::Label& label) {
+  if (IsBoundLabelInRange(label, kTestBranchBackwardRange)) {
+    CodeGenerator::tbnz(rt, imm, label);
+    return;
+  }
   Xbyak_aarch64::Label skip;
   CodeGenerator::tbz(rt, imm, skip);
   CodeGenerator::b(label);
@@ -439,6 +561,10 @@ void A64Emitter::UnimplementedInstr(const hir::Instr* i) {
 void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
   assert_not_null(function);
   ForgetFpcrMode();
+  if (TryInlinePPCGprLrSaveRestore(instr, function)) {
+    return;
+  }
+
   auto fn = static_cast<A64Function*>(function);
 
   if (fn->machine_code()) {
@@ -522,6 +648,77 @@ void A64Emitter::Call(const hir::Instr* instr, GuestFunction* function) {
     blr(x9);
     synchronize_stack_on_next_instruction_ = true;
   }
+}
+
+bool A64Emitter::TryInlinePPCGprLrSaveRestore(const hir::Instr* instr,
+                                              const GuestFunction* function) {
+  if (!function->IsSaverest() ||
+      function->SaverestType() != SaveRestoreType::GPR) {
+    return false;
+  }
+
+  const unsigned first_gpr = function->SaverestIndex();
+  if (first_gpr < 14 || first_gpr > 31) {
+    return false;
+  }
+
+  const bool is_tail_call = (instr->flags & hir::CALL_TAIL) != 0;
+  if ((function->IsSave() && is_tail_call) ||
+      (function->IsRestore() && !is_tail_call)) {
+    return false;
+  }
+
+  // Standard PPC helper layout:
+  //   std/ld rN, -((33 - N) * 8)(r1), N = first_gpr..31
+  //   stw/lwz r12, -8(r1)
+  const uint32_t first_slot_offset = (33 - first_gpr) * 8;
+  const uint32_t lr_slot_offset = (32 - first_gpr) * 8;
+
+  ldr(w14, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
+  if (xe::memory::allocation_granularity() > 0x1000) {
+    // Branch-free: w15 = w14 + 0x1000, keep it only when w14 >= 0xE0000000.
+    mov(w15, 0xE0000000u);
+    cmp(w14, w15);
+    add(w15, w14, 1, 12);  // w15 = w14 + 0x1000 via LSL #12
+    csel(w14, w14, w15, LO);
+  }
+  add(x14, x21, w14, UXTW);
+  sub(x14, x14, first_slot_offset);
+
+  if (function->IsSave()) {
+    for (unsigned guest_reg = first_gpr; guest_reg <= 31; ++guest_reg) {
+      ldr(x15, ptr(x20, static_cast<int32_t>(
+                            offsetof(ppc::PPCContext, r[guest_reg]))));
+      rev(x15, x15);
+      str(x15, ptr(x14, static_cast<uint32_t>((guest_reg - first_gpr) * 8)));
+    }
+
+    ldr(w15, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[12]))));
+    rev(w15, w15);
+    str(w15, ptr(x14, lr_slot_offset));
+    return true;
+  }
+
+  for (unsigned guest_reg = first_gpr; guest_reg <= 31; ++guest_reg) {
+    ldr(x15, ptr(x14, static_cast<uint32_t>((guest_reg - first_gpr) * 8)));
+    rev(x15, x15);
+    str(x15, ptr(x20, static_cast<int32_t>(
+                          offsetof(ppc::PPCContext, r[guest_reg]))));
+  }
+
+  ldr(w16, ptr(x14, lr_slot_offset));
+  rev(w16, w16);
+  str(x16, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[12]))));
+  str(x16, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, lr))));
+
+  // __restgprlr_N returns to the reloaded LR: take our epilogue when it is our
+  // own return address, otherwise tail-call it. CallIndirect emits the
+  // indirection lookup and, for a tail call, the stack teardown and jump.
+  ldr(w15, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_RET_ADDR)));
+  cmp(w16, w15);
+  b(EQ, epilog_label());
+  CallIndirect(instr, 16);
+  return true;
 }
 
 void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
@@ -660,19 +857,40 @@ bool A64Emitter::ChangeFpcrMode(FPCRMode new_mode, bool already_set) {
   if (fpcr_mode_ == new_mode) {
     return false;
   }
+  const FPCRMode old_mode = fpcr_mode_;
   fpcr_mode_ = new_mode;
   if (!already_set) {
     // Load the pre-computed FPCR value from the backend context.
     // This avoids an expensive MRS + read-modify-write cycle.
     auto bctx = GetBackendCtxReg();
+    uint32_t fpcr_offset;
     if (new_mode == FPCRMode::Vmx) {
-      ldr(w0, Xbyak_aarch64::ptr(bctx, static_cast<uint32_t>(offsetof(
-                                           A64BackendContext, fpcr_vmx))));
+      fpcr_offset =
+          static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_vmx));
+    } else if (new_mode == FPCRMode::VmxDaz) {
+      fpcr_offset =
+          static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_vmx_daz));
     } else {
-      ldr(w0, Xbyak_aarch64::ptr(bctx, static_cast<uint32_t>(offsetof(
-                                           A64BackendContext, fpcr_fpu))));
+      fpcr_offset =
+          static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_fpu));
     }
+
+    // SET_NJM only toggles FZ in fpcr_vmx and nothing else writes it, so with
+    // NJM on it already equals fpcr_vmx_daz and the two vmx modes are the same
+    // bits. Skipping then saves the msr, which is the expensive part.
+    const bool vmx_variant_switch =
+        IsVmxFpcrMode(old_mode) && IsVmxFpcrMode(new_mode);
+    Xbyak_aarch64::Label skip;
+    if (vmx_variant_switch) {
+      ldr(w0, Xbyak_aarch64::ptr(bctx, static_cast<uint32_t>(offsetof(
+                                           A64BackendContext, flags))));
+      tbnz(w0, kA64BackendNJMOn, skip);
+    }
+    ldr(w0, Xbyak_aarch64::ptr(bctx, fpcr_offset));
     msr(3, 3, 4, 4, 0, x0);  // msr FPCR, x0
+    if (vmx_variant_switch) {
+      L(skip);
+    }
   }
   return true;
 }
@@ -710,7 +928,7 @@ uint32_t A64Emitter::MapReg(const hir::Value* v, const uint32_t* map, int count,
   return map[index];
 }
 
-void A64Emitter::EmitPreemptCheck() {
+void A64Emitter::EmitPreemptCheck(uint32_t guest_address) {
   // Only safe at a block head, where the per-block register allocator leaves no
   // guest value live and ForgetFpcrMode has already run, so the unannounced
   // guest->host call cannot lose a register or desync the mode tracking.
@@ -734,6 +952,14 @@ void A64Emitter::EmitPreemptCheck() {
     e.blr(e.x9);
     e.b(after);
   });
+  if (cvars::log_safepoint_pc && guest_address) {
+    // Diagnostic only: costs a materialize + store on every loop back-edge, so
+    // it stays off unless a wedge is being chased.
+    static_assert(offsetof(ppc::PPCContext, last_safepoint_pc) < 16384);
+    mov(w9, guest_address);
+    str(w9, ptr(x20, static_cast<uint32_t>(
+                         offsetof(ppc::PPCContext, last_safepoint_pc))));
+  }
   ldrb(w8, ptr(x20, flag_offset));
   cbnz(w8, do_yield);
   L(after);
@@ -747,6 +973,68 @@ Label& A64Emitter::GetLabel(uint32_t label_id) {
   auto* label = new Label();
   label_map_[label_id] = label;
   return *label;
+}
+
+// Half of LDR (literal)'s +-1MB reach, leaving room for the item in flight.
+static constexpr size_t kV128ConstPoolReach = 512 * 1024;
+
+Label& A64Emitter::GetV128ConstLabel(const vec128_t& value) {
+  for (auto& entry : v128_consts_) {
+    if (entry.first == value) {
+      return *entry.second;
+    }
+  }
+  if (v128_consts_.empty()) {
+    v128_consts_first_use_ = getSize();
+  }
+  auto* label = new Label();
+  label_cache_.push_back(label);
+  v128_consts_.emplace_back(value, label);
+  return *label;
+}
+
+bool A64Emitter::FlushV128ConstPool(bool branch_over) {
+  if (v128_consts_.empty()) {
+    return true;
+  }
+  Label* skip = nullptr;
+  if (branch_over) {
+    skip = new Label();
+    label_cache_.push_back(skip);
+    b(*skip);
+  }
+  // Functions start 16-byte aligned in the code cache.
+  while (getSize() % 16) {
+    dd(0);
+  }
+  try {
+    for (auto& entry : v128_consts_) {
+      L(*entry.second);
+      for (int word = 0; word < 4; ++word) {
+        dd(entry.first.u32[word]);
+      }
+    }
+  } catch (const Xbyak_aarch64::Error& e) {
+    XELOGE(
+        "A64: v128 literal pool out of range in guest function {:08X} "
+        "({} constants, {} bytes since the first use): {}",
+        current_guest_function_, v128_consts_.size(),
+        getSize() - v128_consts_first_use_, e.what());
+    return false;
+  }
+  v128_consts_.clear();
+  if (skip) {
+    L(*skip);
+  }
+  return true;
+}
+
+bool A64Emitter::MaybeFlushV128ConstPool() {
+  if (v128_consts_.empty() ||
+      getSize() - v128_consts_first_use_ < kV128ConstPoolReach) {
+    return true;
+  }
+  return FlushV128ConstPool(true);
 }
 
 void A64Emitter::HandleStackpointOverflowError(ppc::PPCContext* context) {
@@ -768,10 +1056,10 @@ void A64Emitter::PushStackpoint() {
   ldr(w9, ptr(x19, static_cast<uint32_t>(
                        offsetof(A64BackendContext, current_stackpoint_depth))));
 
-  // Compute offset into array: x10 = w9 * sizeof(A64BackendStackpoint)
-  mov(w10, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
-  umull(x10, w9, w10);
-  add(x8, x8, x10);
+  // x8 += w9 * sizeof(A64BackendStackpoint) via scaled extended-register add.
+  static_assert(sizeof(A64BackendStackpoint) == 16,
+                "stackpoint indexing relies on a 16-byte element size");
+  add(x8, x8, w9, UXTW, 4);
 
   // Store host SP.
   mov(x10, sp);
@@ -824,7 +1112,8 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
 
   ldr(w16, ptr(x19, static_cast<uint32_t>(offsetof(
                         A64BackendContext, pending_stackpoint_sync_depth))));
-  cbz(w16, return_from_sync);
+  // Bound forward target (adr + b below) — short form is safe.
+  cbz_near(w16, return_from_sync);
 
   auto& sync_label = AddToTail([](A64Emitter& e, Label& lbl) {
     // x8 was set up in the body to point at return_from_sync; do that there

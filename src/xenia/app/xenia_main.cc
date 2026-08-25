@@ -70,12 +70,11 @@
 #endif  // !XE_PLATFORM_ANDROID
 #include "xenia/hid/keyboard/keyboard_hid.h"
 
-#if XE_PLATFORM_WIN32
-#define APU_OPTIONS "[xaudio2, sdl, nop]"
-#define GPU_OPTIONS "[d3d12, vulkan, null]"
+// apu and gpu are defined in emulator.cc, alongside the code that reads them.
+DECLARE_string(apu);
+DECLARE_string(gpu);
+
 #define HID_OPTIONS "[sdl, nop]"
-DEFINE_string(apu, "xaudio2", "Audio system. Use: " APU_OPTIONS, "APU");
-DEFINE_string(gpu, "d3d12", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #elif XE_PLATFORM_LINUX
 #define APU_OPTIONS "[sdl, nop]"
@@ -127,14 +126,9 @@ DEFINE_path(
     "for the OS, will be used.",
     "Storage");
 
-DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
-
-DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
-UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
-
-DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
-            "Storage");
-
+DECLARE_bool(mount_scratch);
+DECLARE_bool(mount_cache);
+DECLARE_bool(mount_memory_unit);
 DECLARE_bool(force_mount_devkit);
 
 // Positional cvar bound to the first non-flag argv entry (see

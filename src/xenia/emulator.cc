@@ -110,14 +110,36 @@ DEFINE_bool(allow_game_relative_writes, false,
             "generating test data to compare with original hardware. ",
             "General");
 
-DECLARE_string(gpu);
-DECLARE_string(apu);
+// SetupSubsystems and MountStandardDrives read these, so they live with the
+// Emulator rather than in xenia_main.cc - the trace dumps, trace viewers and
+// demos all host an Emulator without linking the app.
+#if XE_PLATFORM_WIN32
+#define APU_OPTIONS "[xaudio2, sdl, nop]"
+#define GPU_OPTIONS "[d3d12, vulkan, null]"
+DEFINE_string(apu, "xaudio2", "Audio system. Use: " APU_OPTIONS, "APU");
+DEFINE_string(gpu, "d3d12", "Graphics system. Use: " GPU_OPTIONS, "GPU");
+#elif XE_PLATFORM_MAC
+#define APU_OPTIONS "[sdl, nop]"
+#define GPU_OPTIONS "[metal, vulkan, null]"
+DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
+DEFINE_string(gpu, "metal", "Graphics system. Use: " GPU_OPTIONS, "GPU");
+#else
+#define APU_OPTIONS "[sdl, nop]"
+#define GPU_OPTIONS "[vulkan, null]"
+DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
+DEFINE_string(gpu, "vulkan", "Graphics system. Use: " GPU_OPTIONS, "GPU");
+#endif
 
 DECLARE_bool(allow_plugins);
 
-DECLARE_bool(mount_scratch);
-DECLARE_bool(mount_cache);
-DECLARE_bool(mount_memory_unit);
+DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
+
+DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
+UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
+
+DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
+            "Storage");
+
 DECLARE_bool(force_mount_devkit);
 
 DEFINE_int32(priority_class, 0,
@@ -437,10 +459,12 @@ X_STATUS Emulator::SetupSubsystems() {
 
   if (graphics_system_) {
     XELOGI("{}: Starting graphics_system...", __func__);
+    // Presentation is requested even without a display window - the windowless
+    // presenter is what offscreen hosts like the trace dump capture guest
+    // output through.
     result = graphics_system_->Setup(
         processor_.get(), kernel_state_.get(),
-        display_window_ ? &display_window_->app_context() : nullptr,
-        display_window_ != nullptr);
+        display_window_ ? &display_window_->app_context() : nullptr, true);
     if (result) {
       XELOGE("{}: Failed to setup graphics_system!", __func__);
       return result;
@@ -495,6 +519,10 @@ const std::unique_ptr<vfs::Device> Emulator::CreateVfsDevice(
     const std::filesystem::path& path, const std::string_view mount_path) {
   // Must check if the type has changed e.g. XamSwapDisc
   switch (GetFileSignature(path)) {
+    case FileSignatureType::XEX0:
+    case FileSignatureType::XEXQ:
+    case FileSignatureType::XEXH:
+    case FileSignatureType::XEX25:
     case FileSignatureType::XEX1:
     case FileSignatureType::XEX2:
     case FileSignatureType::ELF: {
@@ -514,6 +542,7 @@ const std::unique_ptr<vfs::Device> Emulator::CreateVfsDevice(
     case FileSignatureType::ZAR: {
       return std::make_unique<vfs::DiscZarchiveDevice>(mount_path, path);
     } break;
+    case FileSignatureType::XBE:
     case FileSignatureType::EXE:
     case FileSignatureType::Unknown:
     default:
@@ -613,6 +642,14 @@ Emulator::FileSignatureType Emulator::GetFileSignature(
   fclose(file);
 
   switch (magic_value) {
+    case xe::cpu::kXEX0Signature:
+      return FileSignatureType::XEX0;
+    case xe::cpu::kXEXQSignature:
+      return FileSignatureType::XEXQ;
+    case xe::cpu::kXEXHSignature:
+      return FileSignatureType::XEXH;
+    case xe::cpu::kXEX25Signature:
+      return FileSignatureType::XEX25;
     case xe::cpu::kXEX1Signature:
       return FileSignatureType::XEX1;
     case xe::cpu::kXEX2Signature:
@@ -625,6 +662,8 @@ Emulator::FileSignatureType Emulator::GetFileSignature(
       return FileSignatureType::PIRS;
     case xe::vfs::kXSFSignature:
       return FileSignatureType::XISO;
+    case xe::cpu::kXBESignature:
+      return FileSignatureType::XBE;
     case xe::cpu::kElfSignature:
       return FileSignatureType::ELF;
     default:
@@ -1951,7 +1990,7 @@ std::string Emulator::RemountAndResolveLaunchPath(
   std::string normalized_path = launch_path;
 #if XE_PLATFORM_LINUX
   // Convert backslashes to forward slashes for consistent paths on Linux
-  std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
+  std::ranges::replace(normalized_path, '\\', '/');
 #endif
 
   // Get the current game:\ symbolic link path
@@ -2047,6 +2086,10 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     return result;
   }
 #endif  // !XE_PLATFORM_ANDROID
+
+  // Per-title config has been applied by now and no guest code has been
+  // translated yet, which is the only window where this can be picked up.
+  processor_->RefreshTraceCountsEnabled();
 
   // Expose the HDD content partition. Games that resolve saves/DLC to a raw
   // \Device\Harddisk0\Partition1\Content path via XamContentResolve open it

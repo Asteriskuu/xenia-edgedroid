@@ -50,6 +50,22 @@
 #include "xenia/base/string_util.h"
 #endif
 
+#if defined(__aarch64__) && defined(__linux__)
+#include <sys/auxv.h>
+
+#include "xenia/base/cvar.h"
+#ifndef HWCAP_EVTSTRM
+#define HWCAP_EVTSTRM (1 << 2)
+#endif
+
+DEFINE_bool(wfe_precise_sleep, false,
+            "ARM64: busy-wait PreciseSleep's sub-millisecond tail on the "
+            "generic-timer event stream (WFE) for exact deadlines. Off by "
+            "default: the spin holds threads on-CPU (~18% in profiling) for "
+            "frame-pacing precision that plain nanosleep matches in practice.",
+            "CPU");
+#endif
+
 #if XE_PLATFORM_LINUX
 // SIGEV_THREAD_ID in timer_create(...) is a Linux extension
 #define XE_HAS_SIGEV_THREAD_ID 1
@@ -212,6 +228,47 @@ void Sleep(std::chrono::microseconds duration) {
 
 void NanoSleep(int64_t duration) { Sleep(std::chrono::nanoseconds(duration)); }
 
+void PreciseSleep(std::chrono::nanoseconds duration) {
+  if (duration.count() <= 0) {
+    return;
+  }
+#if defined(__aarch64__) && defined(__linux__)
+  static const bool use_wfe =
+      cvars::wfe_precise_sleep && (getauxval(AT_HWCAP) & HWCAP_EVTSTRM) != 0;
+  if (use_wfe) {
+    uint64_t freq, now;
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(freq));
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(now));
+    // 128-bit intermediate: at a 1GHz counter the 64-bit product wraps for
+    // durations beyond ~18s, which would silently drop the precise tail.
+    const uint64_t deadline =
+        now +
+        static_cast<uint64_t>(static_cast<unsigned __int128>(duration.count()) *
+                              freq / 1000000000u);
+    // Sleep the bulk conventionally and absorb the scheduler's wakeup error
+    // in the event-stream tail. The tail must exceed the worst wakeup
+    // latency being corrected for; 1.5ms covers CFS + timer slack here.
+    constexpr int64_t kTailNs = 1500000;
+    if (duration.count() > 2 * kTailNs) {
+      Sleep(std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::nanoseconds(duration.count() - kTailNs)));
+    }
+    for (;;) {
+      __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(now));
+      if (now >= deadline) {
+        break;
+      }
+      __asm__ __volatile__("wfe" ::: "memory");
+    }
+    // The old path always crossed a syscall (a de-facto full barrier); keep
+    // that visible-ordering parity on the pure-WFE return.
+    __sync_synchronize();
+    return;
+  }
+#endif
+  Sleep(std::chrono::duration_cast<std::chrono::microseconds>(duration));
+}
+
 void NanoSleepPrecise(int64_t ns) {
 #if XE_PLATFORM_MAC
   // Darwin's nanosleep can oversleep by 100-500us under load. Land precisely
@@ -269,6 +326,39 @@ bool SetTlsValue(TlsHandle handle, uintptr_t value) {
   return pthread_setspecific(handle, reinterpret_cast<void*>(value)) == 0;
 }
 
+// Multi-object waits: each signal bumps a generation and notifies this
+// condvar so WaitMultiple wakes at once; the timeout cap covers a miss.
+static std::mutex g_multi_wait_mutex;
+static std::condition_variable g_multi_wait_cv;
+static std::atomic<uint64_t> g_multi_wait_gen{0};
+static std::atomic<uint32_t> g_multi_waiters{0};
+static void PokeMultiWaiters() {
+  // Bump before reading the count so a waiter that re-checks gen after
+  // registering sees it. Not a guarantee: neither this nor the notify below is
+  // ordered against a waiter mid-park. The waiter's 1ms cap is the real bound.
+  g_multi_wait_gen.fetch_add(1, std::memory_order_release);
+  if (g_multi_waiters.load(std::memory_order_acquire) == 0) {
+    // Nobody is parked, so skip the process-global mutex entirely. This path
+    // runs from the realtime audio callback, where blocking on a lock held by
+    // an ordinary guest thread costs an audio deadline.
+    return;
+  }
+  // Notified without holding the mutex, so a realtime caller never blocks on
+  // it. A wakeup lost to the register/sleep race costs at most the 1ms park
+  // cap the waiter already applies.
+  g_multi_wait_cv.notify_all();
+}
+
+// Scopes the parked-waiter count; a cancelled wait must not leak it.
+struct ScopedMultiWaiter {
+  ScopedMultiWaiter() {
+    g_multi_waiters.fetch_add(1, std::memory_order_release);
+  }
+  ~ScopedMultiWaiter() {
+    g_multi_waiters.fetch_sub(1, std::memory_order_release);
+  }
+};
+
 class PosixConditionBase {
  public:
   PosixConditionBase() {
@@ -309,6 +399,7 @@ class PosixConditionBase {
     if (predicate()) {
       executed = true;
     } else {
+      ScopedParked parked(*this);
       if (timeout == std::chrono::milliseconds::max()) {
         cond_.wait(lock, predicate);
         executed = true;  // Did not time out;
@@ -323,6 +414,46 @@ class PosixConditionBase {
     return WaitResult::kTimeout;
   }
 
+  // The shared condvar is a notify_all, so poking it for an object nobody
+  // multi-waits on wakes every parked thread to re-check handles it does not
+  // care about.
+  void NotifyAll() {
+    // bionic's pthread_cond_broadcast issues the futex syscall even with no
+    // sleeper. Under the cooperative scheduler guest waits are fibers, so
+    // nearly every signal is uncontended and paid a syscall for nothing.
+    // parked_waiters_ is only touched under mutex_, held by every caller.
+    if (parked_waiters_ != 0) {
+      cond_.notify_all();
+    }
+    if (multi_wait_refs_.load(std::memory_order_acquire) != 0) {
+      PokeMultiWaiters();
+    }
+  }
+
+  // Number of parked WaitMultiple threads that include this object.
+  std::atomic<uint32_t> multi_wait_refs_{0};
+
+  // Registers the caller against every handle it is waiting on, so a signal
+  // knows whether waking the shared condvar can possibly help.
+  class MultiWaitRegistration {
+   public:
+    explicit MultiWaitRegistration(
+        const std::vector<PosixConditionBase*>& handles)
+        : handles_(handles) {
+      for (auto* h : handles_) {
+        h->multi_wait_refs_.fetch_add(1, std::memory_order_release);
+      }
+    }
+    ~MultiWaitRegistration() {
+      for (auto* h : handles_) {
+        h->multi_wait_refs_.fetch_sub(1, std::memory_order_release);
+      }
+    }
+
+   private:
+    const std::vector<PosixConditionBase*>& handles_;
+  };
+
   static std::pair<WaitResult, size_t> WaitMultiple(
       std::vector<PosixConditionBase*>&& handles, bool wait_all,
       std::chrono::milliseconds timeout) {
@@ -333,6 +464,8 @@ class PosixConditionBase {
       auto result = handles[0]->Wait(timeout);
       return std::make_pair(result, 0);
     }
+
+    MultiWaitRegistration registration(handles);
 
     // For multiple handles, we need to poll since we can't wait on multiple
     // condition variables simultaneously. This is a limitation of the POSIX
@@ -347,6 +480,8 @@ class PosixConditionBase {
       // Cancellation point, clear of the alloc below.
       pthread_testcancel();
 #endif
+      // Snapshot the gen before checking so a racing signal isn't missed.
+      uint64_t wait_gen = g_multi_wait_gen.load(std::memory_order_acquire);
 
       // Check all handles to see if any/all are signaled.
       // Use try_lock to avoid deadlocks from lock ordering issues.
@@ -437,11 +572,17 @@ class PosixConditionBase {
         return std::make_pair<WaitResult, size_t>(WaitResult::kTimeout, 0);
       }
 
-      // Sleep for a short time before polling again.
+      // Park on the shared condvar (any signal wakes us); 1ms caps a lost poke.
       auto remaining =
           std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
-      auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
-      std::this_thread::sleep_for(sleep_time);
+      auto park = std::min(remaining, std::chrono::milliseconds(1));
+      {
+        ScopedMultiWaiter parked;
+        std::unique_lock<std::mutex> mw_lock(g_multi_wait_mutex);
+        g_multi_wait_cv.wait_for(mw_lock, park, [&] {
+          return g_multi_wait_gen.load(std::memory_order_acquire) != wait_gen;
+        });
+      }
     }
   }
 
@@ -452,6 +593,18 @@ class PosixConditionBase {
  protected:
   [[nodiscard]] inline virtual bool signaled() const = 0;
   inline virtual void post_execution() = 0;
+  // Threads currently inside a cond_ wait on this object. Guarded by mutex_
+  // (the wait sites hold it on both sides of the park, so the counter is
+  // exact whenever NotifyAll reads it).
+  uint32_t parked_waiters_ = 0;
+  // Scopes a cond_ wait for the parked-waiter count.
+  struct ScopedParked {
+    explicit ScopedParked(PosixConditionBase& c) : c_(c) {
+      ++c_.parked_waiters_;
+    }
+    ~ScopedParked() { --c_.parked_waiters_; }
+    PosixConditionBase& c_;
+  };
   std::condition_variable cond_;
   std::mutex mutex_;
 };
@@ -473,7 +626,7 @@ class PosixCondition<Event> : public PosixConditionBase {
   bool Signal() override {
     auto lock = std::unique_lock(mutex_);
     signal_ = true;
-    cond_.notify_all();
+    NotifyAll();
     return true;
   }
 
@@ -511,7 +664,7 @@ class PosixCondition<Semaphore> final : public PosixConditionBase {
       *out_previous_count = count_;
     }
     count_ += release_count;
-    cond_.notify_all();
+    NotifyAll();
     return true;
   }
 
@@ -519,7 +672,7 @@ class PosixCondition<Semaphore> final : public PosixConditionBase {
   [[nodiscard]] bool signaled() const override { return count_ > 0; }
   void post_execution() override {
     count_--;
-    cond_.notify_all();
+    NotifyAll();
   }
   uint32_t count_;
   const uint32_t maximum_count_;
@@ -543,7 +696,7 @@ class PosixCondition<Mutant> final : public PosixConditionBase {
       --count_;
       // Free to be acquired by another thread
       if (count_ == 0) {
-        cond_.notify_all();
+        NotifyAll();
       }
       return true;
     }
@@ -577,7 +730,7 @@ class PosixCondition<Timer> final : public PosixConditionBase {
   bool Signal() override {
     std::lock_guard lock(mutex_);
     signal_ = true;
-    cond_.notify_all();
+    NotifyAll();
     return true;
   }
 
@@ -1127,7 +1280,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
       exit_code_ = exit_code;
       signaled_ = true;
-      cond_.notify_all();
+      NotifyAll();
     }
     if (is_current_thread) {
 #if XE_PLATFORM_MAC && defined(__aarch64__)
@@ -1585,7 +1738,8 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   std::unique_lock lock(thread->handle_.mutex_);
   thread->handle_.exit_code_ = 0;
   thread->handle_.signaled_ = true;
-  thread->handle_.cond_.notify_all();
+  // Not cond_ directly: a WaitMultiple on this thread handle needs the poke.
+  thread->handle_.NotifyAll();
 
   current_thread_ = nullptr;
   return nullptr;

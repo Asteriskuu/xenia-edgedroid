@@ -80,7 +80,9 @@ EMITTER_OPCODE_TABLE(OPCODE_DEBUG_BREAK, DEBUG_BREAK);
 // ============================================================================
 struct CHECK_PREEMPT
     : Sequence<CHECK_PREEMPT, I<OPCODE_CHECK_PREEMPT, VoidOp>> {
-  static void Emit(X64Emitter& e, const EmitArgType&) { e.EmitPreemptCheck(); }
+  static void Emit(X64Emitter& e, const EmitArgType& i) {
+    e.EmitPreemptCheck(uint32_t(i.instr->src1.offset));
+  }
 };
 EMITTER_OPCODE_TABLE(OPCODE_CHECK_PREEMPT, CHECK_PREEMPT);
 

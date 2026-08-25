@@ -229,7 +229,9 @@ std::optional<FileInfo> GetInfo(const std::filesystem::path& path) {
   return std::move(out_info);
 }
 
-std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
+namespace internal {
+
+std::vector<FileInfo> ListFilesUnsorted(const std::filesystem::path& path) {
   std::vector<FileInfo> result;
 
   WIN32_FIND_DATA ffd;
@@ -262,6 +264,8 @@ std::vector<FileInfo> ListFiles(const std::filesystem::path& path) {
 
   return result;
 }
+
+}  // namespace internal
 
 bool SetAttributes(const std::filesystem::path& path, uint64_t attributes) {
   return SetFileAttributes(path.c_str(), static_cast<DWORD>(attributes));

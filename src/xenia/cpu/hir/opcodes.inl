@@ -407,6 +407,17 @@ DEFINE_OPCODE(
     0)
 
 DEFINE_OPCODE(
+    OPCODE_VECTOR_ALL_SET,
+    "vector_all_set",
+    OPCODE_SIG_V_V,
+    0)
+DEFINE_OPCODE(
+    OPCODE_VECTOR_NONE_SET,
+    "vector_none_set",
+    OPCODE_SIG_V_V,
+    0)
+
+DEFINE_OPCODE(
     OPCODE_ADD,
     "add",
     OPCODE_SIG_V_V_V,
@@ -669,6 +680,18 @@ DEFINE_OPCODE(
     "set_rounding_mode",
     OPCODE_SIG_X_V,
     0)
+
+DEFINE_OPCODE(
+    OPCODE_CLEAR_FP_EXCEPTIONS,
+    "clear_fp_exceptions",
+    OPCODE_SIG_X,
+    OPCODE_FLAG_VOLATILE)
+
+DEFINE_OPCODE(
+    OPCODE_LOAD_FP_EXCEPTIONS,
+    "load_fp_exceptions",
+    OPCODE_SIG_V,
+    OPCODE_FLAG_VOLATILE)
 
 DEFINE_OPCODE(
     OPCODE_VECTOR_DENORMFLUSH,

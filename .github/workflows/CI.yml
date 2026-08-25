@@ -7,6 +7,9 @@ on:
       #- 'docs/**'
       #- 'LICENSE'
   pull_request:
+    # ready_for_review is what starts the pipeline for a PR that was opened as
+    # a draft, since the build job below skips while it stays one.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - '*.md'
       - 'docs/**'
@@ -26,6 +29,10 @@ jobs:
   # read-only on its startup write probe.
   build:
     name: Build
+    # Draft PRs don't need the pipeline. Marking one ready re-triggers it.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.draft == false
     permissions:
       contents: read
       actions: write
@@ -110,8 +117,11 @@ jobs:
           fi
 
           # lipo invalidates the linker-applied ad-hoc signature; arm64 will
-          # refuse to launch unsigned, so re-sign ad-hoc.
-          codesign --force --sign - "$arm64_bundle"
+          # refuse to launch unsigned, so re-sign ad-hoc. Re-signing replaces
+          # entitlements rather than preserving them, so pass them again or the
+          # universal build ships without the JIT ones the per-arch builds got.
+          codesign --force --sign - \
+            --entitlements xenia.entitlements "$arm64_bundle"
 
           mkdir -p dmg_contents
           cp -R "$arm64_bundle" dmg_contents/

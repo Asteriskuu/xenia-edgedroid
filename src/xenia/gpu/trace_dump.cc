@@ -35,8 +35,9 @@
 #pragma clang diagnostic pop
 #endif
 
-DEFINE_path(target_trace_file, "", "Specifies the trace file to load.", "GPU");
-DEFINE_path(trace_dump_path, "", "Output path for dumped files.", "GPU");
+DEFINE_path(target_trace_file, "", "Specifies the trace file to load.",
+            "GPU.Debug");
+DEFINE_path(trace_dump_path, "", "Output path for dumped files.", "GPU.Debug");
 
 namespace xe {
 namespace gpu {
@@ -107,6 +108,12 @@ bool TraceDump::Setup() {
       [this]() { return CreateGraphicsSystem(); }, nullptr);
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
+    return false;
+  }
+  // Setup only stores the factories; the graphics system is created here.
+  result = emulator_->SetupSubsystems();
+  if (XFAILED(result)) {
+    XELOGE("Failed to setup emulator subsystems: {:08X}", result);
     return false;
   }
   graphics_system_ = emulator_->graphics_system();

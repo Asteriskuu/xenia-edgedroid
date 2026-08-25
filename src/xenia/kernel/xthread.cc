@@ -211,7 +211,7 @@ static uint8_t GetFakeCpuNumber(uint8_t proc_mask) {
 void XThread::InitializeGuestObject() {
   auto guest_thread = guest_object<X_KTHREAD>();
   auto thread_guest_ptr = guest_object();
-  guest_thread->header.type = X_DISPATCHER_FLAGS::DISPATCHER_THREAD;
+  guest_thread->header.type = X_OBJECT_TYPES::ThreadObject;
   guest_thread->suspend_count =
       (creation_params_.creation_flags & X_CREATE_SUSPENDED) ? 1 : 0;
 
@@ -490,6 +490,8 @@ X_STATUS XThread::Create() {
     if (thread_name_.empty()) {
       set_name(fmt::format("XThread{:04X}", thread_id_));
     }
+    scheduler_links_.profiler_log =
+        xe::Profiler::CreateThreadLog(thread_name_.c_str());
     kernel_state()->guest_scheduler()->EnsureStarted();
     ALOGI("XThread::Create: guest scheduler ensured");
   } else {
@@ -711,6 +713,11 @@ void XThread::ReclaimExited() {
   if (self_reference_dropped_.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
+  // Nothing runs on the fiber again, so no dispatch thread can have its log
+  // installed. Retiring here rather than at the exit yield also covers a
+  // thread terminated before it ever ran.
+  xe::Profiler::RetireThreadLog(scheduler_links_.profiler_log);
+  scheduler_links_.profiler_log = nullptr;
   // The guest may already have dropped its handle while the thread ran.
   if (!handles().empty()) {
     ReleaseHandle();
@@ -1336,12 +1343,18 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
       return X_STATUS_SUCCESS;
     }
     uint64_t deadline = Clock::QueryHostUptimeMillis() + timeout_ms;
+    set_cooperative_wait_shape(CooperativeWaitKind::kDelay, nullptr, 0);
     while (Clock::QueryHostUptimeMillis() < deadline) {
       if (alertable && HasPendingUserApc()) {
+        clear_cooperative_wait_shape();
         return X_STATUS_USER_APC;
       }
-      scheduler->BlockCurrentThread();
+      // Passing the deadline lets the re-poll gate park this fiber until it
+      // expires. Without it the sleep woke every kPollBackoffMs just to
+      // re-check a clock that nothing else can advance.
+      scheduler->BlockCurrentThread(deadline, 0, alertable != 0);
     }
+    clear_cooperative_wait_shape();
     return X_STATUS_SUCCESS;
   }
 

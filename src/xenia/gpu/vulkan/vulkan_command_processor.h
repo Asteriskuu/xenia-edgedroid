@@ -26,6 +26,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/hash.h"
+#include "xenia/base/logging.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -301,6 +302,23 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   void OnGammaRamp256EntryTableValueWritten() override;
   void OnGammaRampPWLValueWritten() override;
+
+  // Copies a held resolve range into guest RAM and waits for it, out of the
+  // shared memory buffer or out of the destination's hold snapshot. Called
+  // from NoteResolveCoherency.
+  void FlushResolveRangeToGuestRam(uint32_t address, uint32_t length,
+                                   bool from_snapshot);
+
+  // Hold snapshot storage for command_processor_resolve_readwatch.inc, which
+  // owns the pool itself.
+  struct ResolveHoldSnapshotBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+  };
+  bool CreateResolveHoldSnapshotBuffer(ResolveHoldSnapshotBuffer& buffer,
+                                       uint32_t size);
+  void DestroyResolveHoldSnapshotBuffer(ResolveHoldSnapshotBuffer& buffer);
+  void PrepareResolveHoldSnapshotEviction();
 
   void IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                  uint32_t frontbuffer_height) override;
@@ -595,6 +613,29 @@ class VulkanCommandProcessor final : public CommandProcessor {
 
   static constexpr uint32_t kMaxFramesInFlight = 3;
   bool frame_open_ = false;
+  // Comparable against the Metal backend's render encoder count: on a TBDR GPU
+  // each one is a tile store plus an attachment reload.
+  uint64_t render_passes_total_ = 0;
+  uint64_t render_passes_window_start_ = 0;
+  uint32_t render_pass_window_frames_ = 0;
+
+  // A timestamp pair per in-flight submission, so the summed GPU busy time is
+  // comparable against the Metal backend's completion-handler figure.
+  static constexpr uint32_t kGpuTimeQuerySubmissions = 8;
+  VkQueryPool gpu_time_query_pool_ = VK_NULL_HANDLE;
+  uint64_t gpu_time_query_submissions_[kGpuTimeQuerySubmissions] = {};
+  uint32_t gpu_time_query_slot_ = 0;
+  uint64_t gpu_time_total_ns_ = 0;
+  // Submissions that found every query slot busy, so their GPU time is missing
+  // from the total.
+  uint64_t gpu_time_untimed_submissions_ = 0;
+  // Window start for the submission count published beside the busy time,
+  // which sums per-submission intervals and misleads without it.
+  uint64_t gpu_time_submissions_window_start_ = 0;
+  uint64_t gpu_time_window_start_ns_ = 0;
+  void CreateGpuTimeQueryPool();
+  void DestroyGpuTimeQueryPool();
+  void CollectCompletedGpuTimeQueries();
   // Guest frame index, since some transient resources can be reused across
   // submissions. Values updated in the beginning of a frame.
   uint64_t frame_current_ = 1;

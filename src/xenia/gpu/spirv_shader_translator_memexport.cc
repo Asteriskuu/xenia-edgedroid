@@ -843,14 +843,18 @@ void SpirvShaderTranslator::ExportToMemory(uint8_t export_eM) {
   // Left-shift the stream base address by 2 to both convert it from dwords to
   // bytes and drop the upper bits.
   spv::Id const_uint_2 = builder_->makeUintConstant(2);
+  // Masked to physical - the guest may use a mirror window.
   spv::Id eM0_address_bytes = builder_->createBinOp(
-      spv::OpIAdd, type_uint_,
+      spv::OpBitwiseAnd, type_uint_,
       builder_->createBinOp(
-          spv::OpShiftLeftLogical, type_uint_,
-          builder_->createCompositeExtract(eA_vector, type_uint_, 0),
-          const_uint_2),
-      builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_, eM0_index,
-                            element_bytes_log2));
+          spv::OpIAdd, type_uint_,
+          builder_->createBinOp(
+              spv::OpShiftLeftLogical, type_uint_,
+              builder_->createCompositeExtract(eA_vector, type_uint_, 0),
+              const_uint_2),
+          builder_->createBinOp(spv::OpShiftLeftLogical, type_uint_, eM0_index,
+                                element_bytes_log2)),
+      builder_->makeUintConstant(0x1FFFFFFF));
 
   // Store based on the element size.
   auto store_needed_eM = [&](std::function<void(uint32_t eM_index)> fn) {

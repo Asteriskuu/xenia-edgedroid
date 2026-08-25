@@ -9,6 +9,7 @@
 
 #include "xenia/kernel/guest_scheduler.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/mutex.h"
+#include "xenia/base/profiling.h"
 #include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
@@ -25,6 +27,13 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
+
+DEFINE_bool(
+    guest_scheduler_stats, false,
+    "Log guest scheduler counters once a second: blocked-waiter re-poll rate, "
+    "fiber switches, forced preemptions, and how long offloaded blocking calls "
+    "queue behind the single I/O worker.",
+    "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -47,6 +56,14 @@ static int ClampPriority(int32_t priority) {
   return priority < 0 ? 0 : (priority > 31 ? 31 : priority);
 }
 
+// Safepoints that may decline to preempt before one is forced through anyway.
+// A guest spinning at DISPATCH_LEVEL passes safepoints at roughly the loop
+// rate, so this is a short wait in wall-clock terms, and the alternative is an
+// unbounded livelock when the holder it spins on is co-resident.
+static constexpr uint32_t kMaxIrqlPreemptDefers = 4096;
+// Reporting threshold for the lock case, which is never forced.
+static constexpr uint32_t kLockPreemptDeferReport = 65536;
+
 // JIT safepoint handler. The cold path cleared the flag, so the deferred
 // cases re-set it to retry at the next safepoint.
 static void PreemptCurrentFiber(void* /*raw_context*/) {
@@ -55,33 +72,80 @@ static void PreemptCurrentFiber(void* /*raw_context*/) {
     return;
   }
   auto* context = self->thread_state()->context();
-  // A co-resident fiber would re-enter the recursive lock on this host thread.
+  auto& links = self->scheduler_links();
+  // A co-resident fiber would re-enter the recursive lock on this host thread,
+  // silently breaking mutual exclusion, so this one is never forced. Report a
+  // fiber stuck here instead - it means guest code is spinning under the global
+  // lock, which the lock's own holder has to resolve.
   if (xe::global_critical_region::is_held_by_current_thread()) {
     context->preempt_requested = 1;
+    if (++links.preempt_defers_lock == kLockPreemptDeferReport) {
+      XELOGW(
+          "GuestScheduler: fiber tid={:08X} '{}' has declined {} preemptions "
+          "holding the global critical region; co-resident fibers cannot run",
+          self->thread_id(), self->thread_name(), kLockPreemptDeferReport);
+    }
     return;
   }
-  // At DISPATCH_LEVEL and above the console masks the decrementer.
+  links.preempt_defers_lock = 0;
+  // At DISPATCH_LEVEL the console masks the decrementer, but it also runs the
+  // lock holder on another core. Here the holder may be a fiber queued behind
+  // this one, so honoring the mask indefinitely livelocks. Defer a bounded
+  // number of times, then switch anyway - IRQL still orders guest APCs.
   auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+  bool forced_at_irql = false;
   if (kpcr->current_irql >= 2) {
-    context->preempt_requested = 1;
-    return;
+    if (++links.preempt_defers_irql < kMaxIrqlPreemptDefers) {
+      context->preempt_requested = 1;
+      return;
+    }
+    forced_at_irql = true;
+    self->kernel_state()->guest_scheduler()->NoteForcedPreempt();
+    if (!links.forced_preempt_logged) {
+      links.forced_preempt_logged = true;
+      XELOGW(
+          "GuestScheduler: forcing preemption of tid={:08X} '{}' at IRQL {} "
+          "after {} declined safepoints (first time for this thread)",
+          self->thread_id(), self->thread_name(), uint32_t(kpcr->current_irql),
+          links.preempt_defers_irql);
+    }
   }
-  // Involuntary quantum end, so no yield to a lower-priority thread.
-  self->kernel_state()->guest_scheduler()->YieldCurrentThread(true, false);
+  links.preempt_defers_irql = 0;
+  // Involuntary quantum end, so no yield to a lower-priority thread - except
+  // on the forced path, where the whole point is to reach a holder the strict
+  // priority order would keep queued behind us.
+  self->kernel_state()->guest_scheduler()->YieldCurrentThread(true,
+                                                              forced_at_irql);
 }
 
 // Raw host ticks per us for the watchdog's deadline math, 0 if unusable.
 static double CalibrateTicksPerUs() {
-  uint64_t qpc_freq = Clock::host_tick_frequency_platform();
-  uint64_t qpc0 = Clock::host_tick_count_platform();
-  uint64_t tsc0 = Clock::host_tick_count_raw();
-  uint64_t qpc_end = qpc0 + qpc_freq / 2000;  // ~0.5 ms
-  while (Clock::host_tick_count_platform() < qpc_end) {
+  // Median of three short samples. A single busy-spin sample can be stretched
+  // by a migration between big and little cores or a DVFS transition mid-loop,
+  // and the accept range below is far too wide to catch a merely skewed one.
+  double samples[3] = {};
+  for (double& sample : samples) {
+    uint64_t qpc_freq = Clock::host_tick_frequency_platform();
+    uint64_t qpc0 = Clock::host_tick_count_platform();
+    uint64_t tsc0 = Clock::host_tick_count_raw();
+    uint64_t qpc_end = qpc0 + qpc_freq / 2000;  // ~0.5 ms
+    while (Clock::host_tick_count_platform() < qpc_end) {
+    }
+    uint64_t qpc1 = Clock::host_tick_count_platform();
+    uint64_t tsc1 = Clock::host_tick_count_raw();
+    double secs = qpc1 > qpc0 ? double(qpc1 - qpc0) / double(qpc_freq) : 0.0;
+    sample = secs > 0.0 ? double(tsc1 - tsc0) / (secs * 1e6) : 0.0;
   }
-  uint64_t qpc1 = Clock::host_tick_count_platform();
-  uint64_t tsc1 = Clock::host_tick_count_raw();
-  double secs = qpc1 > qpc0 ? double(qpc1 - qpc0) / double(qpc_freq) : 0.0;
-  double per_us = secs > 0.0 ? double(tsc1 - tsc0) / (secs * 1e6) : 0.0;
+  if (samples[0] > samples[1]) {
+    std::swap(samples[0], samples[1]);
+  }
+  if (samples[1] > samples[2]) {
+    std::swap(samples[1], samples[2]);
+  }
+  if (samples[0] > samples[1]) {
+    std::swap(samples[0], samples[1]);
+  }
+  double per_us = samples[1];
   // Spans an x86 TSC at 1-6 GHz and an ARM64 generic timer at 1-100 MHz.
   if (per_us < 0.5 || per_us > 100000.0) {
     return 0.0;
@@ -97,7 +161,10 @@ GuestScheduler::~GuestScheduler() { Shutdown(); }
 bool GuestScheduler::enabled() { return cvars::guest_scheduler; }
 
 int GuestScheduler::DispatchCpuOf(uint8_t guest_cpu) const {
-  return guest_cpu >= kMaxCpus ? 0 : guest_cpu;
+  // Wrap rather than fold to 0: an out-of-range guest CPU is already unusual,
+  // and folding every one of them onto CPU 0 stacks them on the dispatch
+  // thread the main thread already uses.
+  return guest_cpu % kMaxCpus;
 }
 
 int GuestScheduler::CpuOf(XThread* thread) const {
@@ -112,6 +179,7 @@ void GuestScheduler::EnsureStarted() {
   xe::cpu::backend::preempt_yield_handler = &PreemptCurrentFiber;
   // Not in the ctor, which runs before per-title cvar overrides are applied.
   double ticks_per_us = CalibrateTicksPerUs();
+  ticks_per_us_ = ticks_per_us;
   quantum_ticks_ =
       static_cast<uint64_t>(ticks_per_us * cvars::guest_scheduler_quantum_us);
   if (quantum_ticks_) {
@@ -597,12 +665,23 @@ void GuestScheduler::SwitchTo(XThread* next) {
     }
     cpus_[t_current_cpu].quantum_deadline_tick = links.quantum_deadline_tick;
   }
+  stats_.switches.fetch_add(1, std::memory_order_relaxed);
   XThread::SetCurrentThread(next);
   next->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_RUNNING;
   // A flag raised while this fiber was off-CPU is stale, the dispatcher
   // already served it. A raise racing this clear is restored by the watchdog.
   next->thread_state()->context()->preempt_requested = 0;
+  // The profiler keys its scope stack by host thread, so without this every
+  // fiber dispatched here would nest its scopes inside whichever one ran
+  // before it. A yield resumes this line, so the restore below pairs with it.
+  // With no log of its own the fiber shares this dispatch thread's, which
+  // misattributes but still records.
+  void* fiber_log = links.profiler_log;
+  void* dispatch_log = fiber_log ? Profiler::SwapThreadLog(fiber_log) : nullptr;
   next->fiber()->SwitchTo();
+  if (fiber_log) {
+    Profiler::SwapThreadLog(dispatch_log);
+  }
   // Back on the idle fiber.
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -780,11 +859,14 @@ void GuestScheduler::WaitOnFence(xe::threading::Fence& fence) {
     return;
   }
   auto* scheduler = self->kernel_state()->guest_scheduler();
+  self->set_cooperative_wait_shape(XThread::CooperativeWaitKind::kFence,
+                                   nullptr, 0);
   while (!fence.TryWait()) {
     // The signaler touches the fence on this stack, terminate must not free
     // it.
     scheduler->BlockCurrentThread(0, 0, false, false);
   }
+  self->clear_cooperative_wait_shape();
 }
 
 void GuestScheduler::RunBlockingHostCallOffloaded(
@@ -792,18 +874,28 @@ void GuestScheduler::RunBlockingHostCallOffloaded(
   EnsureIoWorker();
   BlockingCall call;
   call.fn = &fn;
+  call.queued_ns = Clock::host_tick_count_raw();
   {
     std::lock_guard<std::mutex> lock(io_lock_);
     io_queue_.push(&call);
   }
   io_event_->Set();
+  XThread* self = XThread::GetCurrentFiberThread();
+  if (self) {
+    self->set_cooperative_wait_shape(XThread::CooperativeWaitKind::kIoOffload,
+                                     nullptr, 0);
+  }
   while (!call.done.load(std::memory_order_acquire)) {
     // The worker writes |call| on this stack, terminate must not free it.
     BlockCurrentThread(0, 0, false, false);
   }
+  if (self) {
+    self->clear_cooperative_wait_shape();
+  }
 }
 
 void GuestScheduler::IoWorkerLoop() {
+  Profiler::ThreadEnter("GuestScheduler IO");
   while (!shutting_down_.load()) {
     BlockingCall* call = nullptr;
     {
@@ -817,7 +909,19 @@ void GuestScheduler::IoWorkerLoop() {
       xe::threading::Wait(io_event_.get(), false);
       continue;
     }
+    uint64_t started = Clock::host_tick_count_raw();
     (*call->fn)();
+    uint64_t finished = Clock::host_tick_count_raw();
+    // Raw ticks, converted only at report time.
+    uint64_t queued_for = started - call->queued_ns;
+    stats_.io_calls.fetch_add(1, std::memory_order_relaxed);
+    stats_.io_queue_ns.fetch_add(queued_for, std::memory_order_relaxed);
+    stats_.io_run_ns.fetch_add(finished - started, std::memory_order_relaxed);
+    uint64_t prev_max = stats_.io_queue_max_ns.load(std::memory_order_relaxed);
+    while (queued_for > prev_max &&
+           !stats_.io_queue_max_ns.compare_exchange_weak(
+               prev_max, queued_for, std::memory_order_relaxed)) {
+    }
     call->done.store(true, std::memory_order_release);
     // Wake the parked caller instead of leaving it to the backoff timer.
     WakeAll();
@@ -832,7 +936,7 @@ void GuestScheduler::WakeAll() {
   // most one backoff interval.
   bool any_blocked = false;
   for (int i = 0; i < kMaxCpus; ++i) {
-    if (cpus_[i].has_blocked.load(std::memory_order_relaxed)) {
+    if (cpus_[i].has_blocked.load()) {
       any_blocked = true;
       break;
     }
@@ -862,6 +966,70 @@ void GuestScheduler::WakeAll() {
   for (int i = 0; i < kMaxCpus; ++i) {
     if (cpus_[i].has_blocked.load(std::memory_order_relaxed) &&
         cpus_[i].parked.load() && cpus_[i].ready_event) {
+      cpus_[i].ready_event->Set();
+    }
+  }
+}
+
+void GuestScheduler::WakeForSignal(const XObject* object) {
+  if (!started_.load()) {
+    return;
+  }
+  bool any_blocked = false;
+  for (int i = 0; i < kMaxCpus; ++i) {
+    if (cpus_[i].has_blocked.load()) {
+      any_blocked = true;
+      break;
+    }
+  }
+  if (!any_blocked) {
+    return;
+  }
+  bool wake[kMaxCpus] = {};
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    // Wake the CPUs hosting a waiter whose wait includes this object. The
+    // walk is bounded by the blocked population, which the empty-yield fast
+    // path keeps small.
+    for (int i = 0; i < kMaxCpus; ++i) {
+      Cpu& cpu = cpus_[i];
+      if (!cpu.blocked_head) {
+        continue;
+      }
+      bool any_watcher = false;
+      int watcher_prio = 0;
+      for (XThread* t = cpu.blocked_head; t;
+           t = t->scheduler_links().ready_next) {
+        auto& links = t->scheduler_links();
+        bool watches = t->cooperative_wait_object() == object;
+        if (!watches) {
+          for (uint8_t j = 0; j < links.wait_gate_count; ++j) {
+            if (links.wait_gate_objects[j] == object) {
+              watches = true;
+              break;
+            }
+          }
+        }
+        if (watches) {
+          int prio = ClampPriority(t->priority());
+          watcher_prio = any_watcher ? std::max(watcher_prio, prio) : prio;
+          any_watcher = true;
+        }
+      }
+      if (!any_watcher) {
+        continue;
+      }
+      cpu.repoll_now.store(true, std::memory_order_relaxed);
+      XThread* running = cpu.current_thread;
+      if (running && watcher_prio > ClampPriority(running->priority())) {
+        running->scheduler_links().preempted = true;
+        running->thread_state()->context()->preempt_requested = 1;
+      }
+      wake[i] = true;
+    }
+  }
+  for (int i = 0; i < kMaxCpus; ++i) {
+    if (wake[i] && cpus_[i].parked.load() && cpus_[i].ready_event) {
       cpus_[i].ready_event->Set();
     }
   }
@@ -903,9 +1071,43 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
       default:
         break;
     }
+  } else if (self->cooperative_wait_set_count()) {
+    // Multi-wait: gated on the summed epoch of its whole set. Without this it
+    // re-readied on every pass, which is most of the scheduler's churn in
+    // titles that park worker pools on WaitForMultipleObjects.
+    gated = true;
+  } else if (deadline_ms && !alertable &&
+             static_cast<XThread::CooperativeWaitKind>(
+                 self->scheduler_links().wait_kind) ==
+                 XThread::CooperativeWaitKind::kDelay) {
+    // Pure timed sleep: only the clock can end it, so park until the deadline
+    // instead of waking every kPollBackoffMs. Keyed to the delay wait kind -
+    // a timed wait whose objects could not be tracked (a 9+ object
+    // WaitMultiple) also arrives here objectless with a deadline, and gating
+    // that would leave its signals unseen until the deadline or backstop.
+    gated = true;
   }
   {
     std::lock_guard<std::mutex> lock(lock_);
+    // A signal between the caller's failed poll and this park bumped the epoch
+    // but walked the blocked list before we joined it, so nothing would re-poll
+    // us before the backstop. Compare under the walk's own lock and poke this
+    // CPU on a mismatch; returning to re-poll instead livelocks when the epoch
+    // churns faster than a park roundtrip.
+    if (gated) {
+      uint32_t epoch_now = 0;
+      bool epoch_gated = false;
+      if (wait_object) {
+        epoch_now = wait_object->cooperative_signal_epoch();
+        epoch_gated = true;
+      } else if (self->cooperative_wait_set_count()) {
+        epoch_now = self->cooperative_wait_set_epoch();
+        epoch_gated = true;
+      }
+      if (epoch_gated && epoch_now != wait_epoch) {
+        cpus_[cpu_index].repoll_now.store(true, std::memory_order_relaxed);
+      }
+    }
     auto& links = self->scheduler_links();
     // Park self (running, in no list) on this CPU's blocked list.
     links.blocked = true;
@@ -936,7 +1138,9 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
     if (due && due < cpu.next_timed_repoll_ms) {
       cpu.next_timed_repoll_ms = due;
     }
-    cpu.has_blocked.store(true, std::memory_order_relaxed);
+    // seq_cst pairs with the wake pre-filters' loads: epoch-read-then-store
+    // here vs bump-then-load there, so at least one side always sees the other.
+    cpu.has_blocked.store(true);
   }
   self->guest_object<X_KTHREAD>()->thread_state = KTHREAD_STATE_WAITING;
   YieldToScheduler();
@@ -948,6 +1152,7 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
 
 void GuestScheduler::RereadyBlocked(int cpu_index) {
   uint32_t wake_mask = 0;
+  stats_.repolls.fetch_add(1, std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> lock(lock_);
     Cpu& cpu = cpus_[cpu_index];
@@ -969,8 +1174,19 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
       XThread* next = links.ready_next;
       // Skip a gated waiter whose wait cannot have resolved yet.
       if (links.wait_gated && !force_all) {
+        // Three gate kinds: a single object's epoch, a multi-wait's summed
+        // epoch, or (neither) a pure timed sleep that only the deadline below
+        // can resolve.
         XObject* obj = t->cooperative_wait_object();
-        if (obj && obj->cooperative_signal_epoch() == links.wait_epoch &&
+        bool may_have_resolved = false;
+        if (obj) {
+          may_have_resolved =
+              obj->cooperative_signal_epoch() != links.wait_epoch;
+        } else if (links.wait_gate_count) {
+          may_have_resolved =
+              t->cooperative_wait_set_epoch() != links.wait_epoch;
+        }
+        if (!may_have_resolved &&
             !(links.wait_deadline_ms && now_ms >= links.wait_deadline_ms) &&
             !(links.wait_alertable && t->HasPendingUserApc())) {
           links.ready_next = nullptr;
@@ -992,6 +1208,7 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
       }
       links.blocked = false;
       links.queued = true;
+      stats_.rereadied.fetch_add(1, std::memory_order_relaxed);
       // Its current guest CPU, not the one it blocked on, since
       // KeSetAffinityThread may have moved it while blocked.
       int target = CpuOf(t);
@@ -1021,12 +1238,17 @@ void GuestScheduler::RereadyBlocked(int cpu_index) {
 
 void GuestScheduler::RunLoop(int cpu_index) {
   t_current_cpu = cpu_index;
+  Profiler::ThreadEnter(
+      ("GuestScheduler CPU " + std::to_string(cpu_index)).c_str());
   Cpu& cpu = cpus_[cpu_index];
   // Adopt this host thread's stack as this CPU's idle fiber.
   cpu.idle_fiber = xe::threading::Fiber::CreateFromThread();
   XELOGI("GuestScheduler: CPU {} dispatch loop started", cpu_index);
 
   while (!shutting_down_.load()) {
+    if (cpu_index == 0) {
+      ReportStatsIfDue();
+    }
     // Re-poll blocked waiters on a timer even while other fibers run, or a
     // busy fiber that rarely waits would starve them. The timer runs at what
     // the parked waiters actually need, a wake skips it entirely.
@@ -1118,22 +1340,221 @@ void GuestScheduler::RunLoop(int cpu_index) {
     xe::threading::Wait(cpu.ready_event.get(), false,
                         std::chrono::milliseconds(sleep_ms));
     cpu.parked.store(false);
+    stats_.idle_wakes.fetch_add(1, std::memory_order_relaxed);
   }
   XELOGI("GuestScheduler: CPU {} dispatch loop exited (shutting_down={})",
          cpu_index, shutting_down_.load());
 }
 
+void GuestScheduler::NoteForcedPreempt() {
+  stats_.forced_preempts.fetch_add(1, std::memory_order_relaxed);
+}
+
+void GuestScheduler::ReportStatsIfDue() {
+  if (!cvars::guest_scheduler_stats) {
+    return;
+  }
+  uint64_t now_ms = Clock::QueryHostUptimeMillis();
+  if (now_ms - stats_last_report_ms_ < 1000) {
+    return;
+  }
+  stats_last_report_ms_ = now_ms;
+  auto take = [](std::atomic<uint64_t>& v) {
+    return v.exchange(0, std::memory_order_relaxed);
+  };
+  uint64_t repolls = take(stats_.repolls);
+  uint64_t rereadied = take(stats_.rereadied);
+  uint64_t idle_wakes = take(stats_.idle_wakes);
+  uint64_t switches = take(stats_.switches);
+  uint64_t forced = take(stats_.forced_preempts);
+  uint64_t io_calls = take(stats_.io_calls);
+  uint64_t io_queue = take(stats_.io_queue_ns);
+  uint64_t io_run = take(stats_.io_run_ns);
+  uint64_t io_queue_max = take(stats_.io_queue_max_ns);
+  double ticks_per_us = ticks_per_us_ > 0.0 ? ticks_per_us_ : 1.0;
+  auto to_us = [ticks_per_us](uint64_t ticks) {
+    return uint64_t(double(ticks) / ticks_per_us);
+  };
+  XELOGI(
+      "GuestScheduler: repolls {}/s (rereadied {}), idle wakes {}, switches "
+      "{}, forced preempts {} | io {} calls, queued avg {} us max {} us, ran "
+      "avg {} us",
+      repolls, rereadied, idle_wakes, switches, forced, io_calls,
+      io_calls ? to_us(io_queue / io_calls) : 0, to_us(io_queue_max),
+      io_calls ? to_us(io_run / io_calls) : 0);
+}
+
+// Names what a fiber is parked on, for the no-progress dump.
+static const char* WaitObjectKind(XObject* object) {
+  if (!object) {
+    return "none";
+  }
+  switch (object->type()) {
+    case XObject::Type::Event:
+      return "event";
+    case XObject::Type::Semaphore:
+      return "semaphore";
+    case XObject::Type::Mutant:
+      return "mutant";
+    case XObject::Type::Thread:
+      return "thread";
+    case XObject::Type::Timer:
+      return "timer";
+    default:
+      return "other";
+  }
+}
+
+namespace {
+const char* CooperativeWaitKindName(uint8_t kind) {
+  switch (static_cast<XThread::CooperativeWaitKind>(kind)) {
+    case XThread::CooperativeWaitKind::kSingle:
+      return "single";
+    case XThread::CooperativeWaitKind::kMultiAny:
+      return "multi-any";
+    case XThread::CooperativeWaitKind::kMultiAll:
+      return "multi-all";
+    case XThread::CooperativeWaitKind::kDelay:
+      return "delay";
+    case XThread::CooperativeWaitKind::kFence:
+      return "fence";
+    case XThread::CooperativeWaitKind::kIoOffload:
+      return "io-offload";
+    default:
+      return "none";
+  }
+}
+
+// "multi-any[4] handles=F8000030,F8000034,..." - the handles cross-reference
+// against the signal ring dumped alongside.
+std::string FormatWaitShape(const XThread::SchedulerLinks& links) {
+  std::string out = CooperativeWaitKindName(links.wait_kind);
+  if (!links.wait_handle_count) {
+    return out;
+  }
+  out += fmt::format("[{}] handles=", links.wait_handle_count);
+  uint32_t shown = links.wait_handle_count < 8 ? links.wait_handle_count : 8;
+  for (uint32_t i = 0; i < shown; ++i) {
+    out += fmt::format("{}{:08X}", i ? "," : "", links.wait_handles[i]);
+  }
+  if (links.wait_handle_count > shown) {
+    out += ",...";
+  }
+  return out;
+}
+}  // namespace
+
+void GuestScheduler::ReportNoProgress() {
+  XELOGW(
+      "GuestScheduler: no guest frame presented in {} watchdog ticks while the "
+      "dispatch threads keep switching. Every fiber below is waiting on "
+      "something none of them is producing:",
+      no_progress_ticks_);
+  uint64_t now_ms = Clock::QueryHostUptimeMillis();
+  std::lock_guard<std::mutex> lock(lock_);
+  for (int i = 0; i < kMaxCpus; ++i) {
+    Cpu& cpu = cpus_[i];
+    if (XThread* running = cpu.current_thread) {
+      auto* context = running->thread_state()->context();
+      auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+      XELOGW(
+          "  CPU {} running tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
+          "irql={} preempt_requested={} ready_summary={:#x}",
+          i, running->thread_id(), running->thread_name(),
+          uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
+          uint32_t(kpcr->current_irql), uint32_t(context->preempt_requested),
+          cpu.ready_summary);
+    } else {
+      XELOGW("  CPU {} idle, ready_summary={:#x}", i, cpu.ready_summary);
+    }
+    // Parked fibers are the interesting half: the cycle is whatever they are
+    // all waiting for.
+    int listed = 0;
+    for (XThread* t = cpu.blocked_head; t && listed < 8;
+         t = t->scheduler_links().ready_next, ++listed) {
+      auto& links = t->scheduler_links();
+      XObject* obj = t->cooperative_wait_object();
+      auto* context = t->thread_state()->context();
+      int64_t due_in = links.wait_deadline_ms
+                           ? int64_t(links.wait_deadline_ms) - int64_t(now_ms)
+                           : -1;
+      XELOGW(
+          "    blocked tid={:08X} '{}' last_safepoint={:08X} lr={:08X} on {} "
+          "obj={} wait={} gated={} alertable={} epoch={} deadline_in_ms={}",
+          t->thread_id(), t->thread_name(),
+          uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
+          WaitObjectKind(obj), static_cast<const void*>(obj),
+          FormatWaitShape(links), links.wait_gated ? 1 : 0,
+          links.wait_alertable ? 1 : 0, links.wait_epoch, due_in);
+    }
+    // Ready-but-not-running fibers matter too: a queue that never drains
+    // means the CPU is rotating between the same few spinners.
+    for (int prio = 31; prio >= 0; --prio) {
+      for (XThread* t = cpu.ready_head[prio]; t;
+           t = t->scheduler_links().ready_next) {
+        auto* context = t->thread_state()->context();
+        XELOGW(
+            "    ready   tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
+            "prio={}",
+            t->thread_id(), t->thread_name(),
+            uint32_t(context->last_safepoint_pc), uint32_t(context->lr), prio);
+      }
+    }
+  }
+  // The other half of the picture: what was actually signalled recently. A
+  // handle the fibers above wait on that never appears here names the producer
+  // that stopped; one that appears repeatedly while a waiter stays parked
+  // points at the wake being lost instead of never sent.
+  auto signals = XObject::RecentCooperativeSignals(64);
+  if (signals.empty()) {
+    XELOGW("  recent cooperative signals: none recorded");
+    return;
+  }
+  XELOGW("  last {} cooperative signals (oldest first):", signals.size());
+  for (const auto& rec : signals) {
+    XELOGW("    #{} handle={:08X} type={} by_tid={:08X} lr={:08X} uptime_ms={}",
+           rec.seq, rec.handle, uint32_t(rec.type), rec.signaler_thread,
+           rec.signaler_lr, rec.uptime_ms);
+  }
+}
+
 void GuestScheduler::WatchdogLoop() {
-  uint64_t period_ms = cvars::guest_scheduler_quantum_us / 1000;
-  if (!period_ms) {
-    period_ms = 1;
+  Profiler::ThreadEnter("GuestScheduler Watchdog");
+  // Microseconds, not milliseconds: an integer division to ms floors every
+  // sub-millisecond quantum to the same 1 ms tick, so the setting would stop
+  // meaning anything below 1000. The host still adds wakeup slack, so a short
+  // quantum is a target rather than a guarantee.
+  uint64_t period_us = cvars::guest_scheduler_quantum_us;
+  if (period_us < kMinWatchdogPeriodUs) {
+    period_us = kMinWatchdogPeriodUs;
   }
   while (!shutting_down_.load()) {
-    xe::threading::Wait(watchdog_event_.get(), false,
-                        std::chrono::milliseconds(period_ms));
+    if (period_us >= 1000) {
+      // Event wait so Shutdown's Set is observed immediately.
+      xe::threading::Wait(watchdog_event_.get(), false,
+                          std::chrono::milliseconds(period_us / 1000));
+    } else {
+      // Wait only takes milliseconds, so a sub-millisecond period sleeps
+      // instead. Shutdown latency is then bounded by the period itself.
+      xe::threading::PreciseSleep(std::chrono::microseconds(period_us));
+    }
     if (shutting_down_.load()) {
       break;
     }
+    // No-progress detection, outside lock_ (ReportNoProgress takes it).
+    // Only meaningful once something has been dispatched, so a title still
+    // loading is not reported.
+    uint32_t frame = xe::logging::GetFrameNumber();
+    if (frame != last_frame_number_ || !dispatched_any_.load()) {
+      last_frame_number_ = frame;
+      no_progress_ticks_ = 0;
+      no_progress_reported_ = false;
+    } else if (++no_progress_ticks_ >= kNoProgressReportTicks &&
+               !no_progress_reported_) {
+      no_progress_reported_ = true;
+      ReportNoProgress();
+    }
+
     uint64_t now = Clock::host_tick_count_raw();
     std::lock_guard<std::mutex> lock(lock_);
     for (int i = 0; i < kMaxCpus; ++i) {
@@ -1141,6 +1562,34 @@ void GuestScheduler::WatchdogLoop() {
       if (running && now >= cpus_[i].quantum_deadline_tick) {
         running->thread_state()->context()->preempt_requested = 1;
       }
+      // Stall detector: a dispatch count that has not moved for a whole
+      // window separates the wedge modes - flag still set means the fiber
+      // never reaches a safepoint, flag cleared means it yields but makes no
+      // progress.
+      uint64_t seq = cpus_[i].switch_seq.load(std::memory_order_relaxed);
+      if (!running || seq != stall_last_seq_[i]) {
+        stall_last_seq_[i] = seq;
+        stall_ticks_[i] = 0;
+        stall_reported_[i] = false;
+        continue;
+      }
+      if (++stall_ticks_[i] < kStallReportTicks || stall_reported_[i]) {
+        continue;
+      }
+      stall_reported_[i] = true;
+      auto* context = running->thread_state()->context();
+      auto* kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+      XELOGW(
+          "GuestScheduler: CPU {} has not switched fibers in {} watchdog "
+          "ticks. Running tid={:08X} '{}' last_safepoint={:08X} lr={:08X} "
+          "irql={} preempt_requested={} irql_defers={} lock_defers={} "
+          "ready_summary={:#x}",
+          i, stall_ticks_[i], running->thread_id(), running->thread_name(),
+          uint32_t(context->last_safepoint_pc), uint32_t(context->lr),
+          uint32_t(kpcr->current_irql), uint32_t(context->preempt_requested),
+          running->scheduler_links().preempt_defers_irql,
+          running->scheduler_links().preempt_defers_lock,
+          cpus_[i].ready_summary);
     }
   }
 }

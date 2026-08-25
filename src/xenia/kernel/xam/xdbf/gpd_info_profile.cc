@@ -60,12 +60,16 @@ std::u16string GpdInfoProfile::GetTitleName(const uint32_t title_id) const {
   const Entry* entry =
       GetEntry(static_cast<uint16_t>(GpdSection::kTitle), title_id);
 
-  if (!entry) {
+  if (!entry || entry->data.size() < sizeof(X_XDBF_GPD_TITLE_PLAYED)) {
     return std::u16string();
   }
 
-  return string_util::read_u16string_and_swap(reinterpret_cast<const char16_t*>(
-      entry->data.data() + sizeof(X_XDBF_GPD_TITLE_PLAYED)));
+  // The name follows the header and fills the rest of the entry
+  return string_util::read_u16string_and_swap(
+      reinterpret_cast<const char16_t*>(entry->data.data() +
+                                        sizeof(X_XDBF_GPD_TITLE_PLAYED)),
+      (entry->data.size() - sizeof(X_XDBF_GPD_TITLE_PLAYED)) /
+          sizeof(char16_t));
 }
 
 void GpdInfoProfile::AddNewTitle(const SpaInfo* title_data) {
