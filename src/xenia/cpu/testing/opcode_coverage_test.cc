@@ -940,3 +940,66 @@ TEST_CASE("RSQRT_V128_SCALAR_PATH_MATCHES_VECTOR_PATH", "[vector]") {
 
   REQUIRE(from_splat == from_register);
 }
+
+// ============================================================================
+// VECTOR_COMPARE_* — folder vs backend
+// ============================================================================
+// No float guard on these. The FLOAT32 forms reach a folder too.
+TEST_CASE("VECTOR_COMPARE_FOLD_MATCHES_BACKEND", "[vector]") {
+  const vec128_t int_lhs =
+      vec128b(0x00, 0x01, 0x7F, 0x80, 0xFF, 0xFE, 0x40, 0xC0, 0x01, 0x02, 0x03,
+              0x04, 0x7F, 0x81, 0x00, 0xFF);
+  const vec128_t int_rhs =
+      vec128b(0x00, 0xFF, 0x01, 0x80, 0x01, 0x02, 0x40, 0xC0, 0x7F, 0x80, 0xFF,
+              0x7E, 0x7F, 0x81, 0x01, 0xFF);
+
+  for (TypeName part : {INT8_TYPE, INT16_TYPE, INT32_TYPE}) {
+    RequireVectorFoldMatchesBackend(
+        {int_lhs, int_rhs},
+        [part](HIRBuilder& b, const std::vector<Value*>& ops) {
+          return b.VectorCompareEQ(ops[0], ops[1], part);
+        });
+    RequireVectorFoldMatchesBackend(
+        {int_lhs, int_rhs},
+        [part](HIRBuilder& b, const std::vector<Value*>& ops) {
+          return b.VectorCompareSGT(ops[0], ops[1], part);
+        });
+    RequireVectorFoldMatchesBackend(
+        {int_lhs, int_rhs},
+        [part](HIRBuilder& b, const std::vector<Value*>& ops) {
+          return b.VectorCompareSGE(ops[0], ops[1], part);
+        });
+    RequireVectorFoldMatchesBackend(
+        {int_lhs, int_rhs},
+        [part](HIRBuilder& b, const std::vector<Value*>& ops) {
+          return b.VectorCompareUGT(ops[0], ops[1], part);
+        });
+    RequireVectorFoldMatchesBackend(
+        {int_lhs, int_rhs},
+        [part](HIRBuilder& b, const std::vector<Value*>& ops) {
+          return b.VectorCompareUGE(ops[0], ops[1], part);
+        });
+  }
+
+  const float qnan = std::numeric_limits<float>::quiet_NaN();
+  const float pinf = std::numeric_limits<float>::infinity();
+  const vec128_t float_pairs[][2] = {
+      {vec128f(1.0f, -1.0f, 0.0f, 2.0f), vec128f(1.0f, 1.0f, -0.0f, 1.0f)},
+      {vec128f(qnan, 1.0f, qnan, -pinf), vec128f(1.0f, qnan, qnan, pinf)},
+      {vec128f(pinf, -pinf, 0.0f, -0.0f), vec128f(pinf, -pinf, -0.0f, 0.0f)},
+  };
+  for (const auto& pair : float_pairs) {
+    RequireVectorFoldMatchesBackend(
+        {pair[0], pair[1]}, [](HIRBuilder& b, const std::vector<Value*>& ops) {
+          return b.VectorCompareEQ(ops[0], ops[1], FLOAT32_TYPE);
+        });
+    RequireVectorFoldMatchesBackend(
+        {pair[0], pair[1]}, [](HIRBuilder& b, const std::vector<Value*>& ops) {
+          return b.VectorCompareSGT(ops[0], ops[1], FLOAT32_TYPE);
+        });
+    RequireVectorFoldMatchesBackend(
+        {pair[0], pair[1]}, [](HIRBuilder& b, const std::vector<Value*>& ops) {
+          return b.VectorCompareSGE(ops[0], ops[1], FLOAT32_TYPE);
+        });
+  }
+}
