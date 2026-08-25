@@ -273,7 +273,7 @@ std::vector<FileInfo> ListFilesUnsorted(const std::filesystem::path& path) {
   }
   closedir(dir);
   return std::move(result);
-}
+}  // namespace internal
 
 #if !XE_PLATFORM_ANDROID
 bool SetAttributes(const std::filesystem::path& path, uint64_t attributes) {
