@@ -2669,10 +2669,22 @@ static MetalTextureCache::SamplerParameters BuildSamplerParametersFromFetch(
     parameters.border_color = xenos::BorderColor::k_ABGR_Black;
   }
 
-  uint32_t mip_min_level;
+  uint32_t base_page, mip_min_level;
   texture_util::GetSubresourcesFromFetchConstant(fetch, nullptr, nullptr,
-                                                 nullptr, nullptr, nullptr,
+                                                 nullptr, &base_page, nullptr,
                                                  &mip_min_level, nullptr);
+
+  xenos::TextureFilter mip_filter =
+      req_mip_filter == xenos::TextureFilter::kUseFetchConst ? fetch.mip_filter
+                                                             : req_mip_filter;
+
+  parameters.mip_base_map =
+      mip_filter == xenos::TextureFilter::kBaseMap ? 1 : 0;
+
+  // The base map is level 0 whenever a base page is present.
+  if (parameters.mip_base_map && base_page != 0) {
+    mip_min_level = 0;
+  }
   parameters.mip_min_level = mip_min_level;
 
   xenos::AnisoFilter aniso_filter =
@@ -2681,10 +2693,6 @@ static MetalTextureCache::SamplerParameters BuildSamplerParametersFromFetch(
           : req_aniso_filter;
   aniso_filter = std::min(aniso_filter, xenos::AnisoFilter::kMax_16_1);
   parameters.aniso_filter = aniso_filter;
-
-  xenos::TextureFilter mip_filter =
-      req_mip_filter == xenos::TextureFilter::kUseFetchConst ? fetch.mip_filter
-                                                             : req_mip_filter;
 
   if (aniso_filter != xenos::AnisoFilter::kDisabled) {
     parameters.mag_linear = 1;
@@ -2705,9 +2713,6 @@ static MetalTextureCache::SamplerParameters BuildSamplerParametersFromFetch(
 
     parameters.mip_linear = mip_filter == xenos::TextureFilter::kLinear;
   }
-
-  parameters.mip_base_map =
-      mip_filter == xenos::TextureFilter::kBaseMap ? 1 : 0;
 
   return parameters;
 }

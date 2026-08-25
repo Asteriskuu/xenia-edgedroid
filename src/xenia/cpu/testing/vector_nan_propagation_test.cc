@@ -21,7 +21,7 @@ using xe::cpu::ppc::PPCContext;
 //   1. If src1 is NaN, result = src1 with bit 22 set (quieted).
 //   2. Else if src2 is NaN, result = src2 with bit 22 set (quieted).
 //   3. Else if the operation itself produces NaN (e.g., inf - inf),
-//      result = PPC default QNaN = 0xFFC00000.
+//      result = PPC default QNaN = 0x7FC00000. x86's indefinite is negative.
 //
 // These tests verify that behavior for VECTOR_ADD with FLOAT32_TYPE.
 // =============================================================================
@@ -110,7 +110,7 @@ TEST_CASE("VECTOR_ADD_F32_SNAN_QUIETED", "[instr]") {
 }
 
 // Neither input is NaN, but operation produces NaN (inf + (-inf)).
-// Result should be PPC default QNaN = 0xFFC00000.
+// Result should be PPC default QNaN = 0x7FC00000.
 TEST_CASE("VECTOR_ADD_F32_INF_MINUS_INF_DEFAULT_NAN", "[instr]") {
   TestFunction test([](HIRBuilder& b) {
     StoreVR(b, 3, b.VectorAdd(LoadVR(b, 4), LoadVR(b, 5), FLOAT32_TYPE));
@@ -124,8 +124,8 @@ TEST_CASE("VECTOR_ADD_F32_INF_MINUS_INF_DEFAULT_NAN", "[instr]") {
       },
       [](PPCContext* ctx) {
         auto result = ctx->v[3];
-        // PPC default QNaN (negative).
-        REQUIRE(result.u32[0] == 0xFFC00000);
+        // PPC default QNaN is positive. x86's indefinite is the negative one.
+        REQUIRE(result.u32[0] == 0x7FC00000);
         // Other lanes: normal 1.0 + 1.0 = 2.0
         REQUIRE(result.u32[1] == 0x40000000);
       });
@@ -157,6 +157,54 @@ TEST_CASE("VECTOR_ADD_F32_NAN_PER_LANE", "[instr]") {
         REQUIRE((result.u32[2] & 0xFFC00000) == 0x7FC00000);
         REQUIRE((result.u32[2] & 0x003FFFFF) == 0x00002);
         // Lane 3: generated NaN → PPC default.
-        REQUIRE(result.u32[3] == 0xFFC00000);
+        REQUIRE(result.u32[3] == 0x7FC00000);
+      });
+}
+
+// vsubfp follows the same rules. inf - inf is the generated-NaN case here.
+TEST_CASE("VECTOR_SUB_F32_NAN_RULES", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    StoreVR(b, 3, b.VectorSub(LoadVR(b, 4), LoadVR(b, 5), FLOAT32_TYPE));
+    b.Return();
+  });
+  test.Run(
+      [](PPCContext* ctx) {
+        // Lane 0: src1 NaN wins over src2 NaN.
+        // Lane 1: src2 NaN propagates.
+        // Lane 2: SNaN quieted, payload kept.
+        // Lane 3: inf - inf, neither operand NaN.
+        ctx->v[4] = vec128i(0x7FC00001, 0x3F800000, 0x7F812345, 0x7F800000);
+        ctx->v[5] = vec128i(0x7FC00002, 0x7FC00003, 0x3F800000, 0x7F800000);
+      },
+      [](PPCContext* ctx) {
+        auto result = ctx->v[3];
+        REQUIRE(result.u32[0] == 0x7FC00001);
+        REQUIRE(result.u32[1] == 0x7FC00003);
+        REQUIRE(result.u32[2] == (0x7F812345 | 0x00400000));
+        REQUIRE(result.u32[3] == 0x7FC00000);
+      });
+}
+
+// vmulfp is OPCODE_MUL on VEC128. inf * 0 is its generated-NaN case.
+TEST_CASE("MUL_V128_F32_NAN_RULES", "[instr]") {
+  TestFunction test([](HIRBuilder& b) {
+    StoreVR(b, 3, b.Mul(LoadVR(b, 4), LoadVR(b, 5)));
+    b.Return();
+  });
+  test.Run(
+      [](PPCContext* ctx) {
+        // Lane 0: src1 NaN wins over src2 NaN.
+        // Lane 1: src2 NaN propagates.
+        // Lane 2: SNaN quieted, payload kept.
+        // Lane 3: inf * 0, neither operand NaN.
+        ctx->v[4] = vec128i(0x7FC00001, 0x3F800000, 0x7F812345, 0x7F800000);
+        ctx->v[5] = vec128i(0x7FC00002, 0x7FC00003, 0x3F800000, 0x00000000);
+      },
+      [](PPCContext* ctx) {
+        auto result = ctx->v[3];
+        REQUIRE(result.u32[0] == 0x7FC00001);
+        REQUIRE(result.u32[1] == 0x7FC00003);
+        REQUIRE(result.u32[2] == (0x7F812345 | 0x00400000));
+        REQUIRE(result.u32[3] == 0x7FC00000);
       });
 }

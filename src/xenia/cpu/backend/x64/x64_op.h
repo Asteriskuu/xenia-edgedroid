@@ -668,6 +668,52 @@ static Xmm GetInputRegOrConstant(X64Emitter& e, const T& input,
     return input;
   }
 }
+
+// Runs a VMX float binop and gives an invalid operation PPC's answer. x86
+// supplies its negative indefinite where PPC supplies the positive default
+// QNaN, and only a lane that went NaN with no NaN operand is affected. That
+// is rare, so the rewrite lives in tail code and the result keeps a bare op
+// on its dependency chain.
+//
+// Scratch use is constrained by the callers: a constant operand lands in
+// xmm0 or xmm1, so only xmm2 and xmm3 are free before the sources die.
+template <typename FN>
+static void EmitVmxFloatBinOp(X64Emitter& e, const Xmm& dest, const Xmm& src1,
+                              const Xmm& src2, const FN& op) {
+  // The op destroys any source that shares dest's register, and the tail
+  // still needs both operands, so keep a copy of the one that collides.
+  Xmm s1 = src1;
+  Xmm s2 = src2;
+  if (dest.getIdx() == src1.getIdx()) {
+    e.vmovaps(e.xmm2, src1);
+    s1 = e.xmm2;
+    if (src2.getIdx() == src1.getIdx()) {
+      s2 = e.xmm2;
+    }
+  } else if (dest.getIdx() == src2.getIdx()) {
+    e.vmovaps(e.xmm2, src2);
+    s2 = e.xmm2;
+  }
+
+  op(e, dest, src1, src2);
+
+  Xbyak::Label& done = e.NewCachedLabel();
+  Xbyak::Label& fixup =
+      e.AddToTail([&done, dest, s1, s2](X64Emitter& e, Xbyak::Label& tail) {
+        e.L(tail);
+        // Read the operands before xmm0 is touched: one of them may be there.
+        e.vcmpunordps(e.xmm3, s1, s2);
+        e.vcmpunordps(e.xmm0, dest, dest);
+        e.vandnps(e.xmm0, e.xmm3, e.xmm0);
+        e.vblendvps(dest, dest, e.GetXmmConstPtr(XMMQNaN), e.xmm0);
+        e.jmp(done, e.T_NEAR);
+      });
+  // xmm3 rather than xmm0, which may still hold a constant operand.
+  e.vcmpunordps(e.xmm3, dest, dest);
+  e.vptest(e.xmm3, e.xmm3);
+  e.jnz(fixup, e.T_NEAR);
+  e.L(done);
+}
 }  // namespace x64
 }  // namespace backend
 }  // namespace cpu

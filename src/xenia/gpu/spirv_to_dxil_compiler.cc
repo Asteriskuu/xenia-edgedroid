@@ -81,8 +81,10 @@ dxil_spirv_runtime_conf MakeRuntimeConf(bool lower_to_bindless,
   dxil_spirv_runtime_conf conf = {};
   conf.runtime_data_cbv.register_space = 31;
   conf.runtime_data_cbv.base_shader_register = 0;
-  conf.push_constant_cbv.register_space = 31;
-  conf.push_constant_cbv.base_shader_register = 1;
+  conf.push_constant_cbv.register_space =
+      SpirvToDxilCompiler::kPushConstantRegisterSpace;
+  conf.push_constant_cbv.base_shader_register =
+      SpirvToDxilCompiler::kPushConstantShaderRegister;
   conf.first_vertex_and_base_instance_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
   conf.workgroup_id_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
   // No yz_flip. Unlike Dozen (which feeds Vulkan-convention NDC and flips

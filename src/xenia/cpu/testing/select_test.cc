@@ -151,3 +151,21 @@ TEST_CASE("SELECT_F64_matches_integer_form", "[select]") {
         });
   }
 }
+
+TEST_CASE("SELECT_V128_FOLD_MATCHES_BACKEND", "[select]") {
+  const vec128_t lhs = vec128i(0x00010203, 0x04050607, 0x08090A0B, 0x0C0D0E0F);
+  const vec128_t rhs = vec128i(0x10111213, 0x14151617, 0x18191A1B, 0x1C1D1E1F);
+  const vec128_t controls[] = {
+      vec128i(0, 0, 0, 0),
+      vec128i(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF),
+      vec128i(0xFFFFFFFF, 0, 0xFFFFFFFF, 0),
+      // Partial masks catch a lane-granular blend.
+      vec128i(0x0000FFFF, 0xFF00FF00, 0x0F0F0F0F, 0x80000001),
+  };
+  for (const vec128_t& control : controls) {
+    RequireVectorFoldMatchesBackend(
+        {control, lhs, rhs}, [](HIRBuilder& b, const std::vector<Value*>& ops) {
+          return b.Select(ops[0], ops[1], ops[2]);
+        });
+  }
+}

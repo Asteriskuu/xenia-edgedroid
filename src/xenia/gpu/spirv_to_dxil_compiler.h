@@ -30,6 +30,13 @@ class SpirvToDxilCompiler {
   // Mesa git revision of the linked library.
   static uint64_t version();
 
+  // Register and space of the CBV Mesa lowers SPIR-V push constants to, which
+  // a root signature must supply as root constants or a CBV. Mesa sizes that
+  // CBV from the bytes the shader actually loads, rounded up to a 16-byte row.
+  // Dozen's runtime data shares the space at register 0.
+  static constexpr uint32_t kPushConstantRegisterSpace = 31;
+  static constexpr uint32_t kPushConstantShaderRegister = 1;
+
   // Pipeline stage of the SPIR-V module. Covers the guest vertex/pixel shaders,
   // the host primitive-expansion geometry and tessellation shaders, and the
   // render target cache's internal compute shaders.
