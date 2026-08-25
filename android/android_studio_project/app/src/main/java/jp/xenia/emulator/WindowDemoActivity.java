@@ -74,9 +74,11 @@ public class WindowDemoActivity extends AppCompatActivity implements SurfaceHold
 
         if (width > 0 && height > 0 && !layoutReady) {
             layoutReady = true;
-            if (surfaceReady && gamePath != null) {
-                launchGame(mActiveSurface);
-            }
+            surfaceView.postDelayed(() -> {
+                if (surfaceReady && gamePath != null && mActiveSurface != null) {
+                    launchGame(mActiveSurface);
+                }
+            }, 100);
         }
     }
 
