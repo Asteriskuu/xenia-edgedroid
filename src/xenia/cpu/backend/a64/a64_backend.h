@@ -218,6 +218,10 @@ class A64Backend : public Backend {
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
   uint32_t guest_return_trampoline_ = 0;
 
+  void* try_acquire_reservation_helper_;
+  void* reserved_store_32_helper;
+  void* reserved_store_64_helper;
+
   alignas(64) ReserveHelper reserve_helper_;
   BitMap guest_trampoline_address_bitmap_;
   uint8_t* guest_trampoline_memory_ = nullptr;
