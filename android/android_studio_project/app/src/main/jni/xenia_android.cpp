@@ -239,8 +239,25 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
             auto input_factory = [](xe::ui::Window* window) -> std::vector<std::unique_ptr<xe::hid::InputDriver>> {
                 LOGI("[Emulator] Input factory invoked");
+                if (!window) {
+                    LOGW("[Emulator] Window is null in input factory, returning empty driver list");
+                    return {};
+                }
+    
                 std::vector<std::unique_ptr<xe::hid::InputDriver>> drivers;
-                drivers.push_back(std::make_unique<xe::hid::nop::NopInputDriver>(window, 0));
+    
+                try {
+                    auto driver = std::make_unique<xe::hid::nop::NopInputDriver>(window, 0);
+                    if (driver) {
+                        drivers.push_back(std::move(driver));
+                    }
+                } catch (const std::exception& e) {
+                    LOGE("[ERROR] Failed to create NopInputDriver: %s", e.what());
+                } catch (...) {
+                    LOGE("[ERROR] Failed to create NopInputDriver: unknown exception");
+                }
+    
+                LOGI("[Emulator] Input factory returning %zu drivers", drivers.size());
                 return drivers;
             };
 
