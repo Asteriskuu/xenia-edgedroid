@@ -78,36 +78,26 @@ DECLARE_string(gpu);
 #define APU_OPTIONS "[xaudio2, sdl, nop]"
 #define GPU_OPTIONS "[d3d12, vulkan, null]"
 #define HID_OPTIONS "[sdl, nop]"
-DEFINE_string(apu, "xaudio2", "Audio system. Use: " APU_OPTIONS, "APU");
-DEFINE_string(gpu, "d3d12", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #elif XE_PLATFORM_LINUX
 #define APU_OPTIONS "[sdl, nop]"
 #define GPU_OPTIONS "[vulkan, null]"
 #define HID_OPTIONS "[sdl, nop]"
-DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
-DEFINE_string(gpu, "vulkan", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #elif XE_PLATFORM_MAC
 #define APU_OPTIONS "[sdl, nop]"
 #define GPU_OPTIONS "[metal, vulkan, null]"
 #define HID_OPTIONS "[sdl, nop]"
-DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
-DEFINE_string(gpu, "metal", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #elif XE_PLATFORM_ANDROID
 #define APU_OPTIONS "[nop]"
 #define GPU_OPTIONS "[vulkan, null]"
 #define HID_OPTIONS "[nop]"
-DEFINE_string(apu, "nop", "Audio system. Use: " APU_OPTIONS, "APU");
-DEFINE_string(gpu, "vulkan", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "nop", "Input system. Use: " HID_OPTIONS, "HID");
 #else
 #define APU_OPTIONS "[sdl, nop]"
 #define GPU_OPTIONS "[vulkan, null]"
 #define HID_OPTIONS "[sdl, nop]"
-DEFINE_string(apu, "sdl", "Audio system. Use: " APU_OPTIONS, "APU");
-DEFINE_string(gpu, "vulkan", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "sdl", "Input system. Use: " HID_OPTIONS, "HID");
 #endif
 
