@@ -472,7 +472,7 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     ui::Window* window) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
   if (cvars::hid.compare("nop") == 0) {
-    auto nop_driver = 
+    auto nop_driver =
         xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput);
     if (nop_driver) {
       drivers.emplace_back(std::move(nop_driver));
@@ -492,7 +492,7 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     }
     if (drivers.empty()) {
       // Fallback to nop if none created.
-      auto nop_driver = 
+      auto nop_driver =
           xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput);
       if (nop_driver) {
         drivers.emplace_back(std::move(nop_driver));
