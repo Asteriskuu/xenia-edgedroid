@@ -403,7 +403,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             LOGD("[Emulator]   g_emulator: %p", g_emulator.get());
             flush_logs();
             
-            xe::X_STATUS setup_result = xe::X_STATUS_UNSUCCESSFUL;
+            xe::X_STATUS setup_result = static_cast<xe::X_STATUS>(0xC0000001L);
             try {
                 setup_result = g_emulator->Setup(
                     g_display_window.get(), nullptr, false, 
@@ -454,7 +454,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 return;
             }
 
-            xe::X_STATUS launch_result = xe::X_STATUS_UNSUCCESSFUL;
+            xe::X_STATUS launch_result = static_cast<xe::X_STATUS>(0xC0000001L);
             try {
                 launch_result = g_emulator->LaunchPath(game_path_str);
                 LOGI("[Emulator] Step 11: LaunchPath() returned: 0x%08X", launch_result);
