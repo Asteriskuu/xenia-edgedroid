@@ -274,11 +274,28 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 return;
             }
 
+            LOGI("[Emulator] Mounting standard drives...");
+            try {
+                g_emulator->MountStandardDrives();
+                LOGI("[Emulator] Standard drives mounted");
+            } catch (const std::exception& e) {
+                LOGE("[ERROR] Failed to mount drives: %s", e.what());
+            }
+
+            LOGD("[Emulator] About to call Setup with factories...");
+            LOGD("[Emulator] graphics_factory: %p", &graphics_factory);
+            LOGD("[Emulator] audio_factory: %p", &audio_factory);
+            LOGD("[Emulator] input_factory: %p", &input_factory);
+            LOGD("[Emulator] g_display_window: %p", g_display_window.get());
+            LOGD("[Emulator] g_emulator: %p", g_emulator.get());
+
             LOGI("[Emulator] Calling g_emulator->Setup()...");
             xe::X_STATUS setup_result = g_emulator->Setup(
                 g_display_window.get(), nullptr, false, 
                 audio_factory, graphics_factory, input_factory
             );
+            
+            LOGD("[Emulator] Setup returned with code: 0x%08X", setup_result);
             
             if (XFAILED(setup_result)) {
                 LOGE("[ERROR] Setup failed with code: 0x%08X", setup_result);
@@ -289,14 +306,6 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 return;
             }
             LOGI("[Emulator] Setup completed successfully");
-
-            LOGI("[Emulator] Mounting standard drives...");
-            try {
-                g_emulator->MountStandardDrives();
-                LOGI("[Emulator] Standard drives mounted");
-            } catch (const std::exception& e) {
-                LOGE("[ERROR] Failed to mount drives: %s", e.what());
-            }
 
             LOGI("[Emulator] About to call LaunchPath() with: %s", game_path_str.c_str());
             
