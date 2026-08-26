@@ -218,7 +218,7 @@ Emulator::~Emulator() { Shutdown(); }
 
 void Emulator::Shutdown() {
   XELOGI("Emulator::Shutdown: starting teardown");
-  
+
   ExceptionHandler::Uninstall(Emulator::ExceptionCallbackThunk, this);
 
   // During relaunch, notify listeners before teardown so they can disconnect
