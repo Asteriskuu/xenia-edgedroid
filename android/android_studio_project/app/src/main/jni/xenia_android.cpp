@@ -27,6 +27,7 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 
 static std::unique_ptr<xe::Emulator> g_emulator;
 static std::thread g_emulator_thread;
@@ -172,21 +173,21 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
     g_native_window = native_window;
     g_emulator_running = true;
 
-    g_emulator_thread = std::thread([game_path = std::string(game_path), native_window]() {
+    g_emulator_thread = std::thread([game_path_str = std::string(game_path), native_window]() {
         signal(SIGSEGV, segfault_handler);
         signal(SIGABRT, abort_handler);
         signal(SIGTERM, segfault_handler);
         
-        LOGI("[Emulator] Thread started, game_path: %s", game_path.c_str());
+        LOGI("[Emulator] Thread started, game_path: %s", game_path_str.c_str());
         
         try {
-            if (!std::filesystem::exists(game_path)) {
-                LOGE("[ERROR] Game file does not exist: %s", game_path.c_str());
+            if (!std::filesystem::exists(game_path_str)) {
+                LOGE("[ERROR] Game file does not exist: %s", game_path_str.c_str());
                 g_emulator_running = false;
                 g_state_condition.notify_all();
                 return;
             }
-            LOGI("[Emulator] File exists, size: %zu bytes", std::filesystem::file_size(game_path));
+            LOGI("[Emulator] File exists, size: %zu bytes", std::filesystem::file_size(game_path_str));
         
             std::filesystem::path storage_root = "/data/data/jp.xenia.emulator.github.debug";
             try {
@@ -203,7 +204,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             LOGI("[Emulator] Creating emulator instance...");
             try {
                 g_emulator = std::make_unique<xe::Emulator>(
-                    game_path, storage_root, storage_root / "content", storage_root / "cache"
+                    game_path_str, storage_root, storage_root / "content", storage_root / "cache"
                 );
             } catch (const std::exception& e) {
                 LOGE("[ERROR] Failed to create emulator: %s", e.what());
@@ -215,7 +216,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
             LOGI("[Emulator] Loading config...");
             try {
-                config::LoadGameConfigForFile(game_path);
+                config::LoadGameConfigForFile(game_path_str);
                 LOGI("[Emulator] Config loaded");
             } catch (const std::exception& e) {
                 LOGE("[ERROR] Failed to load config: %s", e.what());
@@ -239,32 +240,25 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
 
             auto input_factory = [](xe::ui::Window* window) -> std::vector<std::unique_ptr<xe::hid::InputDriver>> {
                 LOGI("[Emulator] Input factory invoked");
-                if (!window) {
-                    LOGI("[Emulator] Window is null in input factory, returning empty driver list");
-                    return {};
-                }
-
-            auto input_factory = [](xe::ui::Window* window) -> std::vector<std::unique_ptr<xe::hid::InputDriver>> {
-                LOGI("[Emulator] Input factory invoked");
-    
+                
                 if (!window) {
                     LOGW("[Emulator] Window is null in input factory, returning empty driver list");
                     return {};
                 }
-    
+                
                 std::vector<std::unique_ptr<xe::hid::InputDriver>> drivers;
-    
+                
                 try {
                     auto driver = std::make_unique<xe::hid::nop::NopInputDriver>(window, 0);
                     if (driver) {
-                       drivers.push_back(std::move(driver));
+                        drivers.push_back(std::move(driver));
                     }
                 } catch (const std::exception& e) {
                     LOGE("[ERROR] Failed to create NopInputDriver: %s", e.what());
                 } catch (...) {
                     LOGE("[ERROR] Failed to create NopInputDriver: unknown exception");
                 }
-    
+                
                 LOGI("[Emulator] Input factory returning %zu drivers", drivers.size());
                 return drivers;
             };
@@ -304,7 +298,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 LOGE("[ERROR] Failed to mount drives: %s", e.what());
             }
 
-            LOGI("[Emulator] About to call LaunchPath() with: %s", game_path.c_str());
+            LOGI("[Emulator] About to call LaunchPath() with: %s", game_path_str.c_str());
             
             if (!g_emulator) {
                 LOGE("[ERROR] g_emulator is null before LaunchPath!");
@@ -313,7 +307,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 return;
             }
 
-            xe::X_STATUS launch_result = g_emulator->LaunchPath(game_path);
+            xe::X_STATUS launch_result = g_emulator->LaunchPath(game_path_str);
             LOGI("[Emulator] LaunchPath() returned: 0x%08X", launch_result);
             
             if (XFAILED(launch_result)) {
