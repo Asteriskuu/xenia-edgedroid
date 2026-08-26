@@ -218,6 +218,8 @@ Emulator::~Emulator() { Shutdown(); }
 
 void Emulator::Shutdown() {
   XELOGI("Emulator::Shutdown: starting teardown");
+  
+  ExceptionHandler::Uninstall(Emulator::ExceptionCallbackThunk, this);
 
   // During relaunch, notify listeners before teardown so they can disconnect
   // UI resources while subsystems are still alive. Skip during normal
@@ -255,8 +257,6 @@ void Emulator::Shutdown() {
   processor_.reset();
   export_resolver_.reset();
   memory_.reset();
-
-  ExceptionHandler::Uninstall(Emulator::ExceptionCallbackThunk, this);
 
   title_id_ = std::nullopt;
   title_name_.clear();
