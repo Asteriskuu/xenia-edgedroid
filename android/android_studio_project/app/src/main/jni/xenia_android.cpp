@@ -240,7 +240,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             auto input_factory = [](xe::ui::Window* window) -> std::vector<std::unique_ptr<xe::hid::InputDriver>> {
                 LOGI("[Emulator] Input factory invoked");
                 if (!window) {
-                    LOGW("[Emulator] Window is null in input factory, returning empty driver list");
+                    LOGI("[Emulator] Window is null in input factory, returning empty driver list");
                     return {};
                 }
     
