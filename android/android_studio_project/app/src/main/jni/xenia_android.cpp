@@ -16,6 +16,7 @@
 #include <sys/prctl.h>
 #include <pthread.h>
 
+#include "xenia/base/main_android.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
 #include "xenia/ui/vulkan/vulkan_provider.h"
@@ -35,6 +36,7 @@
 static std::unique_ptr<xe::Emulator> g_emulator;
 static std::thread g_emulator_thread;
 static std::atomic<bool> g_emulator_running{false};
+static std::atomic<bool> g_android_initialized{false};
 static ANativeWindow* g_native_window = nullptr;
 static std::mutex g_state_mutex;
 static std::condition_variable g_state_condition;
@@ -120,7 +122,7 @@ public:
         } while (attempts < max_attempts && width_out == 0 && height_out == 0);
 
         if (width_out == 0 || height_out == 0) {
-            LOGE("[Surface] CRITICAL: Window size is 0x0 after %d attempts (3 seconds total)! Vulkan swapchain creation will fail!", max_attempts);
+            LOGE("[Surface] CRITICAL: Window size is 0x0 after %d attempts (3 seconds total)!", max_attempts);
             LOGE("[Surface] This usually means the layout hasn't been finalized yet.");
             LOGE("[Surface] Ensure the Activity waits before calling nativeBootGame()");
             flush_logs();
@@ -176,7 +178,7 @@ public:
             flush_logs();
             return nullptr;
         }
-        LOGI("[Window] Creating Xenia Android Surface successfully.");
+        LOGI("[Window] Creating Xenia Android Surface.");
         flush_logs();
         return std::make_unique<xe::ui::AndroidSurface>(g_native_window);
     }
@@ -208,6 +210,26 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
     
     LOGI("[JNI] ========== nativeBootGame called ==========");
     flush_logs();
+    
+    if (!g_android_initialized) {
+        LOGI("[JNI] Initializing Android app from main thread...");
+        flush_logs();
+        
+        try {
+            xe::InitializeAndroidAppFromMainThread(__ANDROID_API__, env, nullptr, nullptr);
+            g_android_initialized = true;
+            LOGI("[JNI] Android initialization complete");
+            flush_logs();
+        } catch (const std::exception& e) {
+            LOGE("[ERROR] Failed to initialize Android app: %s", e.what());
+            flush_logs();
+            return;
+        } catch (...) {
+            LOGE("[ERROR] Unknown exception during Android initialization");
+            flush_logs();
+            return;
+        }
+    }
     
     const char* game_path = env->GetStringUTFChars(jgame_path, nullptr);
     if (!game_path) {
@@ -350,6 +372,10 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                     LOGE("[ERROR]   Failed to create NopAudioSystem: %s", e.what());
                     flush_logs();
                     return nullptr;
+                } catch (...) {
+                    LOGE("[ERROR]   Failed to create NopAudioSystem: unknown exception");
+                    flush_logs();
+                    return nullptr;
                 }
             };
 
@@ -390,48 +416,48 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 return drivers;
             };
 
-            LOGI("[Emulator] Step ?: Creating display window...");
+            LOGI("[Emulator] Step 8: Creating display window...");
             flush_logs();
             try {
                 g_display_window = std::make_unique<AndroidDisplayWindow>(g_app_context);
-                LOGI("[Emulator] Step ?: Display window created successfully");
+                LOGI("[Emulator] Step 8: Display window created successfully");
                 flush_logs();
             } catch (const std::exception& e) {
-                LOGE("[ERROR] Step ? FAILED: Failed to create display window: %s", e.what());
+                LOGE("[ERROR] Step 8 FAILED: Failed to create display window: %s", e.what());
                 LOGE("[ERROR] Exception type: %s", typeid(e).name());
                 flush_logs();
                 g_emulator_running = false;
                 g_state_condition.notify_all();
                 return;
             } catch (...) {
-                LOGE("[ERROR] Step ? FAILED: Unknown exception creating display window");
+                LOGE("[ERROR] Step 8 FAILED: Unknown exception creating display window");
                 flush_logs();
                 g_emulator_running = false;
                 g_state_condition.notify_all();
                 return;
             }
 
-            LOGI("[Emulator] Step 0: Mounting standard drives...");
+            LOGI("[Emulator] Step 9: Mounting standard drives...");
             flush_logs();
             try {
                 if (!g_emulator) {
-                    LOGE("[ERROR] Step 0: g_emulator is null!");
+                    LOGE("[ERROR] Step 9: g_emulator is null!");
                     flush_logs();
                     g_emulator_running = false;
                     g_state_condition.notify_all();
                     return;
                 }
                 g_emulator->MountStandardDrives();
-                LOGI("[Emulator] Step 0: Standard drives mounted successfully");
+                LOGI("[Emulator] Step 9: Standard drives mounted successfully");
                 flush_logs();
             } catch (const std::exception& e) {
-                LOGE("[ERROR] Step 0 FAILED: Failed to mount drives: %s", e.what());
+                LOGE("[ERROR] Step 9 FAILED: Failed to mount drives: %s", e.what());
                 flush_logs();
                 g_emulator_running = false;
                 g_state_condition.notify_all();
                 return;
             } catch (...) {
-                LOGE("[ERROR] Step 0 FAILED: Unknown exception mounting drives");
+                LOGE("[ERROR] Step 9 FAILED: Unknown exception mounting drives");
                 flush_logs();
                 g_emulator_running = false;
                 g_state_condition.notify_all();
@@ -456,16 +482,16 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 LOGE("[ERROR] Exception type: %s", typeid(e).name());
                 flush_logs();
                 g_emulator_running = false;
-                g_display_window.reset();
-                g_emulator.reset();
+                if (g_display_window) g_display_window.reset();
+                if (g_emulator) g_emulator.reset();
                 g_state_condition.notify_all();
                 return;
             } catch (...) {
                 LOGE("[ERROR] Step 10 FAILED: Unknown exception during Setup");
                 flush_logs();
                 g_emulator_running = false;
-                g_display_window.reset();
-                g_emulator.reset();
+                if (g_display_window) g_display_window.reset();
+                if (g_emulator) g_emulator.reset();
                 g_state_condition.notify_all();
                 return;
             }
@@ -474,8 +500,8 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 LOGE("[ERROR] Step 10: Setup failed with code: 0x%08X", setup_result);
                 flush_logs();
                 g_emulator_running = false;
-                g_display_window.reset();
-                g_emulator.reset();
+                if (g_display_window) g_display_window.reset();
+                if (g_emulator) g_emulator.reset();
                 g_state_condition.notify_all();
                 return;
             }
@@ -522,7 +548,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 return;
             }
 
-            LOGI("[Emulator] Step 12: Game launched! Entering WaitUntilExit() loop...");
+            LOGI("[Emulator] Step 12: Game launched! Entering main loop...");
             flush_logs();
             try {
                 auto last_heartbeat = std::chrono::steady_clock::now();
@@ -539,10 +565,10 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 LOGI("[Emulator] Step 12: Game loop exited");
                 flush_logs();
             } catch (const std::exception& e) {
-                LOGE("[ERROR] Step 12 FAILED: Exception in WaitUntilExit: %s", e.what());
+                LOGE("[ERROR] Step 12 FAILED: Exception in main loop: %s", e.what());
                 flush_logs();
             } catch (...) {
-                LOGE("[ERROR] Step 12 FAILED: Unknown exception in WaitUntilExit");
+                LOGE("[ERROR] Step 12 FAILED: Unknown exception in main loop");
                 flush_logs();
             }
 
@@ -666,6 +692,23 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeShutdown(
         g_native_window = nullptr;
         LOGI("[JNI] Native window released");
         flush_logs();
+    }
+
+    if (g_android_initialized) {
+        LOGI("[JNI] Shutting down Android app...");
+        flush_logs();
+        try {
+            xe::ShutdownAndroidAppFromMainThread();
+            g_android_initialized = false;
+            LOGI("[JNI] Android app shutdown complete");
+            flush_logs();
+        } catch (const std::exception& e) {
+            LOGE("[ERROR] Exception during Android shutdown: %s", e.what());
+            flush_logs();
+        } catch (...) {
+            LOGE("[ERROR] Unknown exception during Android shutdown");
+            flush_logs();
+        }
     }
 
     LOGI("[JNI] ========== SHUTDOWN COMPLETE ==========");
