@@ -135,7 +135,7 @@ public class WindowDemoActivity extends AppCompatActivity implements SurfaceHold
                 if (surfaceReady && gamePath != null && mActiveSurface != null) {
                     launchGame(mActiveSurface);
                 }
-            }, 100);
+            }, 500);
         }
     }
 
