@@ -462,9 +462,15 @@ X_STATUS Emulator::SetupSubsystems() {
     // Presentation is requested even without a display window - the windowless
     // presenter is what offscreen hosts like the trace dump capture guest
     // output through.
+#if XE_PLATFORM_ANDROID
+    const bool request_presentation = false;
+#else
+    const bool request_presentation = true;
+#endif
     result = graphics_system_->Setup(
         processor_.get(), kernel_state_.get(),
-        display_window_ ? &display_window_->app_context() : nullptr, true);
+        display_window_ ? &display_window_->app_context() : nullptr,
+        request_presentation);
     if (result) {
       XELOGE("{}: Failed to setup graphics_system!", __func__);
       return result;
