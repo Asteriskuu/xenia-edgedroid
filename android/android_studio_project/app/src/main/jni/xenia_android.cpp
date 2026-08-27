@@ -61,7 +61,7 @@ public:
         }
         
         int attempts = 0;
-        const int max_attempts = 10;
+        const int max_attempts = 30;
         
         do {
             width_out = static_cast<uint32_t>(ANativeWindow_getWidth(window_));
@@ -74,7 +74,7 @@ public:
             }
             
             if (attempts < max_attempts - 1) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
             attempts++;
         } while (attempts < max_attempts && width_out == 0 && height_out == 0);
@@ -269,15 +269,7 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             LOGI("[Emulator] Step 5: Setting up graphics factory...");
             flush_logs();
             auto graphics_factory = []() -> std::unique_ptr<xe::gpu::GraphicsSystem> {
-                LOGI("[Emulator]   Graphics factory invoked: probing Vulkan provider...");
-                flush_logs();
-                auto probe = xe::ui::vulkan::VulkanProvider::Create(false, true);
-                if (!probe) {
-                    LOGE("[ERROR]   Vulkan provider probe FAILED - Vulkan not available on this device");
-                    flush_logs();
-                    return nullptr;
-                }
-                LOGI("[Emulator]   Vulkan provider probe succeeded");
+                LOGI("[Emulator]   Graphics factory invoked: creating VulkanGraphicsSystem...");
                 flush_logs();
                 try {
                     auto graphics_sys = std::make_unique<xe::gpu::vulkan::VulkanGraphicsSystem>();
@@ -286,6 +278,10 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                     return graphics_sys;
                 } catch (const std::exception& e) {
                     LOGE("[ERROR]   Failed to create VulkanGraphicsSystem: %s", e.what());
+                    flush_logs();
+                    return nullptr;
+                } catch (...) {
+                    LOGE("[ERROR]   Failed to create VulkanGraphicsSystem: unknown exception");
                     flush_logs();
                     return nullptr;
                 }
