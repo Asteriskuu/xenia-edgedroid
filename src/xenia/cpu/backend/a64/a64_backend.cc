@@ -1010,7 +1010,7 @@ A64Backend::A64Backend() {
   // to an OS-chosen address if none is available. macOS rejects fixed
   // PROT_EXEC mappings in this range, so skip the scan entirely there.
   void* buf = nullptr;
-#if !XE_PLATFORM_MAC
+#if !XE_PLATFORM_MAC && !XE_PLATFORM_ANDROID
   for (uint32_t base_address = 0x10000; base_address < 0x80000000;
        base_address += 65536) {
     buf = memory::AllocFixed(
