@@ -12,6 +12,9 @@
 #include <setjmp.h>
 #include <mutex>
 #include <condition_variable>
+#include <unistd.h>
+#include <sys/prctl.h>
+#include <pthread.h>
 
 #include "xenia/emulator.h"
 #include "xenia/gpu/vulkan/vulkan_graphics_system.h"
@@ -40,6 +43,43 @@ static void flush_logs() {
     fflush(stdout);
     fflush(stderr);
     __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[LOG FLUSH]");
+}
+
+static int pfd[2];
+static void *log_redirect_thread_func(void *) {
+    ssize_t rsize;
+    char buf[128];
+    while ((rsize = read(pfd[0], buf, sizeof buf - 1)) > 0) {
+        if (buf[rsize - 1] == '\n') --rsize;
+        buf[rsize] = 0;
+        __android_log_write(ANDROID_LOG_INFO, LOG_TAG, buf);
+    }
+    return 0;
+}
+
+static void init_log_redirect() {
+    if (pipe(pfd) == -1) {
+        __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, "Failed to create pipe for log redirection");
+        return;
+    }
+    
+    int stdout_dup = dup2(pfd[1], STDOUT_FILENO);
+    int stderr_dup = dup2(pfd[1], STDERR_FILENO);
+    
+    if (stdout_dup == -1 || stderr_dup == -1) {
+        __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, "Failed to redirect stdout/stderr");
+        return;
+    }
+    
+    pthread_t tid;
+    if (pthread_create(&tid, nullptr, log_redirect_thread_func, nullptr) != 0) {
+        __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, "Failed to create log redirect thread");
+        return;
+    }
+    pthread_detach(tid);
+    
+    setbuf(stdout, nullptr);
+    setbuf(stderr, nullptr);
 }
 
 namespace xe {
@@ -80,9 +120,9 @@ public:
         } while (attempts < max_attempts && width_out == 0 && height_out == 0);
 
         if (width_out == 0 || height_out == 0) {
-            LOGE("[Surface] CRITICAL: Window size is 0x0 after %d attempts! Vulkan swapchain creation will fail!", max_attempts);
+            LOGE("[Surface] CRITICAL: Window size is 0x0 after %d attempts (3 seconds total)! Vulkan swapchain creation will fail!", max_attempts);
             LOGE("[Surface] This usually means the layout hasn't been finalized yet.");
-            LOGE("[Surface] Ensure the Activity waits for onLayoutChange() before calling nativeBootGame()");
+            LOGE("[Surface] Ensure the Activity waits before calling nativeBootGame()");
             flush_logs();
             return false;
         }
@@ -164,6 +204,8 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
     JNIEnv* env, jobject thiz,
     jstring jgame_path, jobject surface) {
 
+    init_log_redirect();
+    
     LOGI("[JNI] ========== nativeBootGame called ==========");
     flush_logs();
     
@@ -192,6 +234,8 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
     g_emulator_running = true;
 
     g_emulator_thread = std::thread([game_path_str = std::string(game_path), native_window]() {
+        prctl(PR_SET_NAME, (unsigned long)"XeniaEmulator", 0, 0, 0);
+        
         signal(SIGSEGV, segfault_handler);
         signal(SIGABRT, abort_handler);
         signal(SIGTERM, segfault_handler);
@@ -481,8 +525,18 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             LOGI("[Emulator] Step 12: Game launched! Entering WaitUntilExit() loop...");
             flush_logs();
             try {
-                g_emulator->WaitUntilExit();
-                LOGI("[Emulator] Step 12: Game loop exited successfully");
+                auto last_heartbeat = std::chrono::steady_clock::now();
+                while (g_emulator_running) {
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat).count() >= 2) {
+                        LOGI("[Heartbeat] Emulator still running...");
+                        flush_logs();
+                        last_heartbeat = now;
+                    }
+                    
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                LOGI("[Emulator] Step 12: Game loop exited");
                 flush_logs();
             } catch (const std::exception& e) {
                 LOGE("[ERROR] Step 12 FAILED: Exception in WaitUntilExit: %s", e.what());
