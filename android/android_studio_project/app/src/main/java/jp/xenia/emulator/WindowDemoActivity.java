@@ -121,6 +121,10 @@ public class WindowDemoActivity extends AppCompatActivity implements SurfaceHold
             rendererThread.start();
             rendererHandler = new Handler(rendererThread.getLooper());
         }
+
+        if (surfaceReady && gamePath != null && mActiveSurface != null) {
+            launchGame(mActiveSurface);
+        }
     }
 
     @Override
@@ -131,11 +135,6 @@ public class WindowDemoActivity extends AppCompatActivity implements SurfaceHold
 
         if (width > 0 && height > 0 && !layoutReady) {
             layoutReady = true;
-            surfaceView.postDelayed(() -> {
-                if (surfaceReady && gamePath != null && mActiveSurface != null) {
-                    launchGame(mActiveSurface);
-                }
-            }, 500);
         }
     }
 
