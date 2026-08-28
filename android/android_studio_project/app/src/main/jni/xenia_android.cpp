@@ -173,14 +173,22 @@ public:
     void RequestPaintImpl() override {}
 
     std::unique_ptr<xe::ui::Surface> CreateSurfaceImpl(xe::ui::Surface::TypeFlags allowed_types) override {
-        if (!g_native_window) {
-            LOGE("[Window] ANativeWindow is null! Surface cannot be created.");
+        try {
+            auto& android_app_context = static_cast<const xe::ui::AndroidWindowedAppContext&>(app_context());
+            ANativeWindow* activity_window_surface = android_app_context.GetWindowSurface();
+            if (!activity_window_surface) {
+                LOGE("[Window] Activity ANativeWindow is null! Surface cannot be created.");
+                flush_logs();
+                return nullptr;
+            }
+            LOGI("[Window] Creating Xenia Android Surface (from app context).");
+            flush_logs();
+            return std::make_unique<xe::ui::AndroidSurface>(activity_window_surface);
+        } catch (...) {
+            LOGE("[Window] Error getting activity window surface from app context");
             flush_logs();
             return nullptr;
         }
-        LOGI("[Window] Creating Xenia Android Surface.");
-        flush_logs();
-        return std::make_unique<xe::ui::AndroidSurface>(g_native_window);
     }
 };
 static std::unique_ptr<AndroidDisplayWindow> g_display_window;
