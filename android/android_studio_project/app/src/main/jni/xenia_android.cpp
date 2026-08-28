@@ -188,8 +188,9 @@ static std::unique_ptr<AndroidDisplayWindow> g_display_window;
 static void segfault_handler(int sig) {
     LOGE("[CRASH] Segmentation fault caught in emulator thread! (signal %d)", sig);
     flush_logs();
-    g_emulator_running = false;
-    g_state_condition.notify_all();
+
+    signal(sig, SIG_DFL);
+    raise(sig);
 }
 
 static void abort_handler(int sig) {
