@@ -463,7 +463,7 @@ X_STATUS Emulator::SetupSubsystems() {
     // presenter is what offscreen hosts like the trace dump capture guest
     // output through.
 #if XE_PLATFORM_ANDROID
-    const bool request_presentation = false;
+    const bool request_presentation = true;
 #else
     const bool request_presentation = true;
 #endif
