@@ -25,6 +25,7 @@
 #include "xenia/config.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/windowed_app_context.h"
+#include "xenia/ui/windowed_app_context_android.h"
 #include "xenia/ui/surface.h"
 
 #define LOG_TAG "XeniaAndroid"
