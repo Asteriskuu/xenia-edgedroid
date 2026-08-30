@@ -447,33 +447,6 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
                 return;
             }
 
-            LOGI("[Emulator] Step 9: Mounting standard drives...");
-            flush_logs();
-            try {
-                if (!g_emulator) {
-                    LOGE("[ERROR] Step 9: g_emulator is null!");
-                    flush_logs();
-                    g_emulator_running = false;
-                    g_state_condition.notify_all();
-                    return;
-                }
-                g_emulator->MountStandardDrives();
-                LOGI("[Emulator] Step 9: Standard drives mounted successfully");
-                flush_logs();
-            } catch (const std::exception& e) {
-                LOGE("[ERROR] Step 9 FAILED: Failed to mount drives: %s", e.what());
-                flush_logs();
-                g_emulator_running = false;
-                g_state_condition.notify_all();
-                return;
-            } catch (...) {
-                LOGE("[ERROR] Step 9 FAILED: Unknown exception mounting drives");
-                flush_logs();
-                g_emulator_running = false;
-                g_state_condition.notify_all();
-                return;
-            }
-
             LOGI("[Emulator] Step 10: Calling g_emulator->Setup()...");
             LOGD("[Emulator]   g_display_window: %p", g_display_window.get());
             LOGD("[Emulator]   g_emulator: %p", g_emulator.get());
@@ -517,6 +490,33 @@ Java_jp_xenia_emulator_WindowDemoActivity_nativeBootGame(
             }
             LOGI("[Emulator] Step 10: Setup completed successfully");
             flush_logs();
+
+            LOGI("[Emulator] Step 9: Mounting standard drives...");
+            flush_logs();
+            try {
+                if (!g_emulator) {
+                    LOGE("[ERROR] Step 9: g_emulator is null!");
+                    flush_logs();
+                    g_emulator_running = false;
+                    g_state_condition.notify_all();
+                    return;
+                }
+                g_emulator->MountStandardDrives();
+                LOGI("[Emulator] Step 9: Standard drives mounted successfully");
+                flush_logs();
+            } catch (const std::exception& e) {
+                LOGE("[ERROR] Step 9 FAILED: Failed to mount drives: %s", e.what());
+                flush_logs();
+                g_emulator_running = false;
+                g_state_condition.notify_all();
+                return;
+            } catch (...) {
+                LOGE("[ERROR] Step 9 FAILED: Unknown exception mounting drives");
+                flush_logs();
+                g_emulator_running = false;
+                g_state_condition.notify_all();
+                return;
+            }
 
             LOGI("[Emulator] Step 11: Launching game with LaunchPath()...");
             LOGI("[Emulator]   Path: %s", game_path_str.c_str());
